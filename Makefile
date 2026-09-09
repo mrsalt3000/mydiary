@@ -9,7 +9,7 @@ VENV_PYTEST  := $(VENV)/bin/pytest
 VENV_RUFF    := $(VENV)/bin/ruff
 VENV_MYPY    := $(VENV)/bin/mypy
 
-.PHONY: install dev test lint typecheck format
+.PHONY: install dev migrate test lint typecheck format
 
 ## install — create .venv on Python 3.12 and install the package with dev extras
 install:
@@ -19,6 +19,10 @@ install:
 ## dev — run the application locally with auto-reload
 dev:
 	$(VENV_UVICORN) diary.main:app --host 127.0.0.1 --port 8000 --reload
+
+## migrate — apply Alembic migrations to the application database (data/db/diary.db)
+migrate:
+	$(VENV)/bin/alembic upgrade head
 
 ## test — run the test suite
 test:
