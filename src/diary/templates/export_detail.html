@@ -1,0 +1,198 @@
+{# Per-export lineage detail page (Task 16).
+
+   Shows one original export revision: header + downloads, sibling revisions
+   of the same week with the "new revision" (re-export) action, the run
+   actions (normalize / summarize / wellbeing), then the lineage sections
+   original → normalized → summary/wellbeing (all artifact versions with
+   parent captions, sha prefixes, times and download links) and the list of
+   processing runs.
+
+   Safety rules:
+   - diary text is never rendered on this page — only server-derived names,
+     hashes (prefix), statuses and safe error summaries, all escaped;
+   - artifact/run values come from the database; download URLs are always
+     /api/v1/... routes; the wellbeing run action is gated by the feature
+     switch and requires an explicit confirmation checkbox;
+   - external-provider consent is rendered only for external profiles
+     (server-detected). #}
+{% extends "base.html" %}
+{% from "_diary_action.html" import diary_action %}
+{% block title %}Детали выгрузки — Local Diary{% endblock %}
+{% block content %}
+<main class="exports-page export-detail-page">
+  <nav class="page-nav">
+    <a href="/exports">← К выгрузкам</a>
+    <a href="/processing">Обработка</a>
+  </nav>
+  <h1 class="page-title">Детали выгрузки</h1>
+
+  <p class="exports-page__note">
+    Выгрузка <span class="export-list__name">{{ export.filename }}</span>
+    (неделя {{ export.monday.strftime('%d.%m.%Y') }} —
+    {{ export.sunday.strftime('%d.%m.%Y') }}, номер
+    {{ '%04d'|format(export.seq_number) }}, ревизия r{{ export.revision }},
+    создано {{ export.created_at_display }}).
+    <a href="{{ export.download_url }}" download="{{ export.filename }}">
+      Скачать оригинал
+    </a>
+    · <a href="{{ export.compare_url }}">Сравнение: оригинал и нормализация</a>
+  </p>
+
+  {% if siblings %}
+  <p class="exports-page__note">
+    Ревизии недели:
+    {% for sibling in siblings %}
+      {% if sibling.current %}
+      <strong>r{{ sibling.revision }}</strong>{% if not loop.last %},{% endif %}
+      {% else %}
+      <a href="{{ sibling.detail_url }}">r{{ sibling.revision }}</a>{% if not loop.last %},{% endif %}
+      {% endif %}
+    {% endfor %}
+  </p>
+  {% endif %}
+
+  <section class="export-week__reexport">
+    {{ diary_action(
+         'reexport', '', '/api/v1/exports/weeks/' ~ export.sunday.isoformat() ~ '/re-export',
+         'Новая ревизия',
+         'Будет создана новая ревизия (r' ~ (export.revision + 1) ~ ') оригинала этой недели. '
+         'Предыдущие файлы не изменяются.',
+         submit_label='Создать ревизию',
+         extra_confirm='Я понимаю: будет создана новая ревизия оригинала этой недели; предыдущие файлы не изменяются.') }}
+  </section>
+
+  {% if not wellbeing_enabled %}
+  <p class="exports-page__notice">
+    Wellbeing-анализ отключён в настройках приложения. Ранее созданные
+    отчёты остаются доступными.
+  </p>
+  {% endif %}
+
+  {% set ext_norm = external['normalize'] %}
+  {% set ext_summ = external['summarize'] %}
+  {% set ext_wb = external['wellbeing'] %}
+  <section class="export-week__actions" aria-label="Запустить обработку">
+    {{ diary_action(
+         'normalize', export.id, '/api/v1/pipelines/normalize/runs',
+         'Нормализовать',
+         'Нормализация (слой 2) приводит текст выгрузки к единому виду без '
+         'изменения смысла. Повторный запуск создаёт новую версию.',
+         external=ext_norm.external, external_host=ext_norm.host,
+         external_model=ext_norm.model,
+         disabled=(not export.original_present),
+         disabled_reason=('Файл оригинала отсутствует.' if not export.original_present else ''),
+         active_job=export.active_jobs.normalize or '') }}
+    {{ diary_action(
+         'summarize', export.id, '/api/v1/pipelines/summarize/runs',
+         'Саммари',
+         'Саммаризация (слой 3) строит краткое резюме недели из '
+         'нормализованного текста.',
+         external=ext_summ.external, external_host=ext_summ.host,
+         external_model=ext_summ.model,
+         disabled=(not export.has_normalized),
+         disabled_reason=('Нужна нормализация (слой 2).' if not export.has_normalized else ''),
+         active_job=export.active_jobs.summarize or '') }}
+    {% if wellbeing_enabled %}
+    {{ diary_action(
+         'wellbeing', export.id, '/api/v1/pipelines/wellbeing/runs',
+         'Wellbeing',
+         'Wellbeing-рефлексия (слой 4) — поддерживающий текст на основе '
+         'только нормализованных записей недели. Запуск требует явного '
+         'подтверждения.',
+         submit_label='Подтверждаю и запускаю',
+         external=ext_wb.external, external_host=ext_wb.host,
+         external_model=ext_wb.model,
+         wellbeing=true,
+         disabled=(not export.has_normalized),
+         disabled_reason=('Нужна нормализация (слой 2).' if not export.has_normalized else ''),
+         active_job=export.active_jobs.wellbeing or '') }}
+    {% endif %}
+  </section>
+
+  <section class="export-week__lineage" aria-label="Происхождение по слоям">
+    {% for section in sections %}
+    <section class="lineage-block">
+      <h2 class="lineage-block__title">{{ section.title }}</h2>
+      {% if section.input_note %}
+      <p class="lineage-block__note">{{ section.input_note }}</p>
+      {% endif %}
+      {% if section.rows %}
+        {% for row in section.rows %}
+        <div class="lineage-row">
+          <p class="lineage-row__name">
+            <code>{{ row.filename }}</code>
+            {% if row.version_label %}<span class="lineage-row__tag">{{ row.version_label }}</span>{% endif %}
+            {% if row.revision_label %}<span class="lineage-row__tag">{{ row.revision_label }}</span>{% endif %}
+          </p>
+          {% if row.parent_caption %}
+          <p class="lineage-row__meta">{{ row.parent_caption }}</p>
+          {% endif %}
+          <p class="lineage-row__meta">
+            Создано: {{ row.created_display }}
+            {% if row.sha_prefix %} · sha256 {{ row.sha_prefix }}…{% endif %}
+            {% if row.run_status_label %} · прогон: {{ row.run_status_label }}{% endif %}
+          </p>
+          {% if row.file_present %}
+          <p class="lineage-row__meta">
+            <a href="{{ row.download_url }}" download="{{ row.filename }}">Скачать файл</a>
+          </p>
+          {% else %}
+          <p class="lineage-row__meta lineage-row__meta--warn">Файл отсутствует на диске.</p>
+          {% endif %}
+        </div>
+        {% endfor %}
+      {% elif section.empty_message %}
+      <p class="compare-block__empty">{{ section.empty_message }}</p>
+      {% endif %}
+    </section>
+    {% endfor %}
+  </section>
+
+  <section class="export-week__runs" aria-label="Прогоны обработки">
+    <h2 class="lineage-block__title">Прогоны обработки</h2>
+    {% if runs %}
+    <table class="runs-table">
+      <thead>
+        <tr>
+          <th>Тип</th>
+          <th>Статус</th>
+          <th>Промпт</th>
+          <th>Ошибка</th>
+          <th>Создан</th>
+          <th>Завершён</th>
+          <th>Результат</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for run in runs %}
+        <tr class="runs-table__row runs-table__row--{{ run.status }}">
+          <td>{{ run.label }}</td>
+          <td><span class="job-status job-status--{{ run.status }}">{{ run.status_label }}</span></td>
+          <td>{{ run.prompt_version or '—' }}</td>
+          <td>{% if run.error_summary %}<span class="run-error">{{ run.error_summary }}</span>{% else %}—{% endif %}</td>
+          <td>{{ run.created_display }}</td>
+          <td>{{ run.finished_display or '—' }}</td>
+          <td>
+            {% if run.output %}
+            <a href="{{ run.output.download_url }}" download="{{ run.output.filename }}">
+              {{ run.output.filename }}
+            </a>
+            {% else %}
+            —
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="jobs-panel__empty">
+      Прогонов обработки для этой выгрузки ещё не было.
+    </p>
+    {% endif %}
+  </section>
+</main>
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/exports.js" defer></script>
+{% endblock %}

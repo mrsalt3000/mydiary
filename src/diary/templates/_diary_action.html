@@ -1,0 +1,99 @@
+{# One explicit diary action (Task 16).
+
+   Renders an "open" button that reveals an inline confirmation panel with
+   optional required checkboxes — external-provider consent, the wellbeing
+   disclaimer and/or a revision warning — and a submit button that POSTs to
+   the given JSON API ``url``. The client (``static/js/exports.js``) then
+   polls the returned job and reloads the page on success.
+
+   Safety rules:
+   - the action never runs inside a page request: the form POSTs to the JSON
+     API and the job is polled locally;
+   - every server value (export id, URL, external host/model) is inserted via
+     Jinja variables and escaped by autoescape; no diary content appears;
+   - external-provider disclosure appears only when the caller passes an
+     ``external`` profile (host/model are configuration values, never
+     secrets).
+
+   Parameters (all Jinja values are already server-derived):
+   - ``action``: normalize | summarize | wellbeing | reexport (behaviour key);
+   - ``export_id``: export row id (empty for week-scoped actions);
+   - ``url``: JSON API endpoint the submit POSTs to;
+   - ``label``: visible button text;
+   - ``note``: description shown in the confirmation panel;
+   - ``submit_label``: text of the confirm/submit button;
+   - ``external`` / ``external_host`` / ``external_model``: external
+     disclosure checkbox + warning when the profile is external;
+   - ``wellbeing``: adds the wellbeing disclaimer checkbox;
+   - ``extra_confirm``: text of an additional required checkbox;
+   - ``disabled`` / ``disabled_reason``: gated-off state (shown with hint);
+   - ``active_job``: an in-flight job id (polling resumes on page load and
+     the trigger is disabled). #}
+{% macro diary_action(action, export_id, url, label, note,
+                      submit_label='Запустить',
+                      external=false, external_host='', external_model='',
+                      wellbeing=false, extra_confirm='',
+                      disabled=false, disabled_reason='',
+                      active_job='') -%}
+<form class="diary-action" method="post"
+      data-action="{{ action }}"
+      data-export-id="{{ export_id }}"
+      data-url="{{ url }}"
+      data-label="{{ label }}"
+      {% if external %}data-external="1"{% endif %}
+      {% if active_job %}data-active-job="{{ active_job }}"{% endif %}>
+  <div class="diary-action__trigger">
+    <button type="button" class="diary-action__open" data-role="open"
+            {% if disabled or active_job %}disabled{% endif %}>{{ label }}</button>
+    {% if disabled_reason %}
+    <span class="diary-action__hint">{{ disabled_reason }}</span>
+    {% endif %}
+  </div>
+  <div class="diary-action__panel" data-role="panel" hidden>
+    <p class="diary-action__note">{{ note }}</p>
+    {% if external %}
+    <p class="diary-action__warning" role="note">
+      Внимание: текст этой недели будет отправлен внешнему провайдеру
+      {%- if external_host %} <code>{{ external_host }}</code>{% endif %}
+      (модель «{{ external_model }}») за пределы этого устройства.
+    </p>
+    <p class="diary-action__check">
+      <label>
+        <input type="checkbox" data-role="confirm-external">
+        Я понимаю и согласен: обработку выполнит внешний провайдер.
+      </label>
+    </p>
+    {% endif %}
+    {% if wellbeing %}
+    <p class="diary-action__check">
+      <label>
+        <input type="checkbox" data-role="confirm-wellbeing">
+        Я понимаю: это не медицинский и не психологический диагноз и не
+        замена профессиональной помощи. Рефлексия основана только на
+        записях дневника за этот период.
+      </label>
+    </p>
+    {% endif %}
+    {% if extra_confirm %}
+    <p class="diary-action__check">
+      <label>
+        <input type="checkbox" data-role="confirm-extra">
+        {{ extra_confirm }}
+      </label>
+    </p>
+    {% endif %}
+    <div class="diary-action__buttons">
+      <button type="button" data-role="cancel">Отмена</button>
+      <button type="submit" data-role="submit" disabled>{{ submit_label }}</button>
+    </div>
+    <p data-role="status" class="diary-action__status" role="status" hidden></p>
+    <p data-role="error" class="form-error" role="alert" hidden></p>
+  </div>
+  <noscript>
+    <p class="noscript-note">
+      Для запуска нужен включённый JavaScript: действие и подтверждение
+      выполняются клиентским кодом.
+    </p>
+  </noscript>
+</form>
+{%- endmacro %}

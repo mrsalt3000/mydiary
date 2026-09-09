@@ -1,50 +1,176 @@
-{# Minimal weekly-exports page (Task 10). Lists created original exports and
-   offers a download link for each. The full exports-management page (actions,
-   re-export, per-layer lineage) is Task 16; this page is intentionally plain.
+{# Weekly exports management page (Task 16).
+
+   Groups original exports by week (most recent week first). Per week: an
+   export-week form, the "new revision" (re-export) action and one card per
+   revision with the derived-layer statuses, run actions and downloads.
 
    Safety rules:
-   - every value comes from the database / is derived server-side; the
-     download URL is always /api/v1/exports/<uuid>/file — never a user path;
-   - Jinja2 autoescape is on for .html files; file names are derived by the
-     backend from the (week, seq, revision) row, never from user input. #}
+   - every value comes from the database or is derived server-side; download
+     URLs are always /api/v1/... routes — never user paths;
+   - Jinja2 autoescape is on; file names are derived by the backend from the
+     (week, seq, revision) row, never from user input; no diary text appears;
+   - the wellbeing run action is rendered only when the feature is enabled;
+   - external-provider consent is rendered only for external profiles
+     (server-detected; a missing config file means "local" — no warning). #}
 {% extends "base.html" %}
+{% from "_diary_action.html" import diary_action %}
 {% block title %}Выгрузки — Local Diary{% endblock %}
 {% block content %}
 <main class="exports-page">
-  <p class="page-nav"><a href="/">← Дневник</a></p>
+  <nav class="page-nav">
+    <a href="/">← Дневник</a>
+    <a href="/processing">Обработка</a>
+  </nav>
   <h1 class="page-title">Недельные выгрузки</h1>
 
-  {% if exports %}
-  <p class="exports-page__note">
-    Оригинальные выгрузки недель (слой 1). Скачивание — по ссылке; управление
-    выгрузками появится позже.
+  <section class="export-week-form-block" aria-label="Выгрузить неделю">
+    <form class="export-week-form" method="post">
+      <label for="export-week-sunday">Неделя для выгрузки — дата воскресенья
+        (по умолчанию — текущая):</label>
+      <div class="export-week-form__row">
+        <input type="date" id="export-week-sunday" name="sunday"
+               value="{{ default_sunday }}" required>
+        <button type="submit">Выгрузить неделю</button>
+      </div>
+      <p data-role="error" class="form-error" role="alert" hidden></p>
+      <noscript>
+        <p class="noscript-note">
+          Для создания выгрузки нужен включённый JavaScript.
+        </p>
+      </noscript>
+    </form>
+  </section>
+
+  {% if not wellbeing_enabled %}
+  <p class="exports-page__notice">
+    Wellbeing-анализ отключён в настройках приложения. Ранее созданные
+    отчёты остаются доступными.
   </p>
-  <ul class="export-list">
-    {% for export in exports %}
-    <li class="export-list__item">
-      <span class="export-list__name">{{ export.filename }}</span>
-      <span class="export-list__meta">
-        Неделя {{ export.monday.strftime('%d.%m.%Y') }} —
-        {{ export.sunday.strftime('%d.%m.%Y') }},
-        ревизия r{{ export.revision }},
-        создано {{ export.created_at_display }}
-      </span>
-      <span class="export-actions">
+  {% endif %}
+
+  {% if weeks %}
+  <p class="exports-page__note">
+    Оригинальные выгрузки недель (слой 1) с ревизиями и статусами производных
+    слоёв. Действия запускают задачи — статусы видны здесь и на странице
+    «Обработка».
+  </p>
+
+  {% set ext_norm = external['normalize'] %}
+  {% set ext_summ = external['summarize'] %}
+  {% set ext_wb = external['wellbeing'] %}
+  {% for week in weeks %}
+  <section class="export-week" aria-label="Неделя {{ week.sunday_iso }}">
+    <h2 class="export-week__title">
+      Неделя {{ week.monday.strftime('%d.%m.%Y') }} —
+      {{ week.sunday.strftime('%d.%m.%Y') }}
+    </h2>
+    <div class="export-week__reexport">
+      {{ diary_action(
+           'reexport', '', '/api/v1/exports/weeks/' ~ week.sunday_iso ~ '/re-export',
+           'Новая ревизия', 'Будет создана новая ревизия (r' ~ (week.exports|length + 1) ~
+           ') оригинала этой недели. Предыдущие файлы не изменяются.',
+           submit_label='Создать ревизию',
+           extra_confirm='Я понимаю: будет создана новая ревизия оригинала этой недели; предыдущие файлы не изменяются.') }}
+    </div>
+
+    {% for export in week.exports %}
+    <article class="export-card">
+      <header class="export-card__head">
+        <a class="export-list__name" href="{{ export.detail_url }}"
+           title="Детали выгрузки">{{ export.filename }}</a>
+        <span class="export-card__meta">
+          Номер {{ '%04d'|format(export.seq_number) }}, ревизия r{{ export.revision }},
+          создано {{ export.created_at_display }}
+        </span>
+      </header>
+
+      <p class="export-card__statuses">
+        {% for layer in export.derived %}
+        <span class="derived-chip {% if layer.has_artifact %}derived-chip--present{% endif %}"
+              title="{% if layer.has_artifact %}Последняя версия: {{ layer.artifact.version_label }}.{% else %}Нет результата этого слоя.{% endif %} {% if layer.last_run_label %}Последний прогон: {{ layer.last_run_label }}.{% endif %}">
+          {{ layer.short_label }}:
+          {% if layer.has_artifact and layer.artifact %}
+            {{ layer.artifact.version_label }}
+          {% else %}
+            нет
+          {% endif %}
+          {% if layer.last_run_status == 'failed' %}
+            <span class="derived-chip__bad">· {{ layer.last_run_label }}</span>
+          {% elif layer.last_run_status %}
+            · {{ layer.last_run_label }}
+          {% endif %}
+        </span>
+        {% endfor %}
+      </p>
+
+      <div class="export-actions export-card__actions">
+        {{ diary_action(
+             'normalize', export.id, '/api/v1/pipelines/normalize/runs',
+             'Нормализовать',
+             'Нормализация (слой 2) приводит текст выгрузки к единому виду '
+             'без изменения смысла. Повторный запуск создаёт новую версию.',
+             external=ext_norm.external, external_host=ext_norm.host,
+             external_model=ext_norm.model,
+             disabled=(not export.original_present),
+             disabled_reason=('Файл оригинала отсутствует.' if not export.original_present else ''),
+             active_job=export.active_jobs.normalize or '') }}
+        {{ diary_action(
+             'summarize', export.id, '/api/v1/pipelines/summarize/runs',
+             'Саммари',
+             'Саммаризация (слой 3) строит краткое резюме недели из '
+             'нормализованного текста.',
+             external=ext_summ.external, external_host=ext_summ.host,
+             external_model=ext_summ.model,
+             disabled=(not export.has_normalized),
+             disabled_reason=('Нужна нормализация (слой 2).' if not export.has_normalized else ''),
+             active_job=export.active_jobs.summarize or '') }}
+        {% if wellbeing_enabled %}
+        {{ diary_action(
+             'wellbeing', export.id, '/api/v1/pipelines/wellbeing/runs',
+             'Wellbeing',
+             'Wellbeing-рефлексия (слой 4) — поддерживающий текст на основе '
+             'только нормализованных записей недели. Запуск требует явного '
+             'подтверждения.',
+             submit_label='Подтверждаю и запускаю',
+             external=ext_wb.external, external_host=ext_wb.host,
+             external_model=ext_wb.model,
+             wellbeing=true,
+             disabled=(not export.has_normalized),
+             disabled_reason=('Нужна нормализация (слой 2).' if not export.has_normalized else ''),
+             active_job=export.active_jobs.wellbeing or '') }}
+        {% endif %}
+      </div>
+
+      <footer class="export-card__links">
+        <a href="{{ export.detail_url }}">Детали и происхождение</a>
         <a href="{{ export.compare_url }}">Сравнить с нормализованным</a>
         <a href="{{ export.summary_url }}">Саммари недели</a>
         <a href="{{ export.wellbeing_url }}">Wellbeing-рефлексия</a>
+        {% for layer in export.derived %}
+          {% if layer.artifact and layer.artifact.file_present %}
+          <a href="{{ layer.artifact.download_url }}"
+             download="{{ layer.artifact.filename }}">
+            Скачать {{ layer.short_label|lower }} ({{ layer.artifact.version_label }})
+          </a>
+          {% endif %}
+        {% endfor %}
         <a href="{{ export.download_url }}" download="{{ export.filename }}">
           Скачать выгрузку
         </a>
-      </span>
-    </li>
+      </footer>
+    </article>
     {% endfor %}
-  </ul>
+  </section>
+  {% endfor %}
+
   {% else %}
   <p class="export-list__empty">
     Выгрузок пока нет. Недельная выгрузка создаётся, когда в неделе есть
-    записи.
+    записи: укажите дату воскресенья недели выше и нажмите «Выгрузить неделю».
   </p>
   {% endif %}
 </main>
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/exports.js" defer></script>
 {% endblock %}

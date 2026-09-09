@@ -266,14 +266,17 @@ class PipelineRunCreate(BaseModel):
 class WellbeingRunCreate(BaseModel):
     """Request body of ``POST /api/v1/pipelines/wellbeing/runs``.
 
-    Wellbeing analysis is always an explicit user action (AGENTS.md §16): in
-    addition to ``export_id`` the body must carry ``confirm: true``. Without
-    it the server rejects the request (HTTP 409); the UI enforces its own
-    client-side confirmation on top of this flag (double protection).
+    Wellbeing analysis is always an explicit user action (AGENTS.md §16): the
+    body must carry ``export_id`` and ``confirm: true``. ``confirm`` defaults
+    to ``False`` so that a missing or ``false`` flag reaches the domain guard
+    and is rejected with a clear HTTP 409 (never a 422 schema error — a
+    missing field is a missing confirmation, not a malformed request). The UI
+    enforces its own client-side confirmation on top of this flag (double
+    protection).
     """
 
     export_id: UUID
-    confirm: bool
+    confirm: bool = False
 
 
 class ProcessingRunRead(BaseModel):

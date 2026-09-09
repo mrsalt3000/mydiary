@@ -29,11 +29,11 @@
 | Task 13 — Implement normalization pipeline (layer 2) | accepted | 0 | — |
 | Task 14 — Implement summarization pipeline (layer 3) | accepted | 0 | — |
 | Task 15 — Implement safe wellbeing reflection pipeline (layer 4) | accepted | 0 | — |
-| Task 16 — Build exports and processing management UI | not_started | 0 | — |
+| Task 16 — Build exports and processing management UI | accepted | 1 | r1 |
 | Task 17 — Docker Compose and WSL 2 deployment | not_started | 0 | — |
 | Task 18 — Backups, recovery, and local security hardening | not_started | 0 | — |
 | Task 19 — End-to-end tests, observability, and acceptance review | not_started | 0 | — |
 
 ## История возвратов
 
-(Пусто — заполняется агентами-приёмщиками при вердиктах `rework`.)
+- **r1 (Task 16)** — Wellbeing-действие на страницах `/exports` и `/exports/{id}` неработоспособно из браузера: `static/js/exports.js` (`startPipeline`) отправляет на `POST /api/v1/pipelines/wellbeing/runs` тело `{"export_id": ...}` без поля `confirm`, которое схема `WellbeingRunCreate` требует как обязательное (`confirm: bool` без default). Сервер отвечает `422 Field required` (а не `409`, как декларирует docstring схемы), в клиентской карте ошибок wellbeing нет обработки 422 → пользователь всегда видит общий текст ошибки; полноценный четырёхслойный флоу (export → normalize → summarize → wellbeing) из UI Task 16 невыполним. Рабочий запуск существует только на wellbeing-странице (`app.js` шлёт `confirm: true`), а интеграционные тесты обходят JS прямым вызовом API с `confirm: true` и дефект не ловят. Ожидается: клиент после отметки чекбокса подтверждения шлёт `confirm: true` (и/или `confirm: bool = False` в схеме, чтобы отсутствие поля давало серверный 409), плюс тест тела запроса/отображения ошибки. Прочие критерии Task 16 (страницы, retry-семантика, экранирование, external-consent, поллинг, приватность, состояние репозитория) проверены и прошли.

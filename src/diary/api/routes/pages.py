@@ -1,4 +1,4 @@
-"""Thin page routes for the chat UI (Task 06).
+"""Thin page routes for the server-rendered UI (Tasks 06/10/13/14/15/16).
 
 Mounted at the application root (no prefix; ``/api/v1`` stays the JSON API).
 
@@ -6,7 +6,11 @@ Mounted at the application root (no prefix; ``/api/v1`` stays the JSON API).
   the compose form and the "load older" control when older messages exist;
 - ``GET /messages/fragments/older``      — HTML fragment of the next older
   window (htmx ``afterbegin`` into ``#message-list``) plus an out-of-band
-  ``#older-control`` that carries the next cursor (or stops paging).
+  ``#older-control`` that carries the next cursor (or stops paging);
+- Task 16 exports/processing management UI:
+  ``GET /exports`` (weekly exports management), ``GET /exports/{export_id}``
+  (per-export lineage detail), ``GET /processing`` (recent jobs) and
+  ``GET /processing/fragments/jobs`` (htmx polling fragment).
 
 Rendering decisions
 ===================
@@ -17,15 +21,18 @@ Rendering decisions
 * The keyset cursor format is owned by the messages API
   (``diary.api.routes.messages``); this module imports the codec instead of
   duplicating it so page and API paging can never drift apart.
+* Page actions never run work inside a page request: they POST to the JSON
+  API and the client polls the returned job (single Task-16 pattern shared
+  with the Task-09 transcription flow).
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
@@ -33,23 +40,37 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from diary.api.routes.messages import _decode_cursor, _encode_cursor, get_session
+from diary.core.models_config import ModelsConfigError, load_models_config
 from diary.core.settings import get_settings
 from diary.db.models import (
+    Artifact,
     ArtifactLayer,
+    Job,
     JobStatus,
+    JobType,
     Message,
     MessageKind,
+    PipelineType,
+    ProcessingRun,
+    RunStatus,
     TranscriptionStatus,
     WeeklyExport,
 )
 from diary.db.repositories import (
     ArtifactRepository,
     AudioFileRepository,
+    JobRepository,
+    ProcessingRunRepository,
     TranscriptionRepository,
     WeeklyExportRepository,
 )
 from diary.domain.chat.service import list_messages
 from diary.domain.exports.service import export_filename, list_exports
+from diary.domain.exports.weeks import sunday_date_for
+from diary.domain.pipelines.naming import (
+    JOB_PIPELINE_TYPE,
+    PIPELINE_JOB_TYPE,
+)
 from diary.domain.pipelines.wellbeing.safety import (
     ESCALATION_LINES,
     ESCALATION_TITLE,
@@ -77,6 +98,73 @@ TRANSCRIPTION_LABELS: dict[TranscriptionStatus, str] = {
     TranscriptionStatus.running: "Расшифровывается…",
     TranscriptionStatus.succeeded: "Расшифровано",
     TranscriptionStatus.failed: "Ошибка расшифровки",
+}
+
+# ---------------------------------------------------------------------------
+# Task 16 — labels shared by the exports/processing management templates
+# ---------------------------------------------------------------------------
+
+#: Captions of the three LLM pipelines (used for run/job rows and actions).
+PIPELINE_LABELS: dict[PipelineType, str] = {
+    PipelineType.normalize: "Нормализация",
+    PipelineType.summarize: "Саммаризация",
+    PipelineType.wellbeing: "Wellbeing-рефлексия",
+}
+
+#: Captions of durable job types (processing page).
+JOB_TYPE_LABELS: dict[JobType, str] = {
+    JobType.transcribe_audio: "Расшифровка аудио",
+    JobType.normalize: "Нормализация",
+    JobType.summarize: "Саммаризация",
+    JobType.wellbeing: "Wellbeing-рефлексия",
+}
+
+#: Captions of job statuses (processing page).
+JOB_STATUS_LABELS: dict[JobStatus, str] = {
+    JobStatus.pending: "В очереди",
+    JobStatus.running: "Выполняется",
+    JobStatus.retrying: "Ожидает повтора",
+    JobStatus.succeeded: "Успешно",
+    JobStatus.failed: "Ошибка",
+    JobStatus.cancelled: "Отменено",
+}
+
+#: Captions of processing-run statuses (export detail page).
+RUN_STATUS_LABELS: dict[RunStatus, str] = {
+    RunStatus.queued: "В очереди",
+    RunStatus.running: "Выполняется",
+    RunStatus.succeeded: "Успешно",
+    RunStatus.failed: "Ошибка",
+}
+
+#: The three LLM pipelines in display order (normalize → summarize → wellbeing).
+_PIPELINE_ORDER: tuple[PipelineType, ...] = (
+    PipelineType.normalize,
+    PipelineType.summarize,
+    PipelineType.wellbeing,
+)
+
+#: LLM pipeline type → the artifact layer it produces.
+_PIPELINE_LAYER: dict[PipelineType, ArtifactLayer] = {
+    PipelineType.normalize: ArtifactLayer.normalized,
+    PipelineType.summarize: ArtifactLayer.summary,
+    PipelineType.wellbeing: ArtifactLayer.wellbeing,
+}
+
+#: Titles of artifact-layer sections on the exports/detail pages.
+LAYER_TITLES: dict[ArtifactLayer, str] = {
+    ArtifactLayer.original: "Оригинал (слой 1)",
+    ArtifactLayer.normalized: "Нормализованный (слой 2)",
+    ArtifactLayer.summary: "Саммари (слой 3)",
+    ArtifactLayer.wellbeing: "Wellbeing-рефлексия (слой 4)",
+}
+
+#: Short per-layer captions for compact chips/links.
+LAYER_SHORT_TITLES: dict[ArtifactLayer, str] = {
+    ArtifactLayer.original: "Оригинал",
+    ArtifactLayer.normalized: "Нормализация",
+    ArtifactLayer.summary: "Саммари",
+    ArtifactLayer.wellbeing: "Wellbeing",
 }
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -210,18 +298,434 @@ def _export_view(record: WeeklyExport) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Task 16 — view helpers for the exports management and processing pages
+# ---------------------------------------------------------------------------
+
+
+def _format_local(value: datetime) -> str:
+    """Format an aware timestamp as wall-clock text in the application timezone."""
+    return value.astimezone(get_settings().tzinfo).strftime(TIMESTAMP_FORMAT)
+
+
+def _artifact_download_url(export_id: uuid.UUID, artifact_id: uuid.UUID) -> str:
+    """Generic derived-artifact download URL (the Task-12 API route)."""
+    return f"/api/v1/exports/{export_id}/artifacts/{artifact_id}/file"
+
+
+def _load_models_config() -> Any:
+    """Return the current model configuration (module-level test seam).
+
+    Page rendering must never fail on a missing/invalid configuration file:
+    :func:`_external_profile_info` treats any loading failure as "no external
+    profiles" (the local default), so the UI stays usable without a
+    ``configs/models.yaml`` present.
+    """
+    return load_models_config()
+
+
+def _external_profile_info() -> dict[str, dict[str, object]]:
+    """External-provider disclosure info for the LLM pipeline actions.
+
+    Returns a mapping keyed by pipeline value (``normalize`` / ``summarize`` /
+    ``wellbeing``); every entry is ``{"external": bool, "host": str | None,
+    "model": str | None}``. A profile is external only when the matching
+    Task-03 profile sets ``external: true``; the disclosure names the endpoint
+    host (never credentials — ``base_url`` forbids them) and the model.
+    """
+    info: dict[str, dict[str, object]] = {
+        key: {"external": False, "host": None, "model": None}
+        for key in ("normalize", "summarize", "wellbeing")
+    }
+    try:
+        config = _load_models_config()
+    except ModelsConfigError:
+        return info
+    profiles = {
+        "normalize": config.normalization,
+        "summarize": config.summarization,
+        "wellbeing": config.wellbeing_analysis,
+    }
+    for key, profile in profiles.items():
+        if not profile.external:
+            continue
+        host = urlsplit(profile.base_url).netloc or None
+        info[key] = {"external": True, "host": host, "model": profile.model}
+    return info
+
+
+def _active_pipeline_jobs(
+    session: Session,
+) -> dict[tuple[JobType, str], uuid.UUID]:
+    """In-flight pipeline jobs by ``(job type, export id)``.
+
+    "In flight" means pending/running/retrying. The mapping lets the templates
+    resume job polling after a reload and label running actions; only
+    identifiers are used, never payload content.
+    """
+    repository = JobRepository(session)
+    result: dict[tuple[JobType, str], uuid.UUID] = {}
+    for pipeline in _PIPELINE_ORDER:
+        job_type = PIPELINE_JOB_TYPE[pipeline]
+        for job in repository.list_active_of_type(job_type):
+            payload = job.payload_json if isinstance(job.payload_json, dict) else None
+            export_id = payload.get("export_id") if payload is not None else None
+            if export_id is not None:
+                result[(job_type, str(export_id))] = job.id
+    return result
+
+
+def _export_management_view(
+    session: Session,
+    record: WeeklyExport,
+    active_jobs: dict[tuple[JobType, str], uuid.UUID],
+) -> dict[str, Any]:
+    """Template fields of one export row for the management pages (Task 16).
+
+    Extends the base :func:`_export_view` with the detail-page link, the
+    original-file presence, an in-flight job handle per pipeline and the
+    per-layer overview (newest artifact version + status of the newest run).
+    """
+    settings = get_settings()
+    view = _export_view(record)
+    view["detail_url"] = f"/exports/{record.id}"
+    original_path = settings.data_root / record.path
+    view["original_present"] = original_path.is_file()
+
+    runs = ProcessingRunRepository(session).list_by_input_export(record.id)
+    runs_newest_first = list(reversed(runs))
+    derived: list[dict[str, Any]] = []
+    for pipeline in _PIPELINE_ORDER:
+        layer = _PIPELINE_LAYER[pipeline]
+        artifacts = ArtifactRepository(session).list_by_export_and_layer(record.id, layer)
+        latest = artifacts[-1] if artifacts else None
+        file_present = latest is not None and (settings.data_root / latest.path).is_file()
+        artifact_info: dict[str, Any] | None = None
+        if latest is not None:
+            artifact_info = {
+                "version_label": f"v{latest.version}" if latest.version is not None else "",
+                "filename": latest.path.rsplit("/", 1)[-1],
+                "download_url": _artifact_download_url(record.id, latest.id),
+                "file_present": file_present,
+                "created_display": _format_local(latest.created_at),
+            }
+        last_run = next((run for run in runs_newest_first if run.pipeline_type is pipeline), None)
+        derived.append(
+            {
+                "key": pipeline.value,
+                "short_label": LAYER_SHORT_TITLES[layer],
+                "layer": layer.value,
+                "has_artifact": latest is not None,
+                "artifact": artifact_info,
+                "last_run_status": last_run.status.value if last_run is not None else None,
+                "last_run_label": (
+                    RUN_STATUS_LABELS[last_run.status] if last_run is not None else None
+                ),
+                "run_error_summary": last_run.error_summary if last_run is not None else None,
+            }
+        )
+    view["derived"] = derived
+    # "Normalized input available" gates the summarize/wellbeing actions: the
+    # newest normalized artifact must exist and its file must be on disk.
+    normalized_info = derived[0].get("artifact") if derived else None
+    view["has_normalized"] = bool(
+        isinstance(normalized_info, dict) and normalized_info.get("file_present")
+    )
+    active: dict[str, str | None] = {}
+    for pipeline in _PIPELINE_ORDER:
+        job_type = PIPELINE_JOB_TYPE[pipeline]
+        job_id = active_jobs.get((job_type, str(record.id)))
+        active[pipeline.value] = str(job_id) if job_id is not None else None
+    view["active_jobs"] = active
+    return view
+
+
+def _lineage_artifact_view(
+    session: Session, artifact: Artifact, export: WeeklyExport
+) -> dict[str, Any]:
+    """Template fields of one derived artifact on the export detail page.
+
+    Includes a parent caption that makes the lineage explicit: layer-2
+    artifacts are derived from the original export (``NNNN_rN``); layer-3/4
+    artifacts name the exact normalized artifact they were built from.
+    """
+    producing_run = (
+        ProcessingRunRepository(session).get(artifact.processing_run_id)
+        if artifact.processing_run_id is not None
+        else None
+    )
+    parent_caption = f"производный от оригинала {export.seq_number:04d}_r{export.revision}"
+    if artifact.layer in (ArtifactLayer.summary, ArtifactLayer.wellbeing):
+        if producing_run is not None and producing_run.input_artifact_id is not None:
+            input_artifact = ArtifactRepository(session).get(producing_run.input_artifact_id)
+            if input_artifact is not None:
+                parent_caption = (
+                    "создан из нормализованного " + input_artifact.path.rsplit("/", 1)[-1]
+                )
+    file_present = (get_settings().data_root / artifact.path).is_file()
+    return {
+        "id": str(artifact.id),
+        "layer": artifact.layer.value,
+        "filename": artifact.path.rsplit("/", 1)[-1],
+        "version_label": f"v{artifact.version}" if artifact.version is not None else "",
+        "sha_prefix": artifact.sha256[:16],
+        "created_display": _format_local(artifact.created_at),
+        "download_url": _artifact_download_url(export.id, artifact.id),
+        "file_present": file_present,
+        "parent_caption": parent_caption,
+        "run_status_label": (
+            RUN_STATUS_LABELS[producing_run.status] if producing_run is not None else None
+        ),
+    }
+
+
+def _lineage_sections(session: Session, export: WeeklyExport) -> list[dict[str, Any]]:
+    """Lineage sections (original → normalized → summary/wellbeing) of an export."""
+    settings = get_settings()
+    original_path = settings.data_root / export.path
+    sections: list[dict[str, Any]] = [
+        {
+            "key": ArtifactLayer.original.value,
+            "title": LAYER_TITLES[ArtifactLayer.original],
+            "is_original": True,
+            "is_derived": False,
+            "input_note": None,
+            "empty_message": None,
+            "rows": [
+                {
+                    "filename": export_filename(
+                        export.week_end_date, export.seq_number, export.revision
+                    ),
+                    "revision_label": f"r{export.revision}",
+                    "created_display": _format_local(export.created_at),
+                    "download_url": f"/api/v1/exports/{export.id}/file",
+                    "file_present": original_path.is_file(),
+                }
+            ],
+        }
+    ]
+    for pipeline in _PIPELINE_ORDER:
+        layer = _PIPELINE_LAYER[pipeline]
+        artifacts = ArtifactRepository(session).list_by_export_and_layer(export.id, layer)
+        if pipeline is PipelineType.normalize:
+            input_note: str | None = None
+            empty_message = "Для этой выгрузки ещё нет нормализованной версии."
+        else:
+            input_note = "строится только из нормализованного текста (слой 2)"
+            empty_message = "Для этой выгрузки ещё нет результата этого слоя."
+        sections.append(
+            {
+                "key": layer.value,
+                "title": LAYER_TITLES[layer],
+                "is_original": False,
+                "is_derived": True,
+                "input_note": input_note,
+                "empty_message": empty_message,
+                "rows": [
+                    _lineage_artifact_view(session, artifact, export) for artifact in artifacts
+                ],
+            }
+        )
+    return sections
+
+
+def _processing_run_view(
+    session: Session, run: ProcessingRun, export: WeeklyExport
+) -> dict[str, Any]:
+    """Template fields of one processing run on the export detail page.
+
+    Status surface and provenance only (pipeline/status/prompt version/safe
+    error summary/timestamps) plus the artifact the run produced when it
+    succeeded — never diary content or raw provider payloads.
+    """
+    output: dict[str, str] | None = None
+    produced = ArtifactRepository(session).list_by_run(run.id)
+    if produced:
+        artifact = produced[-1]
+        output = {
+            "filename": artifact.path.rsplit("/", 1)[-1],
+            "version_label": f"v{artifact.version}" if artifact.version is not None else "",
+            "download_url": _artifact_download_url(export.id, artifact.id),
+        }
+    return {
+        "id": str(run.id),
+        "pipeline_type": run.pipeline_type.value,
+        "label": PIPELINE_LABELS[run.pipeline_type],
+        "status": run.status.value,
+        "status_label": RUN_STATUS_LABELS[run.status],
+        "prompt_version": run.prompt_version,
+        "error_summary": run.error_summary,
+        "created_display": _format_local(run.created_at),
+        "started_display": _format_local(run.started_at) if run.started_at else None,
+        "finished_display": _format_local(run.finished_at) if run.finished_at else None,
+        "output": output,
+    }
+
+
+def _export_runs_view(session: Session, export: WeeklyExport) -> list[dict[str, Any]]:
+    """Processing runs of one export, newest first (export detail page)."""
+    runs = ProcessingRunRepository(session).list_by_input_export(export.id)
+    return [_processing_run_view(session, run, export) for run in reversed(runs)]
+
+
+def _job_export_ref(session: Session, job: Job) -> dict[str, Any] | None:
+    """The export a pipeline job belongs to (identifier only), for linking.
+
+    Returns ``None`` for non-pipeline jobs, jobs whose payload carries no
+    ``export_id``, unparsable ids and ids of exports that no longer exist.
+    """
+    pipeline = JOB_PIPELINE_TYPE.get(job.job_type)
+    if pipeline is None:
+        return None
+    payload = job.payload_json if isinstance(job.payload_json, dict) else None
+    raw = payload.get("export_id") if payload is not None else None
+    if raw is None:
+        return None
+    try:
+        export_id = uuid.UUID(str(raw))
+    except ValueError:
+        return None
+    if WeeklyExportRepository(session).get(export_id) is None:
+        return None
+    return {"id": str(export_id), "detail_url": f"/exports/{export_id}"}
+
+
+def _job_view(session: Session, job: Job) -> dict[str, Any]:
+    """Template fields of one job row on the processing page (Task 16).
+
+    Status surface only — the payload is never rendered (privacy rule). The
+    optional export reference links pipeline jobs to their export detail page.
+    """
+    return {
+        "id": str(job.id),
+        "job_type": job.job_type.value,
+        "job_label": JOB_TYPE_LABELS.get(job.job_type, job.job_type.value),
+        "status": job.status.value,
+        "status_label": JOB_STATUS_LABELS.get(job.status, job.status.value),
+        "attempts": job.attempts,
+        "max_attempts": job.max_attempts,
+        "error_summary": job.error_summary,
+        "retryable": job.status in (JobStatus.failed, JobStatus.cancelled),
+        "export": _job_export_ref(session, job),
+        "created_display": _format_local(job.created_at),
+        "updated_display": _format_local(job.updated_at),
+    }
+
+
+def _processing_jobs_context(session: Session) -> dict[str, Any]:
+    """Template context shared by the processing page and its polling fragment."""
+    jobs = JobRepository(session).list_recent(limit=PAGE_LIMIT)
+    return {"jobs": [_job_view(session, job) for job in jobs]}
+
+
 @pages_router.get("/exports", response_class=HTMLResponse)
 def exports_page(
     request: Request,
     session: Annotated[Session, Depends(get_session)],
 ) -> HTMLResponse:
-    """Minimal exports list page with download links (Task 10/16 boundary).
+    """Weekly exports management page (Task 16).
 
-    Lists every original weekly export (most recent week first). Full
-    management UI (creation actions, re-export, lineage views) is Task 16.
+    Groups every original export by week (most recent week first) and shows,
+    per revision, the derived-layer statuses and the management actions
+    (export week / new revision / normalize / summarize / wellbeing /
+    downloads / detail links). All values are server-derived; no diary
+    content is rendered on this page.
     """
-    exports = [_export_view(record) for record in list_exports(session)]
-    return templates.TemplateResponse(request, "exports.html", {"exports": exports})
+    settings = get_settings()
+    active_jobs = _active_pipeline_jobs(session)
+    records = list_exports(session)
+    rows = [_export_management_view(session, record, active_jobs) for record in records]
+    weeks: list[dict[str, Any]] = []
+    for row in rows:
+        sunday_iso = row["sunday"].isoformat()
+        if weeks and weeks[-1]["sunday_iso"] == sunday_iso:
+            weeks[-1]["exports"].append(row)
+        else:
+            weeks.append(
+                {
+                    "sunday_iso": sunday_iso,
+                    "monday": row["monday"],
+                    "sunday": row["sunday"],
+                    "exports": [row],
+                }
+            )
+    today_local = datetime.now(settings.tzinfo).date()
+    return templates.TemplateResponse(
+        request,
+        "exports.html",
+        {
+            "weeks": weeks,
+            "default_sunday": sunday_date_for(today_local).isoformat(),
+            "wellbeing_enabled": settings.wellbeing_enabled,
+            "external": _external_profile_info(),
+        },
+    )
+
+
+@pages_router.get("/exports/{export_id}", response_class=HTMLResponse)
+def export_detail_page(
+    export_id: uuid.UUID,
+    request: Request,
+    session: Annotated[Session, Depends(get_session)],
+) -> HTMLResponse:
+    """Per-export lineage page (Task 16).
+
+    Shows one original export revision with all its derived-layer versions,
+    the processing runs and the sibling revisions of the same week. Actions
+    (new revision / normalize / summarize / wellbeing) launch jobs through the
+    JSON API; diary content and job payloads are never rendered here.
+    """
+    record = WeeklyExportRepository(session).get(export_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Export not found.")
+    settings = get_settings()
+    siblings = [
+        {
+            "id": str(sibling.id),
+            "revision": sibling.revision,
+            "detail_url": f"/exports/{sibling.id}",
+            "current": sibling.id == record.id,
+        }
+        for sibling in WeeklyExportRepository(session).list_by_week(record.week_end_date)
+    ]
+    return templates.TemplateResponse(
+        request,
+        "export_detail.html",
+        {
+            "export": _export_management_view(session, record, _active_pipeline_jobs(session)),
+            "sections": _lineage_sections(session, record),
+            "runs": _export_runs_view(session, record),
+            "siblings": siblings,
+            "wellbeing_enabled": settings.wellbeing_enabled,
+            "external": _external_profile_info(),
+        },
+    )
+
+
+@pages_router.get("/processing", response_class=HTMLResponse)
+def processing_page(
+    request: Request,
+    session: Annotated[Session, Depends(get_session)],
+) -> HTMLResponse:
+    """Processing page (Task 16): recent jobs with safe status summaries.
+
+    The job table is refreshed locally by htmx polling of
+    ``GET /processing/fragments/jobs``; failed/cancelled rows carry an
+    explicit "retry" action (``POST /api/v1/jobs/{id}/retry``). Payloads and
+    diary content are never shown.
+    """
+    return templates.TemplateResponse(request, "processing.html", _processing_jobs_context(session))
+
+
+@pages_router.get("/processing/fragments/jobs", response_class=HTMLResponse)
+def processing_jobs_fragment(
+    request: Request,
+    session: Annotated[Session, Depends(get_session)],
+) -> HTMLResponse:
+    """Job-table HTML fragment polled by the processing page (htmx every N s)."""
+    return templates.TemplateResponse(
+        request, "_jobs_panel.html", _processing_jobs_context(session)
+    )
 
 
 @pages_router.get("/exports/{export_id}/normalize", response_class=HTMLResponse)

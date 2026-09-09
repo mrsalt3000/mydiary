@@ -6,10 +6,11 @@ root with synthetic data only.
 Covers:
 
 * ``POST /api/v1/pipelines/wellbeing/runs`` — requires an explicit
-  ``confirm: true`` (409 without it, 422 when the flag is missing), is
-  rejected when the feature is disabled (403) or when the export has no
-  normalized (layer 2) input (404), and enqueues a ``wellbeing`` job when all
-  guards pass (202 → worker produces a layer-4 report);
+  ``confirm: true`` (a missing or ``false`` flag is rejected with 409 — a
+  missing confirmation, never a 422 schema error), is rejected when the
+  feature is disabled (403) or when the export has no normalized (layer 2)
+  input (404), and enqueues a ``wellbeing`` job when all guards pass (202 →
+  worker produces a layer-4 report);
 * no-autostart: no wellbeing job/artifact is ever created without an explicit
   POST, even when pages are visited;
 * ``GET /exports/{export_id}/wellbeing`` — read-only report page: escaped
@@ -184,15 +185,18 @@ def test_without_confirm_flag_is_rejected_with_409(
     assert _job_count(session) == 0  # no job is created without confirmation
 
 
-def test_missing_confirm_field_is_rejected_with_422(
+def test_missing_confirm_field_is_rejected_with_409(
     api_client: TestClient,
     session: Session,
 ) -> None:
+    """A body without the confirm field (as an outdated client may send it)
+    must produce the confirmation 409 — not a 422 schema error."""
     export = _create_export(session, SUNDAY, "Запись A.")
     response = api_client.post(
         f"{PIPELINES_URL}/wellbeing/runs", json={"export_id": str(export.id)}
     )
-    assert response.status_code == 422
+    assert response.status_code == 409
+    assert response.json()["detail"]  # non-empty, static error payload
     assert _job_count(session) == 0
 
 

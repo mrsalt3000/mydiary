@@ -1,0 +1,33 @@
+{# Processing page (Task 16): recent jobs with safe status summaries.
+
+   The job table (#jobs-panel) is polled locally through htmx
+   (GET /processing/fragments/jobs, every 4 s); failed/cancelled rows expose
+   an explicit "retry" action handled by static/js/exports.js. No payload and
+   no diary content are ever rendered; error summaries are the safe, stored
+   summaries only. #}
+{% extends "base.html" %}
+{% block title %}Обработка — Local Diary{% endblock %}
+{% block content %}
+<main class="processing-page">
+  <nav class="page-nav">
+    <a href="/">← Дневник</a>
+    <a href="/exports">К выгрузкам</a>
+  </nav>
+  <h1 class="page-title">Обработка</h1>
+  <p class="exports-page__note">
+    Последние задачи (до {{ jobs|length }}) с их статусами. Страница
+    обновляется автоматически. Для задач, завершившихся ошибкой или
+    отменённых, доступно действие «Повторить».
+  </p>
+  {% include "_jobs_panel.html" %}
+  <noscript>
+    <p class="noscript-note">
+      Без JavaScript страница не обновляется автоматически. Обновите её
+      вручную, чтобы увидеть свежие статусы.
+    </p>
+  </noscript>
+</main>
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/exports.js" defer></script>
+{% endblock %}

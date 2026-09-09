@@ -1,0 +1,72 @@
+{# Job-list fragment (Task 16) — polled by the /processing page through htmx
+   (hx-trigger="every 4s", swap of this element's own outerHTML, so the root
+   keeps the hx-* attributes). Status values, error summaries and labels are
+   server-derived and escaped; job payloads are never rendered (privacy
+   rule). Failed/cancelled rows expose the explicit retry action, which the
+   client sends to POST /api/v1/jobs/{id}/retry. #}
+<div id="jobs-panel"
+     class="jobs-panel"
+     hx-get="/processing/fragments/jobs"
+     hx-trigger="every 4s"
+     hx-swap="outerHTML"
+     aria-live="polite">
+  {% if jobs %}
+  <table class="jobs-table">
+    <thead>
+      <tr>
+        <th>Задача</th>
+        <th>Статус</th>
+        <th>Выгрузка</th>
+        <th>Попытки</th>
+        <th>Ошибка</th>
+        <th>Создана</th>
+        <th>Обновлена</th>
+        <th>Действие</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for job in jobs %}
+      <tr class="jobs-table__row jobs-table__row--{{ job.status }}">
+        <td>{{ job.job_label }}</td>
+        <td>
+          <span class="job-status job-status--{{ job.status }}">{{ job.status_label }}</span>
+        </td>
+        <td>
+          {% if job.export %}
+          <a href="{{ job.export.detail_url }}">Детали выгрузки</a>
+          {% else %}
+          —
+          {% endif %}
+        </td>
+        <td>{{ job.attempts }}{% if job.max_attempts is not none %} / {{ job.max_attempts }}{% endif %}</td>
+        <td>
+          {% if job.error_summary %}
+          <span class="run-error">{{ job.error_summary }}</span>
+          {% else %}
+          —
+          {% endif %}
+        </td>
+        <td>{{ job.created_display }}</td>
+        <td>{{ job.updated_display }}</td>
+        <td>
+          {% if job.retryable %}
+          <form class="job-retry" method="post"
+                data-url="/api/v1/jobs/{{ job.id }}/retry">
+            <button type="submit">Повторить</button>
+            <p data-role="error" class="form-error" role="alert" hidden></p>
+          </form>
+          {% else %}
+          —
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="jobs-panel__empty">
+    Задач пока нет. Запущенные действия (выгрузка, нормализация, саммари,
+    wellbeing, расшифровка) появятся здесь со статусами.
+  </p>
+  {% endif %}
+</div>
