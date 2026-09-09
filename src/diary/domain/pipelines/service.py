@@ -270,14 +270,23 @@ def _execute_run(
         raise PipelineExportNotFoundError("Export not found.")
     run.input_export_id = export.id
 
-    input_artifact = _resolve_input_artifact(session, job, export_id=export.id)
-    if input_artifact is not None:
-        run.input_artifact_id = input_artifact.id
     pipeline = pipeline_registry.get_pipeline(pipeline_type)
     if pipeline is None:
         raise PipelineNotRegisteredError(
             f"Pipeline {pipeline_type.value!r} is not registered yet (implemented in Tasks 13-15)."
         )
+
+    input_artifact = _resolve_input_artifact(session, job, export_id=export.id)
+    if input_artifact is None:
+        # The job payload carried no explicit input artifact. Pipelines that
+        # consume a lower derived layer (layers 3-4 consume ``normalized``)
+        # resolve the export's latest succeeded artifact of that layer here,
+        # so their input is always layer 2 by database identity and the
+        # original export is never read (AGENTS.md §6).
+        input_artifact = _resolve_default_input_artifact(
+            session, export_id=export.id, pipeline=pipeline
+        )
+    run.input_artifact_id = input_artifact.id if input_artifact is not None else None
 
     _ensure_input_file(export=export, input_artifact=input_artifact)
 
@@ -422,6 +431,35 @@ def _resolve_input_artifact(session: Session, job: Job, *, export_id: uuid.UUID)
     if artifact.export_id != export_id:
         raise PipelineInputError("The input artifact does not belong to the job's export lineage.")
     return artifact
+
+
+def _resolve_default_input_artifact(
+    session: Session, *, export_id: uuid.UUID, pipeline: Pipeline[Any]
+) -> Artifact | None:
+    """Resolve the export's input artifact for a layer-consuming pipeline.
+
+    Pipelines that declare ``input_layer`` (summarization/wellbeing consume
+    ``normalized``) run against the export's latest succeeded artifact of that
+    layer when the job payload carries no explicit ``input_artifact_id``: an
+    artifact row of a derived layer exists only after a validated file was
+    written by a succeeded run, so the newest row of the layer is the newest
+    succeeded version. Returns ``None`` for pipelines without ``input_layer``
+    (normalization consumes the original export itself) and raises
+    :class:`PipelineInputError` when no artifact of the layer exists yet —
+    a permanent, content-free failure instructing the user to run the upstream
+    pipeline first.
+    """
+    if pipeline.input_layer is None:
+        return None
+    artifacts = ArtifactRepository(session).list_by_export_and_layer(
+        export_id, pipeline.input_layer
+    )
+    if not artifacts:
+        raise PipelineInputError(
+            f"The export has no {pipeline.input_layer.value} artifact yet; "
+            "run the upstream pipeline first."
+        )
+    return artifacts[-1]
 
 
 def _ensure_input_file(*, export, input_artifact: Artifact | None) -> None:

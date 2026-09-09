@@ -199,6 +199,7 @@ def _export_view(record: WeeklyExport) -> dict[str, Any]:
         "created_at_display": created_local.strftime(TIMESTAMP_FORMAT),
         "download_url": f"/api/v1/exports/{record.id}/file",
         "compare_url": f"/exports/{record.id}/normalize",
+        "summary_url": f"/exports/{record.id}/summary",
     }
 
 
@@ -255,6 +256,53 @@ def export_normalize_compare_page(
             "original_text": original_path.read_text(encoding="utf-8"),
             "normalized_text": normalized_text,
             "normalized_filename": normalized_filename,
+        },
+    )
+
+
+@pages_router.get("/exports/{export_id}/summary", response_class=HTMLResponse)
+def export_summary_page(
+    export_id: uuid.UUID,
+    request: Request,
+    session: Annotated[Session, Depends(get_session)],
+) -> HTMLResponse:
+    """Read-only summary page for one export (Task 14).
+
+    Shows the newest succeeded summary (layer 3) as escaped plain text inside
+    ``<pre>`` — the stored Markdown is never rendered as unsafe HTML — plus a
+    download link through the generic derived-artifact route. An export
+    without a summary (yet) renders an empty state with the relevant next
+    step; an unknown export id is a 404.
+    """
+    record = WeeklyExportRepository(session).get(export_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Export not found.")
+    settings = get_settings()
+    artifacts = ArtifactRepository(session).list_by_export_and_layer(
+        export_id, ArtifactLayer.summary
+    )
+    latest = artifacts[-1] if artifacts else None
+    normalized = ArtifactRepository(session).list_by_export_and_layer(
+        export_id, ArtifactLayer.normalized
+    )
+    summary_text: str | None = None
+    summary_filename: str | None = None
+    summary_download_url: str | None = None
+    if latest is not None:
+        summary_path = settings.data_root / latest.path
+        if summary_path.is_file():
+            summary_text = summary_path.read_text(encoding="utf-8")
+            summary_filename = latest.path.rsplit("/", 1)[-1]
+            summary_download_url = f"/api/v1/exports/{export_id}/artifacts/{latest.id}/file"
+    return templates.TemplateResponse(
+        request,
+        "export_summary.html",
+        {
+            "export": _export_view(record),
+            "has_normalized": bool(normalized),
+            "summary_text": summary_text,
+            "summary_filename": summary_filename,
+            "summary_download_url": summary_download_url,
         },
     )
 

@@ -97,6 +97,13 @@ class Pipeline(ABC, Generic[SchemaT]):
     task_type: ClassVar[TaskType]
     #: Pydantic model of the structured output the pipeline validates.
     result_schema: ClassVar[type[SchemaT]]
+    #: Derived artifact layer this pipeline consumes as its input, or ``None``
+    #: when the input is the original export itself. Layers 3-4 declare
+    #: ``ArtifactLayer.normalized`` here; the framework (Task 12) then resolves
+    #: the export's latest succeeded artifact of that layer when a job payload
+    #: carries no explicit ``input_artifact_id``, and the pipeline never reads
+    #: the original export (AGENTS.md §6).
+    input_layer: ClassVar[ArtifactLayer | None] = None
 
     @abstractmethod
     def build_request(self, *, export: WeeklyExport, input_artifact: Artifact | None) -> LLMRequest:

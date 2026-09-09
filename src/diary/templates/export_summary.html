@@ -1,0 +1,57 @@
+{# Weekly summary page (Task 14).
+
+   Shows the newest succeeded summary (layer 3) for one export. Diary-derived
+   text is rendered inside <pre> through Jinja variables only (autoescape is
+   applied — the stored Markdown is never injected as unsafe HTML; no |safe
+   filters, no external resources).
+
+   States:
+   - no normalized version yet  -> "сначала нормализуйте" hint + compare link;
+   - normalized but no summary  -> empty-state hint;
+   - summary present            -> escaped Markdown + download link. #}
+{% extends "base.html" %}
+{% block title %}Саммари недели — Local Diary{% endblock %}
+{% block content %}
+<main class="exports-page">
+  <p class="page-nav"><a href="/exports">← К выгрузкам</a></p>
+  <h1 class="page-title">Саммари недели</h1>
+
+  <p class="exports-page__note">
+    Выгрузка <span class="export-list__name">{{ export.filename }}</span>
+    (неделя {{ export.monday.strftime('%d.%m.%Y') }} —
+    {{ export.sunday.strftime('%d.%m.%Y') }}, ревизия r{{ export.revision }},
+    создано {{ export.created_at_display }}).
+    <a href="{{ export.download_url }}" download="{{ export.filename }}">
+      Скачать оригинал
+    </a>
+    · <a href="{{ export.compare_url }}">Сравнение: оригинал и нормализация</a>
+  </p>
+
+  <section class="compare-block">
+    <h2 class="compare-block__title">Саммари (слой 3)</h2>
+    {% if summary_text is not none %}
+      {% if summary_filename %}
+      <p class="compare-block__meta">{{ summary_filename }}</p>
+      {% endif %}
+      {% if summary_download_url %}
+      <p class="compare-block__meta">
+        <a href="{{ summary_download_url }}" download="{{ summary_filename }}">
+          Скачать саммари (Markdown)
+        </a>
+      </p>
+      {% endif %}
+      <pre class="compare-block__text">{{ summary_text }}</pre>
+    {% elif has_normalized %}
+      <p class="compare-block__empty">
+        Для этой выгрузки ещё нет саммари. Запустите саммаризацию после
+        нормализации — результат появится на этой странице.
+      </p>
+    {% else %}
+      <p class="compare-block__empty">
+        Для этой выгрузки ещё нет саммари: сначала нужна нормализация
+        (слой 2), саммари строится только из нормализованного текста.
+      </p>
+    {% endif %}
+  </section>
+</main>
+{% endblock %}

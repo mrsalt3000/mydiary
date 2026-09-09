@@ -95,6 +95,17 @@ class AppSettings(BaseSettings):
     #: merges the per-chunk results back in the original order. Read from
     #: ``APP_NORMALIZE_CHUNK_ENTRIES``.
     normalize_chunk_entries: int = Field(default=25, ge=1)
+    #: Summarization pipeline (Task 14): context threshold that switches the
+    #: run from single-pass to map-reduce, measured in characters of the
+    #: normalized entry text. A normalized document at most this long is sent
+    #: to the model in one request; a longer one is chunked deterministically
+    #: (whole entries only) and summarized per chunk. Read from
+    #: ``APP_SUMMARIZE_MAPREDUCE_THRESHOLD``.
+    summarize_mapreduce_threshold: int = Field(default=20000, ge=1)
+    #: Summarization pipeline (Task 14): maximum size of one map-reduce input
+    #: chunk in characters (entries are never split). Read from
+    #: ``APP_SUMMARIZE_CHUNK_SIZE``.
+    summarize_chunk_size: int = Field(default=10000, ge=1)
     #: Root directory for all private application data.
     data_root: Path = DEFAULT_DATA_ROOT
     #: SQLite database directory.

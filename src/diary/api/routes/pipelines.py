@@ -23,6 +23,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from diary.api.routes.messages import get_session
@@ -35,6 +36,7 @@ from diary.api.schemas import (
     job_read_from,
     processing_run_read_from,
 )
+from diary.core.settings import get_settings
 from diary.db.models import PipelineType
 from diary.db.repositories import (
     ArtifactRepository,
@@ -46,9 +48,21 @@ from diary.domain.pipelines.base import (
     PipelineExportNotFoundError,
     PipelineOriginalFileMissingError,
 )
+from diary.domain.pipelines.naming import (
+    EXPORTS_PREFIX,
+    layer_dirname,
+    layer_output_extension,
+)
 from diary.domain.pipelines.normalize import batch as normalize_batch
+from diary.domain.pipelines.summarize import batch as summarize_batch
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
+
+#: Media types of rendered artifact files served by the generic download route.
+_ARTIFACT_MEDIA_TYPES = {
+    ".txt": "text/plain; charset=utf-8",
+    ".md": "text/markdown; charset=utf-8",
+}
 
 
 @router.post("/normalize/batch", response_model=list[JobRead], status_code=202)
@@ -65,6 +79,23 @@ def enqueue_normalize_batch(
     deterministic export order.
     """
     jobs = normalize_batch.enqueue_normalize_batch(session)
+    return [job_read_from(job) for job in jobs]
+
+
+@router.post("/summarize/batch", response_model=list[JobRead], status_code=202)
+def enqueue_summarize_batch(
+    session: Annotated[Session, Depends(get_session)],
+) -> list[JobRead]:
+    """Enqueue one summarization job per eligible export.
+
+    An export is eligible when it has a normalized artifact whose file is
+    present and no summary artifact yet (see
+    :func:`diary.domain.pipelines.summarize.batch.enqueue_summarize_batch`).
+    Running the batch again while jobs are in flight reuses the active jobs —
+    no duplicates are created. Returns the jobs of the eligible exports in
+    deterministic export order.
+    """
+    jobs = summarize_batch.enqueue_summarize_batch(session)
     return [job_read_from(job) for job in jobs]
 
 
@@ -122,3 +153,41 @@ def list_export_artifacts(
     _require_export(session, export_id)
     artifacts = ArtifactRepository(session).list_by_export(export_id)
     return [artifact_read_from(artifact) for artifact in artifacts]
+
+
+@runs_router.get("/{export_id}/artifacts/{artifact_id}/file")
+def download_artifact_file(
+    export_id: uuid.UUID,
+    artifact_id: uuid.UUID,
+    session: Annotated[Session, Depends(get_session)],
+) -> FileResponse:
+    """Download one derived artifact file (normalized/summary/wellbeing).
+
+    Generic download for layers 2-4 (the layer-1 download route lives on the
+    exports router). The artifact must belong to ``export_id`` and its stored
+    data-root-relative path must resolve inside the artifact's own layer
+    directory (server-generated paths; the containment check is defensive).
+    The media type follows the layer extension (``.txt`` plain, ``.md``
+    markdown), never diary content or user-supplied names.
+    """
+    artifact = ArtifactRepository(session).get(artifact_id)
+    if artifact is None or artifact.export_id != export_id:
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    settings = get_settings()
+    # Derived-artifact paths are data-root-relative ``exports/<layer>/<file>``
+    # (the naming module is the single source of truth), so the containment
+    # check resolves against that fixed location.
+    layer_dir = (settings.data_root / EXPORTS_PREFIX / layer_dirname(artifact.layer)).resolve()
+    candidate = (settings.data_root / artifact.path).resolve()
+    if not candidate.is_relative_to(layer_dir):
+        # Stored paths are server-generated; this branch is purely defensive.
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Artifact file not found.")
+    extension = layer_output_extension(artifact.layer)
+    filename = artifact.path.rsplit("/", 1)[-1]
+    return FileResponse(
+        str(candidate),
+        media_type=_ARTIFACT_MEDIA_TYPES.get(extension, "application/octet-stream"),
+        filename=filename,
+    )
