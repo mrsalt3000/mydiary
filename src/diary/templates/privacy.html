@@ -1,0 +1,100 @@
+{# Privacy disclosure page (Task 18): where each task profile runs.
+
+   For every task (transcription / normalization / summarization /
+   wellbeing) the server renders only non-sensitive diagnostics (Task 03
+   profile_status): provider, model, endpoint host without credentials, the
+   local/external flag, whether the referenced key environment variable is
+   set (a boolean) and whether the profile is ready. Key VALUES never appear
+   — only the referenced variable NAME may be shown. A missing or invalid
+   models configuration renders an explicit "not configured" state. #}
+{% extends "base.html" %}
+{% block title %}Приватность — Local Diary{% endblock %}
+{% block content %}
+<main class="privacy-page">
+  <nav class="page-nav">
+    <a href="/">← Дневник</a>
+    <a href="/exports">Выгрузки</a>
+    <a href="/processing">Обработка</a>
+  </nav>
+  <h1 class="page-title">Приватность</h1>
+
+  <p class="exports-page__note">
+    Приложение работает только на этом компьютере (localhost). Каждая задача
+    настраивается независимо: обработка может выполняться локально или — при
+    явном включении <code>external: true</code> в профиле — внешним
+    провайдером, которому в этом случае передаётся содержимое дневника.
+    Ниже показано, что настроено для каждой задачи. Ключи API здесь не
+    отображаются: конфигурация хранит только имя переменной окружения.
+  </p>
+
+  {% if config_missing %}
+  <p class="exports-page__notice" role="status">
+    Файл конфигурации моделей не задан или невалиден: для всех задач
+    показывается состояние «не настроено». Скопируйте
+    <code>configs/models.example.yaml</code> в <code>configs/models.yaml</code>
+    и при необходимости задайте ключи в переменных окружения.
+  </p>
+  {% endif %}
+
+  {% if rows %}
+  <table class="runs-table">
+    <thead>
+      <tr>
+        <th>Задача</th>
+        <th>Провайдер</th>
+        <th>Модель</th>
+        <th>Адрес</th>
+        <th>Обработка</th>
+        <th>Ключ</th>
+        <th>Готовность</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>{{ row.label }}</td>
+        <td>{{ row.provider_label or "—" }}</td>
+        <td>{{ row.model or "—" }}</td>
+        <td>{% if row.endpoint %}<code>{{ row.endpoint }}</code>{% else %}—{% endif %}</td>
+        <td>
+          {% if row.external is none %}
+            Не настроено
+          {% elif row.external %}
+            <span class="derived-chip__bad">Внешне</span>
+          {% else %}
+            Локально
+          {% endif %}
+        </td>
+        <td>
+          {% if row.key_env %}
+            {% if row.key_configured %}
+              Настроен (<code>{{ row.key_env }}</code>)
+            {% else %}
+              Не настроен — нужен <code>{{ row.key_env }}</code>
+            {% endif %}
+          {% else %}
+            Не требуется
+          {% endif %}
+        </td>
+        <td>
+          {% if row.valid is none %}
+            —
+          {% elif row.valid %}
+            Готов
+          {% else %}
+            Не готов
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <p class="exports-page__note">
+    Защита локальным PIN-кодом и шифрование данных — в планах после MVP
+    (post-MVP). До этого доступ к дневнику защищён тем, что приложение
+    слушает только localhost.
+  </p>
+</main>
+{% endblock %}

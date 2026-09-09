@@ -111,6 +111,12 @@ class AppSettings(BaseSettings):
     #: UI hides the run action; previously created reports stay readable.
     #: Read from ``APP_WELLBEING_ENABLED``.
     wellbeing_enabled: bool = True
+    #: Retention threshold (seconds) for ``data/temp/`` cleanup (Task 18):
+    #: ``python -m diary.cli backup --clean-temp`` removes temp files older
+    #: than this many seconds. Only the temp directory is ever cleaned —
+    #: audio, exports, backups and the database are never touched. Read from
+    #: ``APP_TEMP_RETENTION_S``.
+    temp_retention_s: float = Field(default=86400.0, ge=0)
     #: Root directory for all private application data.
     data_root: Path = DEFAULT_DATA_ROOT
     #: SQLite database directory.

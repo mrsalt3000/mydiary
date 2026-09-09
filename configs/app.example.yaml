@@ -20,3 +20,9 @@ APP_DATA_ROOT: /path/to/local/diary-data
 # APP_EXPORTS_DIR: <APP_DATA_ROOT>/exports   # недельные выгрузки и производные слои
 # APP_TEMP_DIR:    <APP_DATA_ROOT>/temp      # временные файлы (очистка по политике)
 # APP_BACKUPS_DIR: <APP_DATA_ROOT>/backups   # архивы бэкапов
+
+# Очистка временного каталога (Task 18): `python -m diary.cli backup
+# --clean-temp` удаляет файлы внутри APP_TEMP_DIR старше этого порога (сек).
+# Автоматически очищается только data/temp — аудио, выгрузки, бэкапы и БД
+# не затрагиваются.
+# APP_TEMP_RETENTION_S: 86400

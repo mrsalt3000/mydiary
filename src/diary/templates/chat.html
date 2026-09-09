@@ -3,7 +3,11 @@
 {% block content %}
 <main class="chat-page">
   <h1 class="page-title">Дневник</h1>
-  <p class="page-nav"><a href="/exports">Недельные выгрузки</a></p>
+  <p class="page-nav">
+    <a href="/exports">Недельные выгрузки</a>
+    <a href="/processing">Обработка</a>
+    <a href="/privacy">Приватность</a>
+  </p>
 
   <section class="history" aria-label="История записей">
     {% if has_more %}

@@ -40,7 +40,15 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from diary.api.routes.messages import _decode_cursor, _encode_cursor, get_session
-from diary.core.models_config import ModelsConfigError, load_models_config
+from diary.core.models_config import (
+    ModelProfile,
+    ModelsConfigError,
+    OpenAICompatibleProfile,
+    ProviderType,
+    TaskType,
+    load_models_config,
+)
+from diary.core.profile_status import ProfileStatus, profile_statuses
 from diary.core.settings import get_settings
 from diary.db.models import (
     Artifact,
@@ -352,6 +360,102 @@ def _external_profile_info() -> dict[str, dict[str, object]]:
         host = urlsplit(profile.base_url).netloc or None
         info[key] = {"external": True, "host": host, "model": profile.model}
     return info
+
+
+# ---------------------------------------------------------------------------
+# Task 18 — privacy disclosure view (/privacy)
+# ---------------------------------------------------------------------------
+
+#: Human-readable task captions for the privacy page, in enum order.
+PRIVACY_TASK_LABELS: dict[str, str] = {
+    TaskType.transcription.value: "Транскрипция (голос → текст)",
+    TaskType.normalization.value: "Нормализация (слой 2)",
+    TaskType.summarization.value: "Саммаризация (слой 3)",
+    TaskType.wellbeing_analysis.value: "Wellbeing-рефлексия (слой 4)",
+}
+
+#: Human-readable provider captions for the privacy page.
+PRIVACY_PROVIDER_LABELS: dict[str, str] = {
+    ProviderType.faster_whisper.value: "Локальный STT (faster-whisper)",
+    ProviderType.openai_compatible.value: "OpenAI-совместимый API",
+}
+
+
+def _privacy_rows() -> tuple[list[dict[str, object]], bool]:
+    """Per-task rows for the privacy page plus the "no config" flag.
+
+    Uses :func:`profile_statuses` (Task 03), so only the *booleans*
+    ``api_key_configured``/``valid`` and the referenced environment-variable
+    name ever reach the page — never a key value. ``external`` mirrors the
+    profile's ``external`` flag (faster-whisper is always local). A missing
+    or invalid models configuration renders an explicit "not configured"
+    state instead of failing the page.
+    """
+    try:
+        config = _load_models_config()
+    except ModelsConfigError:
+        config = None
+    statuses: dict[TaskType, ProfileStatus] = {}
+    profiles: dict[TaskType, ModelProfile] = {}
+    if config is not None:
+        statuses = {status.task: status for status in profile_statuses(config)}
+        profiles = dict(config.profiles_by_task())
+
+    rows: list[dict[str, object]] = []
+    for task in TaskType:
+        status = statuses.get(task)
+        profile = profiles.get(task)
+        row: dict[str, object] = {
+            "key": task.value,
+            "label": PRIVACY_TASK_LABELS.get(task.value, task.value),
+            "endpoint": None,
+            "external": None,
+            "key_env": None,
+            "key_configured": None,
+            "valid": None,
+        }
+        if config is None or status is None:
+            row["provider_label"] = None
+            row["model"] = None
+            rows.append(row)
+            continue
+        external = False
+        key_env: str | None = None
+        if isinstance(profile, OpenAICompatibleProfile):
+            external = profile.external
+            key_env = profile.api_key_env
+        base_url = status.base_url
+        row.update(
+            {
+                "provider_label": PRIVACY_PROVIDER_LABELS.get(status.provider.value),
+                "model": status.model,
+                "endpoint": urlsplit(base_url).netloc if base_url else None,
+                "external": external,
+                "key_env": key_env,
+                "key_configured": status.api_key_configured,
+                "valid": status.valid,
+            }
+        )
+        rows.append(row)
+    return rows, config is None
+
+
+@pages_router.get("/privacy", response_class=HTMLResponse)
+def privacy_page(request: Request) -> HTMLResponse:
+    """Privacy disclosure page (Task 18).
+
+    For every task (transcription/normalization/summarization/wellbeing)
+    shows the provider, model, endpoint host (never credentials) and whether
+    the processing is local or external, plus the key/validity state from
+    :func:`profile_statuses`. No secret value is ever rendered; the page only
+    states which environment variable a profile references.
+    """
+    rows, config_missing = _privacy_rows()
+    return templates.TemplateResponse(
+        request,
+        "privacy.html",
+        {"rows": rows, "config_missing": config_missing},
+    )
 
 
 def _active_pipeline_jobs(
