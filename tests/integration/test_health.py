@@ -1,0 +1,13 @@
+"""Integration tests for ``GET /health`` (Task 01)."""
+
+from fastapi.testclient import TestClient
+
+from diary.main import app
+
+client = TestClient(app)
+
+
+def test_health_returns_ok_payload() -> None:
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}

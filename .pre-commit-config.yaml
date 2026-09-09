@@ -1,0 +1,23 @@
+# Local Diary — pre-commit hooks (Task 01)
+# Versions mirror the project's pinned dev tooling (ruff, mypy).
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Ruff version: keep in sync with the `ruff` dev dependency in pyproject.toml.
+    rev: v0.16.6
+    hooks:
+      - id: ruff
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    # Mypy version: keep in sync with the `mypy` dev dependency in pyproject.toml.
+    rev: v2.3.1
+    hooks:
+      - id: mypy
+        # Type-check production sources only (mypy config: [tool.mypy] files = ["src"]).
+        files: ^src/
+        args: []
+        # mypy runs in an isolated pre-commit env; provide the packages it must
+        # resolve while type-checking src/. Keep in sync with pyproject runtime deps.
+        additional_dependencies:
+          - fastapi==0.141.1
