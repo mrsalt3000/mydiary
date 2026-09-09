@@ -22,6 +22,7 @@ Rendering decisions
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote
@@ -33,9 +34,16 @@ from sqlalchemy.orm import Session
 
 from diary.api.routes.messages import _decode_cursor, _encode_cursor, get_session
 from diary.core.settings import get_settings
-from diary.db.models import JobStatus, Message, MessageKind, TranscriptionStatus
+from diary.db.models import (
+    JobStatus,
+    Message,
+    MessageKind,
+    TranscriptionStatus,
+    WeeklyExport,
+)
 from diary.db.repositories import AudioFileRepository, TranscriptionRepository
 from diary.domain.chat.service import list_messages
+from diary.domain.exports.service import export_filename, list_exports
 from diary.domain.transcription.service import find_active_transcription_job
 
 #: This module lives at ``src/diary/api/routes/pages.py``.
@@ -164,6 +172,41 @@ def chat_page(
             "audio_accept": ",".join(settings.allowed_audio_mime_types),
         },
     )
+
+
+def _export_view(record: WeeklyExport) -> dict[str, Any]:
+    """Template fields for one weekly export (minimal Task 10 UI page).
+
+    The full exports-management page with actions/confirmations is Task 16;
+    this page only lists created exports and offers a download link. ``sunday``
+    is the week's Sunday date and ``filename`` is derived server-side.
+    """
+    settings = get_settings()
+    created_local = record.created_at.astimezone(settings.tzinfo)
+    return {
+        "id": str(record.id),
+        "sunday": record.week_end_date,
+        "monday": record.week_end_date - timedelta(days=6),
+        "seq_number": record.seq_number,
+        "revision": record.revision,
+        "filename": export_filename(record.week_end_date, record.seq_number, record.revision),
+        "created_at_display": created_local.strftime(TIMESTAMP_FORMAT),
+        "download_url": f"/api/v1/exports/{record.id}/file",
+    }
+
+
+@pages_router.get("/exports", response_class=HTMLResponse)
+def exports_page(
+    request: Request,
+    session: Annotated[Session, Depends(get_session)],
+) -> HTMLResponse:
+    """Minimal exports list page with download links (Task 10/16 boundary).
+
+    Lists every original weekly export (most recent week first). Full
+    management UI (creation actions, re-export, lineage views) is Task 16.
+    """
+    exports = [_export_view(record) for record in list_exports(session)]
+    return templates.TemplateResponse(request, "exports.html", {"exports": exports})
 
 
 @pages_router.get("/messages/fragments/older", response_class=HTMLResponse)

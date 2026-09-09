@@ -1,0 +1,45 @@
+{# Minimal weekly-exports page (Task 10). Lists created original exports and
+   offers a download link for each. The full exports-management page (actions,
+   re-export, per-layer lineage) is Task 16; this page is intentionally plain.
+
+   Safety rules:
+   - every value comes from the database / is derived server-side; the
+     download URL is always /api/v1/exports/<uuid>/file — never a user path;
+   - Jinja2 autoescape is on for .html files; file names are derived by the
+     backend from the (week, seq, revision) row, never from user input. #}
+{% extends "base.html" %}
+{% block title %}Выгрузки — Local Diary{% endblock %}
+{% block content %}
+<main class="exports-page">
+  <p class="page-nav"><a href="/">← Дневник</a></p>
+  <h1 class="page-title">Недельные выгрузки</h1>
+
+  {% if exports %}
+  <p class="exports-page__note">
+    Оригинальные выгрузки недель (слой 1). Скачивание — по ссылке; управление
+    выгрузками появится позже.
+  </p>
+  <ul class="export-list">
+    {% for export in exports %}
+    <li class="export-list__item">
+      <span class="export-list__name">{{ export.filename }}</span>
+      <span class="export-list__meta">
+        Неделя {{ export.monday.strftime('%d.%m.%Y') }} —
+        {{ export.sunday.strftime('%d.%m.%Y') }},
+        ревизия r{{ export.revision }},
+        создано {{ export.created_at_display }}
+      </span>
+      <a href="{{ export.download_url }}" download="{{ export.filename }}">
+        Скачать выгрузку
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="export-list__empty">
+    Выгрузок пока нет. Недельная выгрузка создаётся, когда в неделе есть
+    записи.
+  </p>
+  {% endif %}
+</main>
+{% endblock %}

@@ -129,6 +129,27 @@ class MessageRepository:
         )
         return list(reversed(list(newest_first)))
 
+    def list_active_between(self, *, start: datetime, end: datetime) -> list[Message]:
+        """Active messages whose ``created_at`` lies in the closed interval
+        ``[start, end]``, in deterministic chronological order (oldest first,
+        ties by id). Soft-deleted rows are excluded (Task 05 policy).
+
+        Used by the weekly export service (Task 10): both bounds are
+        timezone-aware instants in the application timezone converted to UTC,
+        so the comparison is a plain instant range check against the
+        UTC-stored ``created_at`` column.
+        """
+        statement = (
+            select(Message)
+            .where(
+                Message.deleted_at.is_(None),
+                Message.created_at >= start,
+                Message.created_at <= end,
+            )
+            .order_by(Message.created_at.asc(), Message.id.asc())
+        )
+        return list(self._session.scalars(statement))
+
     def has_active_older_than(self, older_than: tuple[datetime, uuid.UUID]) -> bool:
         """Whether any active message is strictly older than the keyset
         position ``(created_at, id)`` (drives the ``next_cursor`` decision)."""

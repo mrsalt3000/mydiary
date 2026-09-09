@@ -12,7 +12,7 @@ application timezone (``AppSettings.tzinfo``) as ISO-8601 with an offset.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
@@ -20,9 +20,10 @@ from pydantic import BaseModel, field_serializer, field_validator
 
 from diary.core.settings import get_settings
 from diary.db.models import TranscriptionStatus
+from diary.domain.exports.service import export_filename
 
 if TYPE_CHECKING:
-    from diary.db.models import Job, Message, Transcription
+    from diary.db.models import Job, Message, Transcription, WeeklyExport
 
 #: Every transcription-status value the API can return.
 TranscriptionStatusValue = Literal["not_requested", "queued", "running", "succeeded", "failed"]
@@ -213,4 +214,40 @@ def job_read_from(record: Job) -> JobRead:
         error_summary=record.error_summary,
         created_at=record.created_at.astimezone(timezone_info),
         updated_at=record.updated_at.astimezone(timezone_info),
+    )
+
+
+class ExportRead(BaseModel):
+    """An original weekly export as returned by the exports API (Task 10).
+
+    ``sunday`` is the week's Sunday date (the ``week_end_date`` column),
+    ``seq_number`` the global no-gap export sequence ``NNNN`` and ``revision``
+    the week's original revision (``r1``, ``r2``, ...). ``filename`` is the
+    server-derived artifact name — never a user-supplied value. No diary
+    content is ever included.
+    """
+
+    id: UUID
+    sunday: date
+    seq_number: int
+    revision: int
+    filename: str
+    created_at: datetime
+
+    @field_serializer("created_at")
+    def _serialize_created_at(self, value: datetime) -> str:
+        """ISO-8601 with offset (e.g. ``2026-09-13T21:00:00+03:00``)."""
+        return value.isoformat()
+
+
+def export_read_from(record: WeeklyExport) -> ExportRead:
+    """Map an ORM ``WeeklyExport`` row to ``ExportRead`` in the app timezone."""
+    timezone_info = get_settings().tzinfo
+    return ExportRead(
+        id=record.id,
+        sunday=record.week_end_date,
+        seq_number=record.seq_number,
+        revision=record.revision,
+        filename=export_filename(record.week_end_date, record.seq_number, record.revision),
+        created_at=record.created_at.astimezone(timezone_info),
     )
