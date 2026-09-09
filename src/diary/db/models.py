@@ -160,8 +160,10 @@ def _enum(enum_cls: type[Enum], name: str, length: int) -> SAEnum:
 class Message(Base):
     """A single diary entry: original user text or a link to a voice message.
 
-    Immutable source data. Deletion policy (soft delete) is defined in Task 05
-    and will be added by a dedicated migration; nothing is added here.
+    Immutable source data. Deletion follows the soft-delete policy fixed in
+    Task 05 (migration ``0002``): deleting sets ``deleted_at``, the row stays
+    in the database for traceability, the body is never overwritten, and
+    deleted messages are hidden from the history by default.
     """
 
     __tablename__ = "messages"
@@ -172,6 +174,8 @@ class Message(Base):
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime, default=utc_now, nullable=False, index=True
     )
+    #: UTC moment of soft deletion; NULL while the message is active (Task 05).
+    deleted_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 
 class AudioFile(Base):

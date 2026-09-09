@@ -18,7 +18,7 @@
 | Task 02 — Write architecture, privacy, and decision records | accepted | 0 | — |
 | Task 03 — Implement application settings and model configuration | accepted | 0 | — |
 | Task 04 — Create SQLite persistence foundation and migrations | accepted | 0 | — |
-| Task 05 — Implement text diary messages and chat history API | not_started | 0 | — |
+| Task 05 — Implement text diary messages and chat history API | accepted | 0 | — |
 | Task 06 — Implement initial chat UI | not_started | 0 | — |
 | Task 07 — Implement audio ingestion and storage | not_started | 0 | — |
 | Task 08 — Implement durable SQLite-backed job queue and worker | not_started | 0 | — |

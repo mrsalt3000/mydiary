@@ -14,7 +14,7 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from diary.db.base import utc_now
@@ -74,9 +74,16 @@ class MessageRepository:
         kind: MessageKind | None = None,
         created_before: datetime | None = None,
         limit: int | None = None,
+        include_deleted: bool = False,
     ) -> list[Message]:
-        """Messages in chronological order (oldest first, ties by id)."""
+        """Messages in chronological order (oldest first, ties by id).
+
+        Soft-deleted rows are excluded by default (Task 05 policy); pass
+        ``include_deleted=True`` to read every row regardless of ``deleted_at``.
+        """
         statement = select(Message).order_by(Message.created_at.asc(), Message.id.asc())
+        if not include_deleted:
+            statement = statement.where(Message.deleted_at.is_(None))
         if kind is not None:
             statement = statement.where(Message.kind == kind)
         if created_before is not None:
@@ -84,6 +91,51 @@ class MessageRepository:
         if limit is not None:
             statement = statement.limit(limit)
         return list(self._session.scalars(statement))
+
+    def list_active_window(
+        self,
+        *,
+        limit: int,
+        older_than: tuple[datetime, uuid.UUID] | None = None,
+    ) -> list[Message]:
+        """Up to ``limit`` active messages in a keyset "history" window.
+
+        Returns the ``limit`` most recent active messages when ``older_than``
+        is ``None``; otherwise the ``limit`` most recent active messages that
+        are strictly older than the keyset position ``(created_at, id)``.
+        The result is in chronological order (oldest first, ties by id), which
+        is what chat-history rendering needs. Soft-deleted rows are excluded.
+        """
+        statement = select(Message).where(Message.deleted_at.is_(None))
+        if older_than is not None:
+            created_before, id_before = older_than
+            statement = statement.where(
+                or_(
+                    Message.created_at < created_before,
+                    and_(Message.created_at == created_before, Message.id < id_before),
+                )
+            )
+        newest_first = self._session.scalars(
+            statement.order_by(Message.created_at.desc(), Message.id.desc()).limit(limit)
+        )
+        return list(reversed(list(newest_first)))
+
+    def has_active_older_than(self, older_than: tuple[datetime, uuid.UUID]) -> bool:
+        """Whether any active message is strictly older than the keyset
+        position ``(created_at, id)`` (drives the ``next_cursor`` decision)."""
+        created_before, id_before = older_than
+        statement = (
+            select(Message.id)
+            .where(
+                Message.deleted_at.is_(None),
+                or_(
+                    Message.created_at < created_before,
+                    and_(Message.created_at == created_before, Message.id < id_before),
+                ),
+            )
+            .limit(1)
+        )
+        return self._session.scalar(statement) is not None
 
 
 class AudioFileRepository:

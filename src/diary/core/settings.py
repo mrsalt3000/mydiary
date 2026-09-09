@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 #: Repository root, derived from the package location:
@@ -53,6 +53,9 @@ class AppSettings(BaseSettings):
 
     #: IANA timezone name used for all local-time display and week math.
     timezone: str = "Europe/Moscow"
+    #: Maximum length (in characters) of a single text-message body. Applied
+    #: at the API boundary (see ``diary.api.schemas.MessageCreate``).
+    max_message_length: int = Field(default=20000, ge=1)
     #: Root directory for all private application data.
     data_root: Path = DEFAULT_DATA_ROOT
     #: SQLite database directory.
