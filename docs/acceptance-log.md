@@ -30,7 +30,7 @@
 | Task 14 — Implement summarization pipeline (layer 3) | accepted | 0 | — |
 | Task 15 — Implement safe wellbeing reflection pipeline (layer 4) | accepted | 0 | — |
 | Task 16 — Build exports and processing management UI | accepted | 1 | r1 |
-| Task 17 — Docker Compose and WSL 2 deployment | not_started | 0 | — |
+| Task 17 — Docker Compose and WSL 2 deployment | accepted | 0 | — |
 | Task 18 — Backups, recovery, and local security hardening | not_started | 0 | — |
 | Task 19 — End-to-end tests, observability, and acceptance review | not_started | 0 | — |
 

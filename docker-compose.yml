@@ -1,0 +1,160 @@
+# Local Diary — Docker Compose (Task 17).
+#
+# Local-first deployment for WSL 2. The project binds only 127.0.0.1 on the
+# host (the worker publishes no ports); nothing is exposed publicly by default.
+#
+# Typical commands:
+#   docker compose up -d --build                         # CPU stack (web + worker)
+#   docker compose --profile stt up -d --build web worker-stt  # + CPU transcription
+#   docker compose --profile gpu up -d --build web worker-gpu  # + GPU transcription
+#
+# Persistence (survives `docker compose down`):
+#   * ./data            — SQLite DB, audio, exports, temp, backups (bind mount)
+#   * ./configs         — real user config (configs/models.yaml), read-only
+#   * whisper-cache     — faster-whisper model cache (named volume)
+# Data is removed only by an explicit `docker compose down -v` or `rm -rf data`.
+#
+# The local `.env` (if present) is forwarded into containers and used for
+# interpolation (APP_UID/APP_GID). It is git-ignored and never baked into the
+# image. Configs/secrets never appear in this file.
+
+name: local-diary
+
+# Shared service definition (YAML anchor). Individual services override
+# command/image/build/volumes as needed.
+x-app: &app
+  image: diary:local
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    # Explicit data root; equals the image default (/app/data) and keeps all
+    # per-directory defaults (db/, audio/, exports/, temp/, backups/) below
+    # the bind-mounted ./data.
+    APP_DATA_ROOT: /app/data
+  volumes:
+    - ./data:/app/data
+    - ./configs:/app/configs:ro
+  user: "${APP_UID:-1000}:${APP_GID:-1000}"
+  restart: unless-stopped
+
+services:
+  # One-shot schema migration: runs `alembic upgrade head` before web/worker
+  # start (both depend on its successful completion). Idempotent — a no-op on
+  # an up-to-date database. Creates data/db/diary.db on first run.
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  # FastAPI web application (uvicorn). Binds 0.0.0.0 INSIDE the container;
+  # compose publishes only 127.0.0.1:8000 on the host.
+  web:
+    <<: *app
+    command:
+      - python
+      - -m
+      - uvicorn
+      - diary.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # Default durable worker (CPU image, no STT extra). Transcribe jobs fail
+  # with a clear non-sensitive error until an STT-capable worker (worker-stt /
+  # worker-gpu) runs — identical to the native non-[stt] behaviour. LLM
+  # pipeline jobs (normalize/summarize/wellbeing) run here fine.
+  worker:
+    <<: *app
+    command:
+      - python
+      - -m
+      - diary.workers.runner
+      - --poll-interval
+      - "2"
+      - --reset-stale
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # CPU speech-to-text worker (opt-in profile `stt`): image built with
+  # INSTALL_STT=1; set device: cpu in configs/models.yaml.
+  worker-stt:
+    <<: *app
+    profiles: ["stt"]
+    image: diary:local-stt
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        INSTALL_STT: "1"
+    command:
+      - python
+      - -m
+      - diary.workers.runner
+      - --poll-interval
+      - "2"
+      - --reset-stale
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs:ro
+      - whisper-cache:/app/.hf-cache
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # GPU speech-to-text worker (opt-in profile `gpu`): image built with
+  # INSTALL_STT=1 + ENABLE_CUDA=1; requires an NVIDIA driver and the nvidia
+  # container runtime in WSL 2 (Docker Desktop with GPU support). Set
+  # device: cuda in configs/models.yaml. No GPU reservation by default.
+  worker-gpu:
+    <<: *app
+    profiles: ["gpu"]
+    image: diary:local-gpu
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        INSTALL_STT: "1"
+        ENABLE_CUDA: "1"
+    command:
+      - python
+      - -m
+      - diary.workers.runner
+      - --poll-interval
+      - "2"
+      - --reset-stale
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs:ro
+      - whisper-cache:/app/.hf-cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  # faster-whisper model cache shared by STT workers; survives compose down.
+  whisper-cache:
+    name: local-diary_whisper-cache

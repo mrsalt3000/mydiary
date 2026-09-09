@@ -56,3 +56,15 @@ curl http://127.0.0.1:8000/health
 ```
 
 Проверки: данные сохраняются между пересозданиями контейнеров; CPU-сетап работает без GPU-зависимостей; наружу сервис не опубликован по умолчанию.
+
+## 8. Итоговое состояние после Task 17
+
+Реализовано (см. также секцию README «Запуск в Docker»):
+
+- `docker/Dockerfile` — один образ для `web`, `worker` и одноразовой миграции; опциональные build-флаги `INSTALL_STT=1` (extra `stt`, CPU) и `ENABLE_CUDA=1` (NVIDIA cuBLAS/cuDNN через pip, `LD_LIBRARY_PATH`). Не-root пользователь `app` (UID/GID 1000, переопределяются build-аргументами). Пользовательские данные/секреты/`.env`/реальный `configs/models.yaml` в образ не попадают.
+- `docker-compose.yml` — сервисы `migrate` (one-shot `alembic upgrade head`), `web` (uvicorn, публикация только `127.0.0.1:8000`), `worker` (CPU, без STT-extra), `worker-stt` (профиль `stt`, CPU-транскрипция), `worker-gpu` (профиль `gpu`, запрос GPU через `deploy.resources.reservations.devices`). Данные — bind-mount `./data:/app/data` (+ `./configs` read-only); кэш моделей — именованный volume. `depends_on` на успешное завершение `migrate`.
+- `.dockerignore` — исключены `.git`, `.venv`, `data/`, `.env*`, кэши, тесты/доки; оставлены `src/`, `alembic/`, `prompts/`, `pyproject.toml`, `alembic.ini`, `README.md`.
+- Проверенные факты окружения: FFmpeg в рантайме не нужен — приложение не транскодирует аудио (длительность остаётся NULL), а faster-whisper декодирует через PyAV, который поставляет собственные библиотеки FFmpeg. Все зависимости имеют manylinux-колёса под CPython 3.12, поэтому toolchain (gcc/build-essential) в образе не ставится. `tzdata` в образе обязателен для IANA-зон (например `Europe/Moscow`).
+- Локальный LLM-эндпоинт из контейнера: имя compose-сервиса (`http://<service>:port/v1`), `host.docker.internal` (Docker Desktop; для Docker Engine в WSL 2 нужен `extra_hosts: ["host.docker.internal:host-gateway"]`) или внешний `https://…` с `external: true`. Адреса задаются в `configs/models.yaml`, не в коде.
+- GPU: опциональный профиль `gpu`; требует NVIDIA driver/CUDA в WSL 2 и nvidia-container-toolkit. По умолчанию сервисы запускаются без GPU и без STT-зависимостей.
+- Верификация (Task 17): `docker compose config` — валиден для default/`stt`/`gpu` профилей; тесты/линт/типы проекта — см. отчёт задачи.

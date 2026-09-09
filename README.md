@@ -41,7 +41,9 @@ Task 01 выполнен и принят (см. [`docs/acceptance-log.md`](docs/
 ├── src/                 # пакет src/diary/ (Task 01: FastAPI, /health)
 ├── tests/               # unit/ integration/ fixtures/ (Task 01: первые тесты)
 ├── data/                # приватные данные: db/ audio/ exports/ temp/ backups/
-├── docker/              # будущие Dockerfile'ы (пусто)
+├── docker-compose.yml   # Compose: web + worker (+ опциональные STT/GPU-воркеры)
+├── docker/              # Dockerfile (Task 17)
+├── .dockerignore        # исключения build-контекста (Task 17)
 └── scripts/             # будущие скрипты (пусто)
 ```
 
@@ -126,3 +128,88 @@ Task 01 выполнен и принят (см. [`docs/acceptance-log.md`](docs/
 4. Нажать «Расшифровать» у голосового сообщения в чате. При первом использовании faster-whisper скачает выбранную модель в локальный кэш (разовая операция, дальше всё работает офлайн). raw-текст сохраняется в `transcriptions` и не перезаписывает аудио; повторная расшифровка добавляет новую версию, старая остаётся в истории.
 
 Примечания: CPU-fallback — устройство `cpu` с `compute_type: int8` (значения по умолчанию); GPU (CUDA под WSL 2) — опциональная настройка вне требований MVP. Если `faster-whisper` не установлен, задача расшифровки завершится с понятной ошибкой, не затрагивая аудио и сообщение.
+
+## Запуск в Docker (WSL 2, Task 17)
+
+Альтернативный способ запуска — контейнеры через Docker Desktop с WSL 2 integration (или Docker Engine внутри WSL 2). Образ один (`docker/Dockerfile`): из него запускаются `web`, `worker` и одноразовая миграция; опциональные STT-воркеры собираются из того же Dockerfile с build-флагами. Приложение публикуется только на `127.0.0.1:8000`, наружу ничего не открыто.
+
+### Предварительные условия
+
+- Docker Desktop (WSL 2 backend) или Docker Engine внутри WSL 2; `docker compose` доступен.
+- Репозиторий и его `data/` — на файловой системе WSL (ext4), не на `/mnt/c` (производительность SQLite).
+- UID владельца данных = 1000 (стандартный первый пользователь WSL 2). Если ваш UID другой — см. «UID/GID владельца» ниже.
+- LLM-задачи (нормализация/саммаризация/wellbeing) требуют реального `configs/models.yaml` (см. пример `configs/models.example.yaml`); файл подключается в контейнер bind-mount'ом и в образ не зашивается.
+
+### Быстрый старт (CPU, без локальной транскрипции)
+
+```bash
+# в корне репозитория
+docker compose up -d --build
+docker compose ps                 # migrate (exited 0) + web + worker
+curl -s http://127.0.0.1:8000/health   # => {"status":"ok"}
+```
+
+- Схема БД применяется одноразовым сервисом `migrate` (`alembic upgrade head`) перед стартом `web`/`worker`; повторный запуск — no-op.
+- Веб-интерфейс: http://127.0.0.1:8000 (только localhost), API-документация: http://127.0.0.1:8000/docs.
+- Задачи очереди без STT (нормализация/саммаризация/wellbeing) выполняет базовый `worker`.
+
+### Данные и их сохранность
+
+- `./data` (SQLite `data/db/diary.db`, аудио, выгрузки, temp, backups) смонтирован в `/app/data` bind-mount'ом. Данные переживают `docker compose down` и пересоздание контейнеров; удаляются только при явном `docker compose down -v` (не рекомендуется) или `rm -rf data`.
+- `./configs` смонтирован в `/app/configs` read-only: рабочие профили моделей задаются на хосте в `configs/models.yaml` и не входят в образ.
+- Секреты — только в локальном `.env` на хосте (файл, если есть, передаётся в контейнеры через `env_file`; значения в репозиторий не попадают). Если `.env` нет — работают встроенные значения по умолчанию.
+
+### Транскрипция в Docker
+
+Базовый CPU-образ не содержит `faster-whisper` (опциональный extra, политика проекта). Запустите дополнительный воркер с STT:
+
+- **CPU-транскрипция** (профиль `stt`): соберите воркер с `INSTALL_STT=1` и укажите в `configs/models.yaml` профиль `transcription` с `device: cpu` (по умолчанию так и есть):
+
+  ```bash
+  docker compose --profile stt up -d --build web worker-stt
+  ```
+
+  Воркер `worker-stt` (образ `diary:local-stt`) выполняет задачи `transcribe_audio` на CPU; модель faster-whisper при первом использовании скачивается в именованный volume `local-diary_whisper-cache` и переживает пересоздание контейнеров.
+
+- **GPU-транскрипция** (профиль `gpu`, опционально): требуется NVIDIA driver + CUDA в WSL 2 и nvidia-container-toolkit (Docker Desktop включает GPU support для WSL 2). Сборка добавляет CUDA-библиотеки (cuBLAS/cuDNN) и запрашивает GPU:
+
+  ```bash
+  docker compose --profile gpu up -d --build web worker-gpu
+  ```
+
+  Затем в `configs/models.yaml` для профиля `transcription` укажите `device: cuda` (и при необходимости `compute_type`, например `float16`). GPU запрашивается только у сервиса `worker-gpu` через `deploy.resources.reservations.devices`; обычные сервисы GPU не используют.
+
+  Примечание: воркеры с STT и без него могут работать одновременно — очередь рассчитана на несколько воркеров; чтобы не тратить ресурсы, останавливайте неиспользуемый (`docker compose stop worker`).
+
+### Подключение локальной LLM-модели
+
+Адрес эндпоинта задаётся в `configs/models.yaml` (поле `base_url` профилей `normalization`/`summarization`/`wellbeing_analysis`) — вне кода и вне образа. Варианты из контейнера:
+
+1. **Модель как compose-сервис** (например Ollama в том же Compose-проекте): `base_url: http://<имя-сервиса>:11434/v1` — контейнеры одного compose-проекта видят друг друга по имени сервиса.
+2. **Модель на хосте Windows/WSL** (запущена вне Docker): `base_url: http://host.docker.internal:PORT/v1`. Docker Desktop для WSL 2 резолвит `host.docker.internal` в адрес хоста. Для чистого Docker Engine в WSL 2 добавьте в секцию сервиса `extra_hosts: ["host.docker.internal:host-gateway"]`.
+3. **Внешний провайдер**: обычный `https://…` URL; при этом в профиле должен стоять `external: true` и требуемая переменная `*_API_KEY` в `.env` (см. политику приватности).
+
+Для вариантов 2–3 на CPU-контейнерах без GPU ничего дополнительно ставить не нужно.
+
+### UID/GID владельца данных
+
+Контейнеры работают от не-root пользователя `app` (UID/GID 1000 в образе; в compose `user: "${APP_UID:-1000}:${APP_GID:-1000}"`). Если ваш пользователь WSL имеет другой UID:
+
+```bash
+echo -e "APP_UID=$(id -u)\nAPP_GID=$(id -g)" >> .env
+```
+
+и пересоберите образ с теми же значениями (`docker compose build --build-arg APP_UID=$(id -u) --build-arg APP_GID=$(id -g)`). Кэш STT-моделей (volume `local-diary_whisper-cache`, `/app/.hf-cache`) при смене UID один раз поправьте: `docker compose run --rm -u root worker-stt chown -R "${APP_UID:-1000}:${APP_GID:-1000}" /app/.hf-cache`.
+
+### Полезные команды
+
+```bash
+docker compose logs -f web        # логи веб-приложения
+docker compose logs -f worker-stt # логи STT-воркера
+docker compose down               # остановить (данные ./data сохраняются)
+docker compose down -v            # остановить и удалить volume whisper-cache
+docker compose build              # пересобрать образы без запуска
+```
+
+Образ не содержит пользовательских данных, `.env` и реального `configs/models.yaml`. Подробности окружения и допущений — в `docs/wsl2-deployment-brief.md`.
+

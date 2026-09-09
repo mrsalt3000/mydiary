@@ -1,0 +1,37 @@
+# Build context exclusions for docker/Dockerfile (Task 17).
+# Everything listed here is either re-provided at run time through bind
+# mounts/environment or not needed inside the image.
+
+# Version control
+.git
+.gitignore
+
+# Local environment and private data (never baked into an image)
+.env
+.env.*
+data/
+
+# Python caches and virtual environments
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Repo documentation, tooling and sources not needed at run time
+.pre-commit-config.yaml
+Makefile
+tasklist.md
+AGENTS.md
+docs/
+skills/
+tests/
+scripts/
+
+# User configs are provided by the ./configs bind mount at run time
+configs/
+
+# Keep: pyproject.toml, README.md, alembic.ini, alembic/, src/, prompts/,
+# docker/ (Dockerfiles live here).
