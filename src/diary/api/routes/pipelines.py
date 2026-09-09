@@ -46,8 +46,26 @@ from diary.domain.pipelines.base import (
     PipelineExportNotFoundError,
     PipelineOriginalFileMissingError,
 )
+from diary.domain.pipelines.normalize import batch as normalize_batch
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
+
+
+@router.post("/normalize/batch", response_model=list[JobRead], status_code=202)
+def enqueue_normalize_batch(
+    session: Annotated[Session, Depends(get_session)],
+) -> list[JobRead]:
+    """Enqueue one normalization job per eligible original export.
+
+    An export is eligible when its original file is present and it has no
+    normalized artifact yet (see
+    :func:`diary.domain.pipelines.normalize.batch.enqueue_normalize_batch`).
+    Running the batch again while jobs are in flight reuses the active jobs —
+    no duplicates are created. Returns the jobs of the eligible exports in
+    deterministic export order.
+    """
+    jobs = normalize_batch.enqueue_normalize_batch(session)
+    return [job_read_from(job) for job in jobs]
 
 
 @router.post("/{pipeline_type}/runs", response_model=JobRead, status_code=202)

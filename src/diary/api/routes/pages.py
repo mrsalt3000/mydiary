@@ -35,13 +35,19 @@ from sqlalchemy.orm import Session
 from diary.api.routes.messages import _decode_cursor, _encode_cursor, get_session
 from diary.core.settings import get_settings
 from diary.db.models import (
+    ArtifactLayer,
     JobStatus,
     Message,
     MessageKind,
     TranscriptionStatus,
     WeeklyExport,
 )
-from diary.db.repositories import AudioFileRepository, TranscriptionRepository
+from diary.db.repositories import (
+    ArtifactRepository,
+    AudioFileRepository,
+    TranscriptionRepository,
+    WeeklyExportRepository,
+)
 from diary.domain.chat.service import list_messages
 from diary.domain.exports.service import export_filename, list_exports
 from diary.domain.transcription.service import find_active_transcription_job
@@ -192,6 +198,7 @@ def _export_view(record: WeeklyExport) -> dict[str, Any]:
         "filename": export_filename(record.week_end_date, record.seq_number, record.revision),
         "created_at_display": created_local.strftime(TIMESTAMP_FORMAT),
         "download_url": f"/api/v1/exports/{record.id}/file",
+        "compare_url": f"/exports/{record.id}/normalize",
     }
 
 
@@ -207,6 +214,49 @@ def exports_page(
     """
     exports = [_export_view(record) for record in list_exports(session)]
     return templates.TemplateResponse(request, "exports.html", {"exports": exports})
+
+
+@pages_router.get("/exports/{export_id}/normalize", response_class=HTMLResponse)
+def export_normalize_compare_page(
+    export_id: uuid.UUID,
+    request: Request,
+    session: Annotated[Session, Depends(get_session)],
+) -> HTMLResponse:
+    """Minimal original↔normalized comparison page for one export (Task 13).
+
+    Shows the original layer-1 text (read from the export row's file) and the
+    newest normalized layer-2 version when one exists; diary text is escaped
+    by Jinja2. The original download link is the existing Task-10 API route.
+    The full exports-management page with actions is Task 16.
+    """
+    record = WeeklyExportRepository(session).get(export_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Export not found.")
+    settings = get_settings()
+    original_path = settings.data_root / record.path
+    if not original_path.is_file():
+        raise HTTPException(status_code=404, detail="Export file not found.")
+    artifacts = ArtifactRepository(session).list_by_export_and_layer(
+        export_id, ArtifactLayer.normalized
+    )
+    latest = artifacts[-1] if artifacts else None
+    normalized_text: str | None = None
+    normalized_filename: str | None = None
+    if latest is not None:
+        normalized_path = settings.data_root / latest.path
+        if normalized_path.is_file():
+            normalized_text = normalized_path.read_text(encoding="utf-8")
+            normalized_filename = latest.path.rsplit("/", 1)[-1]
+    return templates.TemplateResponse(
+        request,
+        "export_compare.html",
+        {
+            "export": _export_view(record),
+            "original_text": original_path.read_text(encoding="utf-8"),
+            "normalized_text": normalized_text,
+            "normalized_filename": normalized_filename,
+        },
+    )
 
 
 @pages_router.get("/messages/fragments/older", response_class=HTMLResponse)

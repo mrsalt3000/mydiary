@@ -29,9 +29,12 @@
         ревизия r{{ export.revision }},
         создано {{ export.created_at_display }}
       </span>
-      <a href="{{ export.download_url }}" download="{{ export.filename }}">
-        Скачать выгрузку
-      </a>
+      <span class="export-actions">
+        <a href="{{ export.compare_url }}">Сравнить с нормализованным</a>
+        <a href="{{ export.download_url }}" download="{{ export.filename }}">
+          Скачать выгрузку
+        </a>
+      </span>
     </li>
     {% endfor %}
   </ul>

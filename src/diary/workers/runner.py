@@ -277,6 +277,16 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
+    # Task 13: register the implemented pipelines (normalization) before any
+    # job runs, so real ``normalize`` jobs no longer fail permanently with
+    # "pipeline not registered yet". The function is guarded and idempotent;
+    # importing it here (not at module import time) keeps the registry free of
+    # import side effects for the web process and the test suite.
+    from diary.domain.pipelines.normalize.registration import (
+        ensure_normalize_pipeline_registered,
+    )
+
+    ensure_normalize_pipeline_registered()
     worker_id = args.worker_id or _default_worker_id()
     settings: AppSettings = get_settings()
     engine = create_engine(settings=settings)

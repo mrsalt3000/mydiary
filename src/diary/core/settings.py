@@ -89,6 +89,12 @@ class AppSettings(BaseSettings):
     job_backoff_multiplier: float = Field(default=2.0, gt=0)
     job_max_backoff_s: float = Field(default=300.0, ge=0)
     job_stale_after_s: float = Field(default=300.0, gt=0)
+    #: Normalization pipeline (Task 13): maximum number of original export
+    #: entries sent to the model in one LLM request. Longer exports are split
+    #: into deterministic entry-chunks of at most this size; the pipeline
+    #: merges the per-chunk results back in the original order. Read from
+    #: ``APP_NORMALIZE_CHUNK_ENTRIES``.
+    normalize_chunk_entries: int = Field(default=25, ge=1)
     #: Root directory for all private application data.
     data_root: Path = DEFAULT_DATA_ROOT
     #: SQLite database directory.

@@ -26,7 +26,7 @@
 | Task 10 — Define weekly export rules and implement original TXT export | accepted | 0 | — |
 | Task 11 — Implement reusable OpenAI-compatible LLM client | accepted | 0 | — |
 | Task 12 — Implement LLM pipeline framework and artifact versioning | accepted | 0 | — |
-| Task 13 — Implement normalization pipeline (layer 2) | not_started | 0 | — |
+| Task 13 — Implement normalization pipeline (layer 2) | accepted | 0 | — |
 | Task 14 — Implement summarization pipeline (layer 3) | not_started | 0 | — |
 | Task 15 — Implement safe wellbeing reflection pipeline (layer 4) | not_started | 0 | — |
 | Task 16 — Build exports and processing management UI | not_started | 0 | — |

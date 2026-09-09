@@ -51,12 +51,19 @@ import hashlib
 import os
 import shutil
 import uuid
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
-from diary.core.models_config import ModelsConfig, ModelsConfigError, load_models_config
+from diary.core.models_config import (
+    ModelsConfig,
+    ModelsConfigError,
+    OpenAICompatibleProfile,
+    load_models_config,
+)
 from diary.core.settings import get_settings
 from diary.db.base import utc_now
 from diary.db.models import (
@@ -75,10 +82,12 @@ from diary.db.repositories import (
     WeeklyExportRepository,
 )
 from diary.domain.llm.errors import LLMError
-from diary.domain.llm.providers import create_llm_provider
-from diary.domain.llm.service import resolve_profile, success_provenance
+from diary.domain.llm.models import LLMRequest, LLMResponse, request_input_sha256
+from diary.domain.llm.providers import create_llm_provider, resolve_completion_params
+from diary.domain.llm.service import resolve_profile
 from diary.domain.pipelines import registry as pipeline_registry
 from diary.domain.pipelines.base import (
+    Pipeline,
     PipelineError,
     PipelineExportNotFoundError,
     PipelineInputError,
@@ -276,14 +285,22 @@ def _execute_run(
     profile = resolve_profile(models_config, pipeline.task_type)
     provider = create_llm_provider(profile)
 
-    request = pipeline.build_request(export=export, input_artifact=input_artifact)
+    requests = pipeline.build_requests(export=export, input_artifact=input_artifact)
+    if not requests:
+        raise PipelineInputError("The pipeline produced no LLM request for this run.")
     call_started = utc_now()
-    response = provider.complete(request)
+    responses = [provider.complete(request) for request in requests]
     call_finished = utc_now()
-    structured = pipeline.parse_result(response)
-    rendered = pipeline.render(structured)
+    structured = pipeline.parse_responses(responses)
 
+    # The derived version must be known before the artifact is rendered: the
+    # layer-2+ headers embed ``vM`` (the Task-13 render-with-context hook).
     version = _next_artifact_version(session, export.id, pipeline.layer)
+    if pipeline.render_requires_context:
+        rendered = pipeline.render_artifact(structured, export=export, version=version)
+    else:
+        rendered = pipeline.render(structured)
+
     filename = derived_filename(
         sunday=export.week_end_date,
         layer=pipeline.layer,
@@ -306,28 +323,83 @@ def _execute_run(
         version=version,
     )
 
-    provenance = success_provenance(
-        profile,
-        request,
-        response,
-        started_at=call_started,
-        finished_at=call_finished,
+    _finalize_succeeded_run(
+        session,
+        run,
+        job,
+        pipeline=pipeline,
+        profile=profile,
+        requests=requests,
+        responses=responses,
+        call_started=call_started,
+        call_finished=call_finished,
     )
+
+
+def _finalize_succeeded_run(
+    session: Session,
+    run: ProcessingRun,
+    job: Job,
+    *,
+    pipeline: Pipeline[Any],
+    profile: OpenAICompatibleProfile,
+    requests: list[LLMRequest],
+    responses: list[LLMResponse],
+    call_started: datetime,
+    call_finished: datetime,
+) -> None:
+    """Record a succeeded run: status, timestamps and merged provenance.
+
+    Provenance never carries diary content or prompts — only the profile,
+    the effective model, the prompt version and content digests. Single-request
+    runs keep the exact Task-12 metadata shape (``input_sha256`` is a string,
+    ``usage`` is one object). Chunked runs (Task 13) record ``input_sha256``
+    as the ordered list of per-chunk digests, the summed ``usage`` and a
+    ``call_count``; ``metadata_json`` is the deliberately flexible JSON
+    metadata column, so the shape difference is documented here.
+    """
+    model = resolve_completion_params(requests[0], profile)["model"]
+    prompt_version = requests[0].prompt_version
     run.status = RunStatus.succeeded
     run.finished_at = call_finished
     run.profile_name = pipeline.task_type.value
-    run.model_name = provenance.model
-    run.prompt_version = provenance.prompt_version
-    usage = provenance.usage.model_dump() if provenance.usage is not None else None
+    run.model_name = model
+    run.prompt_version = prompt_version
+    if len(requests) == 1:
+        usage = responses[0].usage.model_dump() if responses[0].usage is not None else None
+        run.metadata_json = {
+            "job_id": str(job.id),
+            "profile": pipeline.task_type.value,
+            "provider_type": profile.provider,
+            "model": model,
+            "prompt_version": prompt_version,
+            "input_sha256": request_input_sha256(requests[0]),
+            "usage": usage,
+        }
+        return
     run.metadata_json = {
         "job_id": str(job.id),
         "profile": pipeline.task_type.value,
-        "provider_type": provenance.provider_type,
-        "model": provenance.model,
-        "prompt_version": provenance.prompt_version,
-        "input_sha256": provenance.input_sha256,
-        "usage": usage,
+        "provider_type": profile.provider,
+        "model": model,
+        "prompt_version": prompt_version,
+        "input_sha256": [request_input_sha256(request) for request in requests],
+        "usage": _merged_usage(responses),
+        "call_count": len(requests),
     }
+
+
+def _merged_usage(responses: list[LLMResponse]) -> dict[str, int] | None:
+    """Sum token usage across chunk responses (``None`` when any is missing)."""
+    if not responses or any(response.usage is None for response in responses):
+        return None
+    totals = {"input_tokens": 0, "output_tokens": 0}
+    for response in responses:
+        usage = response.usage
+        assert usage is not None  # guaranteed by the guard above
+        totals["input_tokens"] += usage.input_tokens
+        totals["output_tokens"] += usage.output_tokens
+    return totals
 
 
 def _resolve_input_artifact(session: Session, job: Job, *, export_id: uuid.UUID) -> Artifact | None:

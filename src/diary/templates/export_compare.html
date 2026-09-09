@@ -1,0 +1,48 @@
+{# Minimal original ↔ normalized comparison page (Task 13).
+
+   Shows the original layer-1 text and the newest successful normalized
+   layer-2 version (when one exists) as escaped plain text inside <pre>. The
+   original download link is the existing API route. Full exports-management
+   UI (actions, lineage overview) is Task 16.
+
+   Safety rules:
+   - diary text is inserted through Jinja variables only and rendered inside
+     <pre>, where Jinja2 autoescape is still applied (no raw |safe filters);
+   - no external resources are referenced (AGENTS.md §7-8). #}
+{% extends "base.html" %}
+{% block title %}Сравнение — Local Diary{% endblock %}
+{% block content %}
+<main class="exports-page">
+  <p class="page-nav"><a href="/exports">← К выгрузкам</a></p>
+  <h1 class="page-title">Сравнение: оригинал и нормализация</h1>
+
+  <p class="exports-page__note">
+    Выгрузка <span class="export-list__name">{{ export.filename }}</span>
+    (неделя {{ export.monday.strftime('%d.%m.%Y') }} —
+    {{ export.sunday.strftime('%d.%m.%Y') }}, ревизия r{{ export.revision }},
+    создано {{ export.created_at_display }}).
+    <a href="{{ export.download_url }}" download="{{ export.filename }}">
+      Скачать оригинал
+    </a>
+  </p>
+
+  <section class="compare-block">
+    <h2 class="compare-block__title">Оригинал (слой 1)</h2>
+    <pre class="compare-block__text">{{ original_text }}</pre>
+  </section>
+
+  <section class="compare-block">
+    <h2 class="compare-block__title">Нормализованный (слой 2)</h2>
+    {% if normalized_text is not none %}
+      {% if normalized_filename %}
+      <p class="compare-block__meta">{{ normalized_filename }}</p>
+      {% endif %}
+      <pre class="compare-block__text">{{ normalized_text }}</pre>
+    {% else %}
+      <p class="compare-block__empty">
+        Для этой выгрузки ещё нет нормализованной версии.
+      </p>
+    {% endif %}
+  </section>
+</main>
+{% endblock %}

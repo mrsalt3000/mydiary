@@ -124,6 +124,64 @@ class Pipeline(ABC, Generic[SchemaT]):
     def render(self, structured: SchemaT) -> str:
         """Render the final TXT/Markdown from validated structured data."""
 
+    # ------------------------------------------------------------------
+    # Task-13 extensions (chunked runs and context-aware rendering)
+    # ------------------------------------------------------------------
+    # The concrete methods below keep the Task-12 single-request flow
+    # byte-for-byte identical (the defaults build one request, expect one
+    # response and call :meth:`render` with the structured output alone).
+    # Pipelines that need more — normalization splits long exports into
+    # deterministic entry-chunks and its artifact header embeds the export
+    # lineage and the derived version — override them explicitly.
+
+    #: Whether the framework should render through
+    #: :meth:`render_artifact` (passing the export row and the computed
+    #: derived version) instead of the plain single-argument :meth:`render`.
+    #: Set by pipelines whose artifact header embeds ``seq/revision/version``
+    #: lineage (normalization, Task 13). The Task-12 default stays ``False``.
+    render_requires_context: ClassVar[bool] = False
+
+    def build_requests(
+        self, *, export: WeeklyExport, input_artifact: Artifact | None
+    ) -> list[LLMRequest]:
+        """Build the run's LLM request(s) — one per provider call.
+
+        The default returns a single request from :meth:`build_request` (the
+        Task-12 flow). Pipelines that split their input into chunks
+        (normalization, Task 13) override this to return one request per
+        chunk, in input order; the framework calls the provider once per
+        request and hands all responses to :meth:`parse_responses`.
+        """
+        return [self.build_request(export=export, input_artifact=input_artifact)]
+
+    def parse_responses(self, responses: list[LLMResponse]) -> SchemaT:
+        """Validate the run's provider responses into the structured model.
+
+        The default validates the single response of the Task-12 flow via
+        :meth:`parse_result`. Chunked pipelines override this to parse every
+        response and merge the results in chunk order while enforcing
+        completeness against the chunk inputs.
+        """
+        if len(responses) != 1:
+            raise PipelineOutputError(
+                "This pipeline expected exactly one LLM response for the run."
+            )
+        return self.parse_result(responses[0])
+
+    def render_artifact(self, structured: SchemaT, *, export: WeeklyExport, version: int) -> str:
+        """Render the artifact with run context (used when
+        ``render_requires_context`` is ``True``).
+
+        Receives the source export row and the derived version ``vM`` so the
+        rendered header can embed the lineage (week, sequence, revision,
+        version and the original file link). Pipelines that leave
+        ``render_requires_context`` unset keep the plain :meth:`render` flow
+        and never hit this method.
+        """
+        raise NotImplementedError(
+            "This pipeline does not support context-aware artifact rendering."
+        )
+
 
 __all__ = [
     "Pipeline",
