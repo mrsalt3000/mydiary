@@ -1,4 +1,4 @@
-"""Unit tests for the job-handler registry (Task 08/09).
+"""Unit tests for the job-handler registry (Task 08/09/12).
 
 The registry is a module-level dict shared by the whole test session, so every
 test restores the original handlers afterwards (a module fixture snapshots and
@@ -8,6 +8,12 @@ Task 09 replaced the Task-08 ``transcribe_audio`` placeholder with the real
 STT handler: a job whose payload carries no valid ``audio_file_id`` now fails
 permanently with a payload error (not with the old "not implemented yet"
 placeholder message).
+
+Task 12 registered a generic handler for the pipeline job types
+(``normalize``/``summarize``/``wellbeing``): they are no longer "unknown job
+types". A pipeline job whose payload carries no valid ``export_id`` fails
+permanently before any database work, so it is unit-testable without a
+session.
 """
 
 from __future__ import annotations
@@ -35,22 +41,24 @@ def test_transcribe_audio_handler_is_registered_by_default() -> None:
     assert JobType.transcribe_audio.value in handlers.known_job_types()
 
 
-def test_register_and_get_handler_roundtrip() -> None:
-    handlers.register(JobType.normalize, _noop_handler)
+def test_pipeline_job_type_handlers_are_registered_by_default() -> None:
+    """Task 12: normalize/summarize/wellbeing are handled, not unknown types."""
+    for job_type in (JobType.normalize, JobType.summarize, JobType.wellbeing):
+        assert handlers.get_handler(job_type) is not None
+        assert job_type.value in handlers.known_job_types()
+
+
+def test_override_and_get_handler_roundtrip() -> None:
+    """Direct registry overrides (used by queue tests) are visible through
+    ``get_handler``, including lookup by the stored string form."""
+    handlers.REGISTRY[JobType.normalize.value] = _noop_handler  # type: ignore[assignment]
     assert handlers.get_handler(JobType.normalize) is _noop_handler
-    # Lookup by the stored string form works too.
     assert handlers.get_handler("normalize") is _noop_handler
     assert "normalize" in handlers.known_job_types()
 
 
-def test_registering_duplicate_job_type_raises() -> None:
-    handlers.register(JobType.normalize, _noop_handler)
-    with pytest.raises(ValueError, match="already registered"):
-        handlers.register(JobType.normalize, _noop_handler)
-
-
 def test_get_handler_returns_none_for_unregistered_type() -> None:
-    assert handlers.get_handler(JobType.wellbeing) is None
+    """Every JobType now has a handler; only unknown strings return ``None``."""
     assert handlers.get_handler("no-such-type") is None
 
 
@@ -63,3 +71,20 @@ def test_transcribe_handler_fails_permanently_without_valid_payload() -> None:
     job = Job(job_type=JobType.transcribe_audio, payload_json=None)
     with pytest.raises(handlers.PermanentJobError, match="audio_file_id"):
         handler(session=None, job=job)  # type: ignore[arg-type]
+
+
+def test_pipeline_handler_fails_permanently_without_valid_payload() -> None:
+    """A pipeline job whose payload has no valid ``export_id`` is a permanent
+    failure raised before any database work (no session needed)."""
+    handler = handlers.get_handler(JobType.normalize)
+    assert handler is not None
+    job = Job(job_type=JobType.normalize, payload_json=None)
+    with pytest.raises(handlers.PermanentJobError, match="export_id"):
+        handler(session=None, job=job)  # type: ignore[arg-type]
+
+
+def test_registering_duplicate_job_type_raises() -> None:
+    # ``normalize`` is already registered by the baseline, so ``register``
+    # must refuse a second handler for it.
+    with pytest.raises(ValueError, match="already registered"):
+        handlers.register(JobType.normalize, _noop_handler)

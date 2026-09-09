@@ -18,12 +18,19 @@ the exceptions/messages a handler raises must never carry diary content or
 provider secrets. The worker stores only a short, non-sensitive summary of an
 exception in ``jobs.error_summary``.
 
-``transcribe_audio`` (Task 09) is registered to the real STT pipeline: the
-handler delegates to :func:`diary.domain.transcription.service.run_transcription`
-and translates deterministic domain failures (missing audio, invalid payload,
-provider not installed, broken model configuration) into a permanent failure.
-The ``normalize``/``summarize``/``wellbeing`` types have no handler yet and are
-rejected by the worker as unknown job types (also permanent failure).
+Registered handlers:
+
+- ``transcribe_audio`` (Task 09) — the real STT pipeline: delegates to
+  :func:`diary.domain.transcription.service.run_transcription` and translates
+  deterministic domain failures (missing audio, invalid payload, provider not
+  installed, broken model configuration) into a permanent failure;
+- ``normalize``/``summarize``/``wellbeing`` (Task 12) — the generic pipeline
+  handler: delegates to :func:`diary.domain.pipelines.service.run_pipeline`,
+  which drives the processing-run lifecycle. Deterministic failures
+  (pipeline not registered yet, invalid input, invalid structured output,
+  config errors, non-retryable LLM errors) already fail the processing run and
+  are re-raised as permanent job failures; transient LLM errors propagate
+  unchanged and follow the retry policy.
 """
 
 from __future__ import annotations
@@ -34,6 +41,7 @@ from sqlalchemy.orm import Session
 
 from diary.core.models_config import ModelsConfigError
 from diary.db.models import Job, JobType
+from diary.domain.pipelines import service as pipeline_service
 from diary.domain.transcription import service as transcription_service
 from diary.domain.transcription.providers import ProviderUnavailableError
 
@@ -107,4 +115,27 @@ def _transcribe_audio(session: Session, job: Job) -> None:
         raise PermanentJobError(str(exc)) from exc
 
 
+def _run_pipeline_job(session: Session, job: Job) -> None:
+    """Execute one ``normalize``/``summarize``/``wellbeing`` job (Task 12).
+
+    Delegates to :func:`diary.domain.pipelines.service.run_pipeline`, which
+    owns the processing-run lifecycle and already commits terminal *failed*
+    runs. Only the deterministic-failure surface is translated here: a
+    :class:`PipelinePermanentError` (raised for unregistered pipelines, invalid
+    inputs, invalid structured output, config errors and non-retryable LLM
+    errors) marks the job failed immediately. Transient LLM errors propagate
+    unchanged so the worker's retry policy applies.
+    """
+    try:
+        pipeline_service.run_pipeline(session, job)
+    except pipeline_service.PipelinePermanentError as exc:
+        raise PermanentJobError(str(exc)) from exc
+
+
 register(JobType.transcribe_audio, _transcribe_audio)
+for _pipeline_job_type in (
+    JobType.normalize,
+    JobType.summarize,
+    JobType.wellbeing,
+):
+    register(_pipeline_job_type, _run_pipeline_job)

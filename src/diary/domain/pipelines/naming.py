@@ -1,0 +1,137 @@
+"""Derived-artifact naming and layer conventions (Task 12).
+
+Implements the derived-artifact naming rules fixed in tasklist Task 12 and
+``docs/data-lineage.md`` §3-4:
+
+``YYYY-MM-DD_<layer>_NNNN_rN_vM.<ext>``
+
+- ``YYYY-MM-DD`` — the Sunday date of the source week (from the export row);
+- ``<layer>`` — the layer token (``normalized``/``summary``/``wellbeing``);
+- ``NNNN`` — the global no-gap sequence of the **source original export**;
+- ``rN`` — the revision of the source original export;
+- ``vM`` — the version of the derived result for the pair (export row, layer);
+- ``<ext>`` — ``.txt`` for normalized text, ``.md`` for summary/wellbeing.
+
+The module is the single source of truth for the per-layer directories below
+``<exports_dir>``, the per-layer file extensions, and the mappings between
+pipeline/job/task enum values and artifact layers (so a registered pipeline
+can be validated for internal consistency). Stored artifact paths are relative
+to the data root with forward slashes, mirroring
+``diary.domain.exports.service`` (e.g.
+``exports/02_normalized/2026-09-13_normalized_0001_r1_v1.txt``).
+"""
+
+from __future__ import annotations
+
+from datetime import date
+
+from diary.core.models_config import TaskType
+from diary.db.models import ArtifactLayer, JobType, PipelineType
+
+#: Data-root-relative prefix of every export artifact directory.
+EXPORTS_PREFIX = "exports"
+
+#: Per-layer directory below ``<exports_dir>`` (data-lineage.md §4).
+LAYER_DIRNAMES: dict[ArtifactLayer, str] = {
+    ArtifactLayer.original: "01_original",
+    ArtifactLayer.normalized: "02_normalized",
+    ArtifactLayer.summary: "03_summaries",
+    ArtifactLayer.wellbeing: "04_wellbeing",
+}
+
+#: Per-layer file extension of rendered artifacts.
+LAYER_OUTPUT_EXTENSIONS: dict[ArtifactLayer, str] = {
+    ArtifactLayer.original: ".txt",
+    ArtifactLayer.normalized: ".txt",
+    ArtifactLayer.summary: ".md",
+    ArtifactLayer.wellbeing: ".md",
+}
+
+#: Derived pipeline kind → the artifact layer it produces.
+PIPELINE_LAYER: dict[PipelineType, ArtifactLayer] = {
+    PipelineType.normalize: ArtifactLayer.normalized,
+    PipelineType.summarize: ArtifactLayer.summary,
+    PipelineType.wellbeing: ArtifactLayer.wellbeing,
+}
+
+#: Derived pipeline kind → the Task-03 LLM profile task type it uses.
+PIPELINE_TASK_TYPE: dict[PipelineType, TaskType] = {
+    PipelineType.normalize: TaskType.normalization,
+    PipelineType.summarize: TaskType.summarization,
+    PipelineType.wellbeing: TaskType.wellbeing_analysis,
+}
+
+#: Derived pipeline kind → the durable job type that drives its execution.
+PIPELINE_JOB_TYPE: dict[PipelineType, JobType] = {
+    PipelineType.normalize: JobType.normalize,
+    PipelineType.summarize: JobType.summarize,
+    PipelineType.wellbeing: JobType.wellbeing,
+}
+
+#: Reverse mapping: job type → pipeline kind.
+JOB_PIPELINE_TYPE: dict[JobType, PipelineType] = {
+    job_type: pipeline_type for pipeline_type, job_type in PIPELINE_JOB_TYPE.items()
+}
+
+
+def layer_dirname(layer: ArtifactLayer) -> str:
+    """Subdirectory of an artifact layer below ``<exports_dir>``.
+
+    For example ``ArtifactLayer.normalized`` → ``"02_normalized"``.
+    """
+    try:
+        return LAYER_DIRNAMES[layer]
+    except KeyError as exc:
+        raise ValueError(f"Unknown artifact layer {layer!r}.") from exc
+
+
+def layer_output_extension(layer: ArtifactLayer) -> str:
+    """File extension of rendered artifacts of ``layer`` (``.txt``/``.md``)."""
+    try:
+        return LAYER_OUTPUT_EXTENSIONS[layer]
+    except KeyError as exc:
+        raise ValueError(f"Unknown artifact layer {layer!r}.") from exc
+
+
+def derived_filename(
+    *,
+    sunday: date,
+    layer: ArtifactLayer,
+    seq_number: int,
+    revision: int,
+    version: int,
+) -> str:
+    """Derived artifact file name per the Task-12 naming rules.
+
+    ``sunday``/``seq_number``/``revision`` come from the source original
+    export row (the layer-1 lineage anchor); ``version`` is the derived
+    version ``vM`` for the pair (export row, layer). The layer token and the
+    extension are derived from ``layer`` so the stored name can never diverge
+    from the layer mapping. Only derived layers (2-4) carry a ``vM`` suffix.
+    """
+    extension = layer_output_extension(layer)
+    return f"{sunday.isoformat()}_{layer.value}_{seq_number:04d}_r{revision}_v{version}{extension}"
+
+
+def artifact_data_root_relative_path(*, layer: ArtifactLayer, filename: str) -> str:
+    """Data-root-relative artifact path for ``filename`` of ``layer``.
+
+    Returns e.g. ``"exports/02_normalized/<filename>"``; joining it with the
+    data root yields the absolute file location stored in ``artifacts.path``.
+    """
+    return f"{EXPORTS_PREFIX}/{layer_dirname(layer)}/{filename}"
+
+
+__all__ = [
+    "EXPORTS_PREFIX",
+    "JOB_PIPELINE_TYPE",
+    "LAYER_DIRNAMES",
+    "LAYER_OUTPUT_EXTENSIONS",
+    "PIPELINE_JOB_TYPE",
+    "PIPELINE_LAYER",
+    "PIPELINE_TASK_TYPE",
+    "artifact_data_root_relative_path",
+    "derived_filename",
+    "layer_dirname",
+    "layer_output_extension",
+]

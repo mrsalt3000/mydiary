@@ -23,7 +23,7 @@ from diary.db.models import TranscriptionStatus
 from diary.domain.exports.service import export_filename
 
 if TYPE_CHECKING:
-    from diary.db.models import Job, Message, Transcription, WeeklyExport
+    from diary.db.models import Artifact, Job, Message, ProcessingRun, Transcription, WeeklyExport
 
 #: Every transcription-status value the API can return.
 TranscriptionStatusValue = Literal["not_requested", "queued", "running", "succeeded", "failed"]
@@ -249,5 +249,98 @@ def export_read_from(record: WeeklyExport) -> ExportRead:
         seq_number=record.seq_number,
         revision=record.revision,
         filename=export_filename(record.week_end_date, record.seq_number, record.revision),
+        created_at=record.created_at.astimezone(timezone_info),
+    )
+
+
+class PipelineRunCreate(BaseModel):
+    """Request body of ``POST /api/v1/pipelines/{pipeline_type}/runs``.
+
+    Holds the source original export id only — the job payload never carries
+    diary content (AGENTS.md §8).
+    """
+
+    export_id: UUID
+
+
+class ProcessingRunRead(BaseModel):
+    """One pipeline processing run as returned by the exports API (Task 12).
+
+    The status surface only: run id, pipeline type, status, provenance columns
+    (profile/model/prompt version) and the safe error summary. No diary
+    content and no raw ``metadata_json`` are ever included.
+    """
+
+    id: UUID
+    pipeline_type: str
+    status: str
+    profile_name: str | None
+    model_name: str | None
+    prompt_version: str | None
+    error_summary: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+    @field_serializer("created_at", "started_at", "finished_at")
+    def _serialize_timestamp(self, value: datetime | None) -> str | None:
+        """ISO-8601 with offset (e.g. ``2026-09-13T21:00:00+03:00``)."""
+        return value.isoformat() if value is not None else None
+
+
+def processing_run_read_from(record: ProcessingRun) -> ProcessingRunRead:
+    """Map an ORM ``ProcessingRun`` row to ``ProcessingRunRead`` in the app tz."""
+    timezone_info = get_settings().tzinfo
+    return ProcessingRunRead(
+        id=record.id,
+        pipeline_type=record.pipeline_type.value,
+        status=record.status.value,
+        profile_name=record.profile_name,
+        model_name=record.model_name,
+        prompt_version=record.prompt_version,
+        error_summary=record.error_summary,
+        created_at=record.created_at.astimezone(timezone_info),
+        started_at=(
+            record.started_at.astimezone(timezone_info) if record.started_at is not None else None
+        ),
+        finished_at=(
+            record.finished_at.astimezone(timezone_info) if record.finished_at is not None else None
+        ),
+    )
+
+
+class ExportArtifactRead(BaseModel):
+    """One derived (or original) artifact of an export as returned by the API.
+
+    Metadata only (layer, version, server-derived filename, sha256, timestamps
+    and the producing run id) — the file itself is never sent here (downloads
+    are a Task 10/16 concern).
+    """
+
+    id: UUID
+    layer: str
+    version: int | None
+    filename: str
+    sha256: str
+    processing_run_id: UUID | None
+    created_at: datetime
+
+    @field_serializer("created_at")
+    def _serialize_created_at(self, value: datetime) -> str:
+        """ISO-8601 with offset (e.g. ``2026-09-13T21:00:00+03:00``)."""
+        return value.isoformat()
+
+
+def artifact_read_from(record: Artifact) -> ExportArtifactRead:
+    """Map an ORM ``Artifact`` row to ``ExportArtifactRead`` in the app tz."""
+    timezone_info = get_settings().tzinfo
+    filename = record.path.rsplit("/", 1)[-1]
+    return ExportArtifactRead(
+        id=record.id,
+        layer=record.layer.value,
+        version=record.version,
+        filename=filename,
+        sha256=record.sha256,
+        processing_run_id=record.processing_run_id,
         created_at=record.created_at.astimezone(timezone_info),
     )

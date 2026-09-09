@@ -388,6 +388,24 @@ class ProcessingRunRepository:
         )
         return list(self._session.scalars(statement))
 
+    def list_by_job_id(self, job_id: uuid.UUID) -> list[ProcessingRun]:
+        """Processing runs whose ``metadata_json`` records ``job_id``.
+
+        Additive read used by the pipeline framework (Task 12) to find the run
+        a pipeline job produced (replay idempotency: one terminal run per
+        job). Runs are few per local diary; the flexible JSON field is matched
+        in Python rather than with dialect-specific JSON functions.
+        """
+        job_key = str(job_id)
+        statement = select(ProcessingRun).order_by(
+            ProcessingRun.created_at.asc(), ProcessingRun.id.asc()
+        )
+        return [
+            run
+            for run in self._session.scalars(statement)
+            if isinstance(run.metadata_json, dict) and run.metadata_json.get("job_id") == job_key
+        ]
+
 
 class ArtifactRepository:
     """Persistence for derived/original :class:`Artifact` records."""

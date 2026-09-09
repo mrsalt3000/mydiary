@@ -233,7 +233,9 @@ def test_transient_failure_retries_with_backoff_then_fails(session_factory) -> N
         calls.append(str(job.id))
         raise ValueError("synthetic transient failure")
 
-    handlers.register(JobType.normalize, flaky)
+    # 'normalize' now has a real baseline handler (Task 12); the fake overrides
+    # the registry entry directly (``register`` forbids duplicates).
+    handlers.REGISTRY[JobType.normalize.value] = flaky
     with session_factory() as session:
         job = JobRepository(session).enqueue(
             job_type=JobType.normalize,
@@ -289,7 +291,8 @@ def test_successful_job_becomes_succeeded(session_factory) -> None:
     def succeed(session, job) -> None:
         session.commit()  # a handler may commit its own side effects
 
-    handlers.register(JobType.normalize, succeed)
+    # Override the Task-12 baseline handler directly (register forbids dupes).
+    handlers.REGISTRY[JobType.normalize.value] = succeed
     with session_factory() as session:
         job = JobRepository(session).enqueue(job_type=JobType.normalize, max_attempts=3)
         job_id = job.id
@@ -306,7 +309,10 @@ def test_successful_job_becomes_succeeded(session_factory) -> None:
 
 
 def test_job_type_without_handler_fails_permanently(session_factory) -> None:
-    # 'normalize' has no handler in the baseline registry.
+    # Task 12 registered a handler for 'normalize'; removing it here simulates
+    # a future job type that has no handler so the runner's no-handler path is
+    # still exercised (permanent failure, no retries burned).
+    handlers.REGISTRY.pop(JobType.normalize.value, None)
     with session_factory() as session:
         job = JobRepository(session).enqueue(
             job_type=JobType.normalize,
