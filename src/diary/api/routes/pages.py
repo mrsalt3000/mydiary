@@ -50,6 +50,12 @@ from diary.db.repositories import (
 )
 from diary.domain.chat.service import list_messages
 from diary.domain.exports.service import export_filename, list_exports
+from diary.domain.pipelines.wellbeing.safety import (
+    ESCALATION_LINES,
+    ESCALATION_TITLE,
+    SafetyLevel,
+    classify,
+)
 from diary.domain.transcription.service import find_active_transcription_job
 
 #: This module lives at ``src/diary/api/routes/pages.py``.
@@ -200,6 +206,7 @@ def _export_view(record: WeeklyExport) -> dict[str, Any]:
         "download_url": f"/api/v1/exports/{record.id}/file",
         "compare_url": f"/exports/{record.id}/normalize",
         "summary_url": f"/exports/{record.id}/summary",
+        "wellbeing_url": f"/exports/{record.id}/wellbeing",
     }
 
 
@@ -303,6 +310,91 @@ def export_summary_page(
             "summary_text": summary_text,
             "summary_filename": summary_filename,
             "summary_download_url": summary_download_url,
+        },
+    )
+
+
+@pages_router.get("/exports/{export_id}/wellbeing", response_class=HTMLResponse)
+def export_wellbeing_page(
+    export_id: uuid.UUID,
+    request: Request,
+    session: Annotated[Session, Depends(get_session)],
+) -> HTMLResponse:
+    """Read-only wellbeing page for one export (Task 15).
+
+    Shows the newest succeeded wellbeing report (layer 4) as escaped plain
+    text inside ``<pre>`` plus a download link, or an empty state with the
+    explicit run action. Safety behavior is deterministic and does NOT depend
+    on any LLM run having succeeded (ADR-006):
+
+    * the page itself classifies the latest normalized (layer 2) text with
+      ``diary.domain.pipelines.wellbeing.safety.classify``;
+    * when the level is ``urgent`` a fixed escalation block (constants from
+      ``safety.py``, never LLM text) and safe minimal metadata (level, export
+      id, detection time — no diary text) are always rendered;
+    * the run action is only rendered when the feature is enabled
+      (``AppSettings.wellbeing_enabled``) and requires an explicit client-side
+      confirmation in addition to the server-side ``confirm: true`` flag.
+    """
+    record = WeeklyExportRepository(session).get(export_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Export not found.")
+    settings = get_settings()
+    normalized_rows = ArtifactRepository(session).list_by_export_and_layer(
+        export_id, ArtifactLayer.normalized
+    )
+    normalized = normalized_rows[-1] if normalized_rows else None
+    report_rows = ArtifactRepository(session).list_by_export_and_layer(
+        export_id, ArtifactLayer.wellbeing
+    )
+    latest_report = report_rows[-1] if report_rows else None
+
+    has_normalized = False
+    normalized_text: str | None = None
+    if normalized is not None:
+        normalized_path = settings.data_root / normalized.path
+        if normalized_path.is_file():
+            has_normalized = True
+            normalized_text = normalized_path.read_text(encoding="utf-8")
+
+    # Deterministic page-level safety classification (never from an LLM).
+    level = classify(normalized_text) if normalized_text is not None else None
+    report_text: str | None = None
+    report_filename: str | None = None
+    report_download_url: str | None = None
+    report_created_display: str | None = None
+    if latest_report is not None:
+        report_path = settings.data_root / latest_report.path
+        if report_path.is_file():
+            report_text = report_path.read_text(encoding="utf-8")
+            report_filename = latest_report.path.rsplit("/", 1)[-1]
+            report_download_url = f"/api/v1/exports/{export_id}/artifacts/{latest_report.id}/file"
+            report_created_display = latest_report.created_at.astimezone(settings.tzinfo).strftime(
+                TIMESTAMP_FORMAT
+            )
+    detected_at = (
+        normalized.created_at.astimezone(settings.tzinfo).strftime(TIMESTAMP_FORMAT)
+        if normalized is not None
+        else None
+    )
+    return templates.TemplateResponse(
+        request,
+        "export_wellbeing.html",
+        {
+            "export": _export_view(record),
+            "wellbeing_enabled": settings.wellbeing_enabled,
+            "has_normalized": has_normalized,
+            "safety_level_value": level.value if level is not None else None,
+            "safety_level_label": level.display_label if level is not None else None,
+            "urgent": level is SafetyLevel.urgent,
+            "escalation_lines": list(ESCALATION_LINES) if level is SafetyLevel.urgent else None,
+            "escalation_title": ESCALATION_TITLE,
+            "export_id_display": str(export_id),
+            "detected_at_display": detected_at,
+            "report_text": report_text,
+            "report_filename": report_filename,
+            "report_download_url": report_download_url,
+            "report_created_display": report_created_display,
         },
     )
 

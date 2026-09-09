@@ -1,20 +1,26 @@
-"""Thin HTTP routes for the pipeline framework (Task 12).
+"""Thin HTTP routes for the pipeline framework (Tasks 12/15).
 
 - ``POST /api/v1/pipelines/{pipeline_type}/runs``  — enqueue a pipeline run
   for one original export (202 + job); body ``{export_id}``. The pipeline
   implementation itself may not be registered yet (Tasks 13-15) — enqueueing
   still succeeds; executing the job then fails permanently with a clear
   summary;
+- ``POST /api/v1/pipelines/wellbeing/runs``  — Task 15: enqueue a wellbeing
+  run. Registered before the generic route and guarded: body must carry
+  ``{export_id, confirm: true}`` (409 otherwise), the feature must be enabled
+  (403) and the export must have a normalized (layer 2) input (404);
 - ``GET /api/v1/exports/{export_id}/runs``       — the export's processing
   runs, newest first (status surface + provenance columns, never content);
 - ``GET /api/v1/exports/{export_id}/artifacts``  — the export's artifacts by
   layer (metadata only: layer/version/filename/sha256; no file bytes).
 
 Handlers stay thin: enqueueing and the run lifecycle live in
-:mod:`diary.domain.pipelines.service`. Error details are static and never echo
-diary content (AGENTS.md §8). Status codes: 404 for unknown exports, 409 when
-the export's original file is gone, 422 for unknown pipeline types, malformed
-UUIDs or a missing body.
+:mod:`diary.domain.pipelines.service` (wellbeing-specific guards in
+:mod:`diary.domain.pipelines.wellbeing.service`). Error details are static
+and never echo diary content (AGENTS.md §8). Status codes: 404 for unknown
+exports/missing inputs, 403 for a disabled wellbeing feature, 409 for a
+missing confirmation or a gone original file, 422 for unknown pipeline types,
+malformed UUIDs or a missing body.
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ from diary.api.schemas import (
     JobRead,
     PipelineRunCreate,
     ProcessingRunRead,
+    WellbeingRunCreate,
     artifact_read_from,
     job_read_from,
     processing_run_read_from,
@@ -55,6 +62,14 @@ from diary.domain.pipelines.naming import (
 )
 from diary.domain.pipelines.normalize import batch as normalize_batch
 from diary.domain.pipelines.summarize import batch as summarize_batch
+from diary.domain.pipelines.wellbeing.service import (
+    WellbeingConfirmationRequiredError,
+    WellbeingDisabledError,
+    WellbeingInputUnavailableError,
+)
+from diary.domain.pipelines.wellbeing.service import (
+    enqueue_wellbeing_run as domain_enqueue_wellbeing_run,
+)
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 
@@ -97,6 +112,58 @@ def enqueue_summarize_batch(
     """
     jobs = summarize_batch.enqueue_summarize_batch(session)
     return [job_read_from(job) for job in jobs]
+
+
+# ---------------------------------------------------------------------------
+# Wellbeing runs (Task 15): an explicit, confirmed, feature-gated action.
+# ---------------------------------------------------------------------------
+# This route is registered BEFORE the generic ``/{pipeline_type}/runs`` route
+# so every ``POST /api/v1/pipelines/wellbeing/runs`` goes through the
+# wellbeing guards (explicit ``confirm: true``, feature switch, normalized
+# input availability) and never through the confirmation-less generic path.
+
+
+@router.post("/wellbeing/runs", response_model=JobRead, status_code=202)
+def enqueue_wellbeing_run(
+    payload: WellbeingRunCreate,
+    session: Annotated[Session, Depends(get_session)],
+) -> JobRead:
+    """Queue one wellbeing run for the export given in ``payload.export_id``.
+
+    Guards (mapped to HTTP errors): the feature must be enabled (403), the
+    request must carry ``confirm: true`` — wellbeing is never automatic (409)
+    — the export must exist (404) and must already have a normalized (layer 2)
+    input whose file is present (404). The actual job is enqueued through the
+    shared pipeline service, so in-flight deduplication and rerun versioning
+    behave like the other pipelines.
+    """
+    try:
+        job = domain_enqueue_wellbeing_run(
+            session, export_id=payload.export_id, confirmed=payload.confirm
+        )
+    except WellbeingDisabledError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="Wellbeing analysis is disabled by configuration.",
+        ) from exc
+    except WellbeingConfirmationRequiredError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Explicit confirmation is required before a wellbeing analysis run.",
+        ) from exc
+    except WellbeingInputUnavailableError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="The export has no normalized text yet; run normalization first.",
+        ) from exc
+    except PipelineExportNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Export not found.") from exc
+    except PipelineOriginalFileMissingError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="The original export file is missing; the pipeline cannot run.",
+        ) from exc
+    return job_read_from(job)
 
 
 @router.post("/{pipeline_type}/runs", response_model=JobRead, status_code=202)

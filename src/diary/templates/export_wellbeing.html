@@ -1,0 +1,128 @@
+{# Wellbeing reflection page (Task 15).
+
+   Shows the newest succeeded wellbeing report (layer 4) for one export as
+   escaped plain text inside <pre> — the stored Markdown is never injected as
+   unsafe HTML — plus a download link. Diary-derived text is inserted through
+   Jinja variables only; Jinja2 autoescape is applied everywhere (no |safe).
+
+   Safety behavior (ADR-006, AGENTS.md §16):
+   - The run action is shown only when the feature is enabled and a normalized
+     (layer 2) text exists, and it always requires an explicit confirmation:
+     the button reveals a panel with the checkbox "Я понимаю: это не диагноз…";
+     the client only sends the POST with {confirm: true} when the box is
+     checked (the server enforces the flag again — double protection).
+   - When the deterministic page-level classification is "urgent" a fixed
+     escalation block (constants from wellbeing/safety.py, never LLM text) is
+     rendered together with safe minimal metadata (level, export id, time) —
+     no diary text in this block.
+   - When wellbeing is disabled the page stays readable but shows no run
+     action. #}
+{% extends "base.html" %}
+{% block title %}Wellbeing-рефлексия — Local Diary{% endblock %}
+{% block content %}
+<main class="exports-page">
+  <p class="page-nav"><a href="/exports">← К выгрузкам</a></p>
+  <h1 class="page-title">Wellbeing-рефлексия</h1>
+
+  <p class="exports-page__note">
+    Выгрузка <span class="export-list__name">{{ export.filename }}</span>
+    (неделя {{ export.monday.strftime('%d.%m.%Y') }} —
+    {{ export.sunday.strftime('%d.%m.%Y') }}, ревизия r{{ export.revision }},
+    создано {{ export.created_at_display }}).
+    <a href="{{ export.download_url }}" download="{{ export.filename }}">
+      Скачать оригинал
+    </a>
+    · <a href="{{ export.compare_url }}">Сравнение: оригинал и нормализация</a>
+    · <a href="{{ export.summary_url }}">Саммари недели</a>
+  </p>
+
+  {% if urgent %}
+  <section class="wellbeing-escalation" role="note" aria-label="Срочная помощь">
+    <h2 class="wellbeing-escalation__title">
+      {{ escalation_title }}
+    </h2>
+    <p class="wellbeing-escalation__meta">
+      Уровень: {{ safety_level_label }} · Выгрузка: {{ export_id_display }} ·
+      Записи созданы: {{ detected_at_display }}
+    </p>
+    {% for line in escalation_lines %}
+    <p class="wellbeing-escalation__line">{{ line }}</p>
+    {% endfor %}
+    <p class="wellbeing-escalation__note">
+      Это не диагноз и не замена профессиональной помощи.
+    </p>
+  </section>
+  {% endif %}
+
+  <section class="compare-block">
+    <h2 class="compare-block__title">Рефлексия (слой 4)</h2>
+    {% if report_text is not none %}
+      {% if report_filename %}
+      <p class="compare-block__meta">{{ report_filename }}</p>
+      {% endif %}
+      {% if report_download_url %}
+      <p class="compare-block__meta">
+        <a href="{{ report_download_url }}" download="{{ report_filename }}">
+          Скачать рефлексию (Markdown)
+        </a>
+      </p>
+      {% endif %}
+      {% if report_created_display %}
+      <p class="compare-block__meta">Создано: {{ report_created_display }}</p>
+      {% endif %}
+      {% if safety_level_value %}
+      <p class="compare-block__meta">Уровень: {{ safety_level_label }}</p>
+      {% endif %}
+      <pre class="compare-block__text">{{ report_text }}</pre>
+    {% elif not has_normalized %}
+      <p class="compare-block__empty">
+        Для этой выгрузки ещё нет wellbeing-рефлексии: сначала нужна
+        нормализация (слой 2) — рефлексия строится только из нормализованного
+        текста.
+      </p>
+    {% elif not wellbeing_enabled %}
+      <p class="compare-block__empty">
+        Wellbeing-анализ отключён в настройках приложения. Ранее созданные
+        отчёты остаются доступными.
+      </p>
+    {% else %}
+      <p class="compare-block__empty">
+        Для этой выгрузки ещё нет wellbeing-рефлексии.
+      </p>
+      <form id="wellbeing-run-form"
+            class="wellbeing-run"
+            data-export-id="{{ export.id }}">
+        <p class="wellbeing-run__note">
+          Wellbeing-рефлексия — поддерживающий текст на основе только
+          нормализованных записей недели. Запускается явным действием;
+          отправка текста во внешний LLM возможна, только если профиль
+          настроен как внешний.
+        </p>
+        <button type="button" id="wellbeing-run-open" class="wellbeing-run__open">
+          Запустить wellbeing-рефлексию
+        </button>
+        <div id="wellbeing-confirm" class="wellbeing-run__confirm" hidden>
+          <p>
+            <label>
+              <input type="checkbox" id="wellbeing-confirm-check">
+              Я понимаю: это не медицинский и не психологический диагноз и не
+              замена профессиональной помощи. Рефлексия основана только на
+              записях дневника за этот период.
+            </label>
+          </p>
+          <button type="submit" id="wellbeing-run-submit" disabled>
+            Подтверждаю и запускаю
+          </button>
+          <p id="wellbeing-run-error" class="form-error" hidden></p>
+        </div>
+        <noscript>
+          <p class="noscript-note">
+            Для запуска wellbeing-рефлексии включите JavaScript — запуск
+            требует явного подтверждения.
+          </p>
+        </noscript>
+      </form>
+    {% endif %}
+  </section>
+</main>
+{% endblock %}

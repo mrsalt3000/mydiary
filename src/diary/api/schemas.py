@@ -263,6 +263,19 @@ class PipelineRunCreate(BaseModel):
     export_id: UUID
 
 
+class WellbeingRunCreate(BaseModel):
+    """Request body of ``POST /api/v1/pipelines/wellbeing/runs``.
+
+    Wellbeing analysis is always an explicit user action (AGENTS.md §16): in
+    addition to ``export_id`` the body must carry ``confirm: true``. Without
+    it the server rejects the request (HTTP 409); the UI enforces its own
+    client-side confirmation on top of this flag (double protection).
+    """
+
+    export_id: UUID
+    confirm: bool
+
+
 class ProcessingRunRead(BaseModel):
     """One pipeline processing run as returned by the exports API (Task 12).
 

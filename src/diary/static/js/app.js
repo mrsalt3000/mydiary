@@ -677,3 +677,128 @@
     resumeActiveJobs();
   }
 })();
+
+/* ------------------------------------------------------------------ *
+ * Wellbeing run flow (Task 15).
+ * ------------------------------------------------------------------ *
+ * "Запустить wellbeing-рефлексию" reveals a confirmation panel whose submit
+ * button stays disabled until the explicit checkbox ("Я понимаю: это не
+ * диагноз…") is checked. Only then is POST /api/v1/pipelines/wellbeing/runs
+ * sent with {export_id, confirm: true}; the server enforces confirm again
+ * (double protection — AGENTS.md §16). After a 202 the job is polled like the
+ * transcription flow and the page reloads on a terminal outcome. Error and
+ * status strings are static; server payloads are never rendered.
+ */
+(function () {
+  var form = document.getElementById("wellbeing-run-form");
+  if (!form) {
+    return;
+  }
+  var exportId = form.getAttribute("data-export-id") || "";
+  var openButton = document.getElementById("wellbeing-run-open");
+  var confirmPanel = document.getElementById("wellbeing-confirm");
+  var confirmCheck = document.getElementById("wellbeing-confirm-check");
+  var submitButton = document.getElementById("wellbeing-run-submit");
+  var errorBox = document.getElementById("wellbeing-run-error");
+
+  if (!exportId || !openButton || !confirmPanel || !confirmCheck ||
+      !submitButton || !errorBox) {
+    return;
+  }
+
+  function showRunError(message) {
+    errorBox.textContent = message;
+    errorBox.hidden = false;
+  }
+
+  function setBusy(busy) {
+    openButton.disabled = busy;
+    submitButton.disabled = busy || !confirmCheck.checked;
+    if (busy) {
+      submitButton.textContent = "Запуск…";
+    } else {
+      submitButton.textContent = "Подтверждаю и запускаю";
+    }
+  }
+
+  openButton.addEventListener("click", function () {
+    confirmPanel.hidden = false;
+    openButton.hidden = true;
+  });
+
+  confirmCheck.addEventListener("change", function () {
+    submitButton.disabled = !confirmCheck.checked;
+  });
+
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    if (!confirmCheck.checked) {
+      showRunError("Подтвердите, что вы понимаете назначение рефлексии.");
+      return;
+    }
+    errorBox.hidden = true;
+    setBusy(true);
+    fetch("/api/v1/pipelines/wellbeing/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ export_id: exportId, confirm: true }),
+    })
+      .then(function (response) {
+        if (response.status === 202) {
+          return response.json();
+        }
+        if (response.status === 403) {
+          throw { userMessage: "Wellbeing-анализ отключён в настройках приложения." };
+        }
+        if (response.status === 409) {
+          throw { userMessage: "Требуется явное подтверждение запуска." };
+        }
+        if (response.status === 404) {
+          throw { userMessage: "Сначала выполните нормализацию этой выгрузки." };
+        }
+        throw { userMessage: "Не удалось запустить анализ. Попробуйте ещё раз." };
+      })
+      .then(function (job) {
+        pollWellbeingJob(job.id);
+      })
+      .catch(function (error) {
+        var message = (error && error.userMessage) ||
+          "Не удалось запустить анализ. Попробуйте ещё раз.";
+        showRunError(message);
+        setBusy(false);
+      });
+  });
+
+  function pollWellbeingJob(jobId) {
+    var attempts = 0;
+    function tick() {
+      attempts += 1;
+      if (attempts > 450) {
+        showRunError("Анализ выполняется. Обновите страницу позже.");
+        setBusy(false);
+        return;
+      }
+      fetch("/api/v1/jobs/" + encodeURIComponent(jobId))
+        .then(function (response) {
+          if (!response.ok) {
+            throw new Error("job-poll-failed");
+          }
+          return response.json();
+        })
+        .then(function (job) {
+          if (job.status === "pending" || job.status === "running" ||
+              job.status === "retrying") {
+            window.setTimeout(tick, 2000);
+          } else {
+            window.setTimeout(function () {
+              window.location.reload();
+            }, 300);
+          }
+        })
+        .catch(function () {
+          window.setTimeout(tick, 2000);
+        });
+    }
+    tick();
+  }
+})();

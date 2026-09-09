@@ -106,6 +106,11 @@ class AppSettings(BaseSettings):
     #: chunk in characters (entries are never split). Read from
     #: ``APP_SUMMARIZE_CHUNK_SIZE``.
     summarize_chunk_size: int = Field(default=10000, ge=1)
+    #: Master switch of the wellbeing analysis (layer 4, Task 15). When
+    #: ``False`` the app rejects new wellbeing runs with a clear error and the
+    #: UI hides the run action; previously created reports stay readable.
+    #: Read from ``APP_WELLBEING_ENABLED``.
+    wellbeing_enabled: bool = True
     #: Root directory for all private application data.
     data_root: Path = DEFAULT_DATA_ROOT
     #: SQLite database directory.

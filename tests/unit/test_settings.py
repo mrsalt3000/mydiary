@@ -50,6 +50,16 @@ def test_default_values() -> None:
     assert settings.tzinfo == ZoneInfo("Europe/Moscow")
 
 
+def test_wellbeing_enabled_defaults_and_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wellbeing master switch (Task 15) is on by default and follows
+    ``APP_WELLBEING_ENABLED``."""
+    assert _settings().wellbeing_enabled is True
+    monkeypatch.setenv("APP_WELLBEING_ENABLED", "false")
+    assert AppSettings(_env_file=None).wellbeing_enabled is False
+
+
 def test_valid_timezone_override() -> None:
     settings = _settings(timezone="Asia/Tokyo")
     assert settings.timezone == "Asia/Tokyo"
