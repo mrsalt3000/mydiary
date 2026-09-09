@@ -1,15 +1,20 @@
-"""Unit tests for the job-handler registry (Task 08).
+"""Unit tests for the job-handler registry (Task 08/09).
 
 The registry is a module-level dict shared by the whole test session, so every
 test restores the original handlers afterwards (a module fixture snapshots and
 reinstates ``REGISTRY``).
+
+Task 09 replaced the Task-08 ``transcribe_audio`` placeholder with the real
+STT handler: a job whose payload carries no valid ``audio_file_id`` now fails
+permanently with a payload error (not with the old "not implemented yet"
+placeholder message).
 """
 
 from __future__ import annotations
 
 import pytest
 
-from diary.db.models import JobType
+from diary.db.models import Job, JobType
 from diary.workers import handlers
 
 
@@ -25,7 +30,7 @@ def _restore_registry() -> None:
     handlers.REGISTRY.update(snapshot)
 
 
-def test_transcribe_audio_stub_is_registered_by_default() -> None:
+def test_transcribe_audio_handler_is_registered_by_default() -> None:
     assert handlers.get_handler(JobType.transcribe_audio) is not None
     assert JobType.transcribe_audio.value in handlers.known_job_types()
 
@@ -49,8 +54,12 @@ def test_get_handler_returns_none_for_unregistered_type() -> None:
     assert handlers.get_handler("no-such-type") is None
 
 
-def test_transcribe_stub_fails_permanently_with_task09_message() -> None:
-    stub = handlers.get_handler(JobType.transcribe_audio)
-    assert stub is not None
-    with pytest.raises(handlers.PermanentJobError, match="Task 09"):
-        stub(session=None, job=None)  # type: ignore[arg-type]
+def test_transcribe_handler_fails_permanently_without_valid_payload() -> None:
+    """A transcribe job with no payload is a deterministic failure: the real
+    handler must map it to PermanentJobError (payload error), never to the
+    retired Task-08 "not implemented yet" placeholder message."""
+    handler = handlers.get_handler(JobType.transcribe_audio)
+    assert handler is not None
+    job = Job(job_type=JobType.transcribe_audio, payload_json=None)
+    with pytest.raises(handlers.PermanentJobError, match="audio_file_id"):
+        handler(session=None, job=job)  # type: ignore[arg-type]

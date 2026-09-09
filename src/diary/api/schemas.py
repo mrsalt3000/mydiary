@@ -22,7 +22,10 @@ from diary.core.settings import get_settings
 from diary.db.models import TranscriptionStatus
 
 if TYPE_CHECKING:
-    from diary.db.models import Job, Message
+    from diary.db.models import Job, Message, Transcription
+
+#: Every transcription-status value the API can return.
+TranscriptionStatusValue = Literal["not_requested", "queued", "running", "succeeded", "failed"]
 
 
 class MessageCreate(BaseModel):
@@ -121,6 +124,48 @@ def audio_read_from(
         mime=mime,
         size_bytes=size_bytes,
         transcription_status=transcription_status.value,
+        created_at=created_local,
+    )
+
+
+class TranscriptionRead(BaseModel):
+    """One raw STT result — a history item of ``GET /api/v1/audio/{id}/transcriptions``.
+
+    Only rows of real transcription runs are listed (the upload-time
+    ``not_requested`` sentinel is not a result and is excluded). ``raw_text``
+    carries the transcript only for ``succeeded`` rows; failed rows return an
+    empty string. The profile snapshot (provider/model/language) is
+    non-sensitive provenance.
+    """
+
+    id: UUID
+    audio_file_id: UUID
+    status: TranscriptionStatusValue
+    raw_text: str
+    profile_name: str | None
+    provider_name: str | None
+    model_name: str | None
+    language: str | None
+    created_at: datetime
+
+    @field_serializer("created_at")
+    def _serialize_created_at(self, value: datetime) -> str:
+        """ISO-8601 with offset (e.g. ``2026-01-01T05:45:00+05:45``)."""
+        return value.isoformat()
+
+
+def transcription_read_from(record: Transcription) -> TranscriptionRead:
+    """Map an ORM transcription row to ``TranscriptionRead`` in the app timezone."""
+    created_local = record.created_at.astimezone(get_settings().tzinfo)
+    return TranscriptionRead(
+        id=record.id,
+        audio_file_id=record.audio_file_id,
+        status=record.status.value,
+        raw_text=record.raw_text,
+        profile_name=record.profile_name,
+        provider_name=record.provider_name,
+        model_name=record.model_name,
+        language=record.language,
         created_at=created_local,
     )
 

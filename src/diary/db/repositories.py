@@ -535,6 +535,24 @@ class JobRepository:
         )
         return list(self._session.scalars(statement))
 
+    def list_active_of_type(self, job_type: JobType) -> list[Job]:
+        """Jobs of one type still in flight, oldest first.
+
+        "In flight" means ``pending``, ``running`` or ``retrying``. Used by the
+        transcription service (Task 09) to keep a single active job per audio
+        file; terminal jobs are deliberately excluded so an explicit repeat
+        request can start a fresh run.
+        """
+        statement = (
+            select(Job)
+            .where(
+                Job.job_type == job_type,
+                Job.status.in_((JobStatus.pending, JobStatus.running, JobStatus.retrying)),
+            )
+            .order_by(Job.created_at.asc(), Job.id.asc())
+        )
+        return list(self._session.scalars(statement))
+
     def list_recent(self, *, limit: int, status: JobStatus | None = None) -> list[Job]:
         """The ``limit`` most recent jobs, newest first (stable id tie-break).
 

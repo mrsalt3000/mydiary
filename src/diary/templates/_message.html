@@ -1,14 +1,18 @@
-{# One diary message (Tasks 06/07). Reused by the chat page (initial window)
+{# One diary message (Tasks 06/07/09). Reused by the chat page (initial window)
    and by the "older messages" fragment. ``message`` is a template-facing dict:
    id / kind / created_at_iso / created_at_display / body, plus — for
-   ``kind == 'audio'`` — audio_url / audio_mime / transcription_status /
-   transcription_label.
+   ``kind == 'audio'`` — audio_file_id / audio_url / audio_mime / the effective
+   transcription status + label, the newest succeeded raw text, the transcribe
+   button label and the active job id when a job is in flight.
 
    Safety rules:
-   - user text (``body``) is escaped by Jinja2 autoescape — never markup;
+   - user text (``body``) and raw transcription text are escaped by Jinja2
+     autoescape — never markup;
    - ``audio_url`` is always a server-generated path
      (``/api/v1/audio/<uuid>/file``) built by the backend from a database row,
-     never from any user-supplied value (no user-controlled ``src``). #}
+     never from any user-supplied value (no user-controlled ``src``);
+   - transcribe actions never run in a page request: they POST to the API and
+     the job is polled by the client (Task 09). #}
 {% if message.kind == 'audio' %}
 <article class="message message--audio" id="message-{{ message.id }}">
   <header class="message__meta">
@@ -17,10 +21,25 @@
   </header>
   <div class="message__audio">
     <audio controls preload="metadata" src="{{ message.audio_url }}"></audio>
+  </div>
+  <div class="message__transcription"
+       id="transcription-{{ message.audio_file_id }}"
+       data-audio-file-id="{{ message.audio_file_id }}"
+       data-message-id="{{ message.id }}"
+       data-transcription-state="{{ message.transcription_status }}"
+       {% if message.active_job_id %}data-active-job-id="{{ message.active_job_id }}"{% endif %}>
     <p class="message__caption">
       <span class="visually-hidden">Статус расшифровки:</span>
-      {{ message.transcription_label }}
+      <span data-role="status-text">{{ message.transcription_label }}</span>
     </p>
+    <div class="message__raw" data-role="raw" {% if not message.transcription_raw %}hidden{% endif %}>
+      {{ message.transcription_raw or "" }}
+    </div>
+    <button type="button" class="transcribe-button" data-action="transcribe"
+            {% if message.active_job_id %}disabled{% endif %}>
+      {% if message.active_job_id %}Расшифровка…{% else %}{{ message.transcription_button_label }}{% endif %}
+    </button>
+    <p class="message__note" data-role="note" role="status" hidden></p>
   </div>
 </article>
 {% else %}

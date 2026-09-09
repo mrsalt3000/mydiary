@@ -1,10 +1,12 @@
 /*
- * Local Diary — chat page behaviour (Tasks 06/07).
+ * Local Diary — chat page behaviour (Tasks 06/07/09).
  *
- * Scope: the text compose form (Task 06) and voice messages (Task 07):
+ * Scope: the text compose form (Task 06), voice messages (Task 07):
  * recording through MediaRecorder when available, a file-upload fallback
  * through a hidden <input type=file>, upload to POST /api/v1/audio and
- * insertion of the created voice message into the chat list. The "load older
+ * insertion of the created voice message into the chat list; and the manual
+ * transcription flow (Task 09): POST .../transcribe on button click, job
+ * polling and raw-text rendering below the audio player. The "load older
  * messages" paging stays declarative (htmx server-rendered fragments).
  *
  * Safety rules (must be preserved by any later edit):
@@ -271,13 +273,50 @@
     player.src = "/api/v1/audio/" + payload.id + "/file";
     box.appendChild(player);
 
+    // Transcription panel (Task 09): mirrors the server-side _message.html
+    // structure so the transcribe flow below works on fresh uploads too.
+    var panel = document.createElement("div");
+    panel.className = "message__transcription";
+    panel.id = "transcription-" + payload.id;
+    panel.dataset.audioFileId = payload.id;
+    panel.dataset.messageId = payload.message_id;
+    panel.dataset.transcriptionState = "not_requested";
+
     var caption = document.createElement("p");
     caption.className = "message__caption";
-    caption.textContent = "Не расшифровано"; // Task 07: manual transcription is Task 09.
-    box.appendChild(caption);
+    var hiddenLabel = document.createElement("span");
+    hiddenLabel.className = "visually-hidden";
+    hiddenLabel.textContent = "Статус расшифровки:";
+    var statusText = document.createElement("span");
+    statusText.setAttribute("data-role", "status-text");
+    statusText.textContent = "Не расшифровано"; // manual STT starts only on click
+    caption.appendChild(hiddenLabel);
+    caption.appendChild(statusText);
+
+    var raw = document.createElement("div");
+    raw.className = "message__raw";
+    raw.setAttribute("data-role", "raw");
+    raw.hidden = true;
+
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "transcribe-button";
+    button.setAttribute("data-action", "transcribe");
+    button.textContent = "Расшифровать";
+
+    var note = document.createElement("p");
+    note.className = "message__note";
+    note.setAttribute("data-role", "note");
+    note.hidden = true;
+
+    panel.appendChild(caption);
+    panel.appendChild(raw);
+    panel.appendChild(button);
+    panel.appendChild(note);
 
     article.appendChild(meta);
     article.appendChild(box);
+    article.appendChild(panel);
     messageList.appendChild(article);
     article.scrollIntoView({ block: "nearest" });
   }
@@ -373,4 +412,268 @@
     uploadAudio(file, file.name);
     fileInput.value = "";
   });
+})();
+
+/* ------------------------------------------------------------------ *
+ * Manual transcription flow (Task 09).
+ * ------------------------------------------------------------------ *
+ * Clicking "Расшифровать"/"Перерасшифровать" under a voice message sends
+ * POST /api/v1/audio/{id}/transcribe (a durable job — never STT in the page
+ * request), then polls GET /api/v1/jobs/{id} until the job is terminal. A
+ * succeeded job refreshes the raw text from GET .../transcriptions. Panels
+ * rendered with an in-flight job (data-active-job-id, e.g. after a page
+ * reload during processing) resume polling automatically. Raw transcription
+ * text is always inserted via textContent — never markup.
+ */
+(function () {
+  var STATUS_LABELS = {
+    not_requested: "Не расшифровано",
+    queued: "Ожидает расшифровки",
+    running: "Расшифровывается…",
+    succeeded: "Расшифровано",
+    failed: "Ошибка расшифровки"
+  };
+  var POLL_INTERVAL_MS = 2000;
+  var POLL_LIMIT = 450; // poll for ~15 minutes at most, then let the user retry
+
+  function transcriptionUrl(audioFileId, suffix) {
+    return "/api/v1/audio/" + encodeURIComponent(audioFileId) + suffix;
+  }
+
+  function hasSuccessFlag(panel) {
+    return panel.getAttribute("data-has-success") === "true";
+  }
+
+  function setStatus(panel, status) {
+    panel.setAttribute("data-transcription-state", status);
+    var text = panel.querySelector('[data-role="status-text"]');
+    if (text) {
+      text.textContent = STATUS_LABELS[status] || STATUS_LABELS.not_requested;
+    }
+  }
+
+  function setRawText(panel, text) {
+    var raw = panel.querySelector('[data-role="raw"]');
+    if (!raw) {
+      return;
+    }
+    raw.textContent = text; // transcription text: textContent only
+    raw.hidden = text.length === 0;
+  }
+
+  function showNote(panel, text) {
+    var note = panel.querySelector('[data-role="note"]');
+    if (!note) {
+      return;
+    }
+    note.textContent = text;
+    note.hidden = text.length === 0;
+  }
+
+  function setBusy(panel, busy) {
+    var button = panel.querySelector('[data-action="transcribe"]');
+    if (!button) {
+      return;
+    }
+    if (busy) {
+      button.disabled = true;
+      button.textContent = "Расшифровка…";
+    } else {
+      button.disabled = false;
+      button.textContent = hasSuccessFlag(panel) ? "Перерасшифровать" : "Расшифровать";
+    }
+  }
+
+  function latestSucceededText(rows) {
+    // The history endpoint lists runs oldest first; the newest success wins.
+    for (var index = rows.length - 1; index >= 0; index -= 1) {
+      if (rows[index].status === "succeeded") {
+        return rows[index].raw_text || "";
+      }
+    }
+    return null;
+  }
+
+  function lastRowStatus(rows) {
+    if (!rows.length) {
+      return "not_requested";
+    }
+    return rows[rows.length - 1].status;
+  }
+
+  function fetchHistory(panel) {
+    return fetch(transcriptionUrl(panel.getAttribute("data-audio-file-id"), "/transcriptions"))
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error("transcription-history-failed");
+        }
+        return response.json();
+      });
+  }
+
+  function finishSucceeded(panel) {
+    fetchHistory(panel)
+      .then(function (rows) {
+        var text = latestSucceededText(rows);
+        if (text !== null) {
+          panel.setAttribute("data-has-success", "true");
+          setRawText(panel, text);
+        }
+        setStatus(panel, "succeeded");
+      })
+      .catch(function () {
+        // History hiccup: still stop polling; a reload renders the server truth.
+        setStatus(panel, "succeeded");
+      })
+      .finally(function () {
+        panel.removeAttribute("data-active-job-id");
+        setBusy(panel, false);
+        showNote(panel, "");
+      });
+  }
+
+  function finishFailed(panel) {
+    setStatus(panel, "failed");
+    // Keep any earlier raw text visible; learn whether a success ever existed
+    // so the re-enabled button offers "Перерасшифровать".
+    fetchHistory(panel)
+      .then(function (rows) {
+        if (latestSucceededText(rows) !== null) {
+          panel.setAttribute("data-has-success", "true");
+        }
+      })
+      .catch(function () {
+        /* keep current state */
+      })
+      .finally(function () {
+        panel.removeAttribute("data-active-job-id");
+        setBusy(panel, false);
+        showNote(panel, "");
+      });
+  }
+
+  function restoreFromHistory(panel) {
+    fetchHistory(panel)
+      .then(function (rows) {
+        var text = latestSucceededText(rows);
+        if (text !== null) {
+          panel.setAttribute("data-has-success", "true");
+          setRawText(panel, text);
+          setStatus(panel, "succeeded");
+        } else if (rows.length) {
+          setStatus(panel, lastRowStatus(rows));
+        } else {
+          setStatus(panel, "not_requested");
+        }
+      })
+      .catch(function () {
+        /* leave the current label untouched */
+      });
+  }
+
+  function pollJob(panel, jobId) {
+    panel.setAttribute("data-active-job-id", jobId);
+    setStatus(panel, "queued");
+    setBusy(panel, true);
+    showNote(panel, "");
+
+    var remaining = POLL_LIMIT;
+    function schedule() {
+      window.setTimeout(tick, POLL_INTERVAL_MS);
+    }
+    function giveUp() {
+      panel.removeAttribute("data-active-job-id");
+      setBusy(panel, false);
+      showNote(panel, "Статус недоступен. Обновите страницу или попробуйте ещё раз.");
+    }
+    function tick() {
+      remaining -= 1;
+      if (remaining <= 0) {
+        giveUp();
+        return;
+      }
+      fetch("/api/v1/jobs/" + encodeURIComponent(jobId))
+        .then(function (response) {
+          if (!response.ok) {
+            throw new Error("job-poll-failed");
+          }
+          return response.json();
+        })
+        .then(function (job) {
+          if (job.status === "pending" || job.status === "retrying") {
+            setStatus(panel, "queued");
+            schedule();
+          } else if (job.status === "running") {
+            setStatus(panel, "running");
+            schedule();
+          } else if (job.status === "succeeded") {
+            finishSucceeded(panel);
+          } else {
+            finishFailed(panel); // failed / cancelled / unknown terminal state
+          }
+        })
+        .catch(function () {
+          schedule(); // transient network error: keep polling
+        });
+    }
+    tick();
+  }
+
+  function startTranscription(panel) {
+    var state = panel.getAttribute("data-transcription-state");
+    if (state === "queued" || state === "running" || panel.getAttribute("data-active-job-id")) {
+      return; // a job is already being tracked
+    }
+    setBusy(panel, true);
+    setStatus(panel, "queued");
+    showNote(panel, "Отправка…");
+    var audioFileId = panel.getAttribute("data-audio-file-id");
+    fetch(transcriptionUrl(audioFileId, "/transcribe"), { method: "POST" })
+      .then(function (response) {
+        if (response.status === 202 || response.status === 200) {
+          return response.json();
+        }
+        throw new Error("transcribe-request-failed");
+      })
+      .then(function (job) {
+        showNote(panel, "");
+        pollJob(panel, job.id);
+      })
+      .catch(function () {
+        setBusy(panel, false);
+        showNote(panel, "Не удалось запустить расшифровку. Попробуйте ещё раз.");
+        restoreFromHistory(panel);
+      });
+  }
+
+  document.addEventListener("click", function (event) {
+    var target = event.target;
+    if (!target || typeof target.closest !== "function") {
+      return;
+    }
+    var button = target.closest('[data-action="transcribe"]');
+    if (!button || button.disabled) {
+      return;
+    }
+    var panel = button.closest(".message__transcription");
+    if (panel) {
+      startTranscription(panel);
+    }
+  });
+
+  function resumeActiveJobs() {
+    var panels = document.querySelectorAll(".message__transcription[data-active-job-id]");
+    for (var index = 0; index < panels.length; index += 1) {
+      var jobId = panels[index].getAttribute("data-active-job-id");
+      if (jobId) {
+        pollJob(panels[index], jobId);
+      }
+    }
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", resumeActiveJobs);
+  } else {
+    resumeActiveJobs();
+  }
 })();

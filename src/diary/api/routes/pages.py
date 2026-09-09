@@ -33,9 +33,10 @@ from sqlalchemy.orm import Session
 
 from diary.api.routes.messages import _decode_cursor, _encode_cursor, get_session
 from diary.core.settings import get_settings
-from diary.db.models import Message, MessageKind, TranscriptionStatus
+from diary.db.models import JobStatus, Message, MessageKind, TranscriptionStatus
 from diary.db.repositories import AudioFileRepository, TranscriptionRepository
 from diary.domain.chat.service import list_messages
+from diary.domain.transcription.service import find_active_transcription_job
 
 #: This module lives at ``src/diary/api/routes/pages.py``.
 _PACKAGE_DIR = Path(__file__).resolve().parents[2]
@@ -67,22 +68,53 @@ def _audio_view(session: Session, message_id: uuid.UUID) -> dict[str, Any] | Non
     """Template fields for the audio file of one ``kind=audio`` message.
 
     Task 07 stores exactly one ``audio_files`` row per audio message; the row
-    is looked up by message id (never from any user-supplied path) and its
-    transcription state comes from the newest ``transcriptions`` row. Returns
-    ``None`` for text messages or when the linkage is missing (the template
-    then renders the message body only).
+    is looked up by message id (never from any user-supplied path). Task 09
+    adds the transcription panel state:
+
+    - an in-flight ``transcribe_audio`` job (pending/retrying → shown as
+      ``queued``, running → ``running``) overrides the row-derived status, so
+      a page reload during processing still shows the busy state and the
+      client can resume polling via ``active_job_id``;
+    - otherwise the status comes from the newest ``transcriptions`` row
+      (``not_requested`` before the first manual run, ``succeeded``/``failed``
+      afterwards);
+    - ``transcription_raw`` is the text of the newest succeeded row and is
+      rendered (escaped) below the audio player; history beyond the latest
+      version is served by ``GET /api/v1/audio/{id}/transcriptions``.
+
+    Returns ``None`` for text messages or when the linkage is missing (the
+    template then renders the message body only).
     """
     audio_files = AudioFileRepository(session).get_by_message(message_id)
     if not audio_files:
         return None
     audio = audio_files[-1]
     transcriptions = TranscriptionRepository(session).list_by_audio_file(audio.id)
-    status = transcriptions[-1].status if transcriptions else TranscriptionStatus.not_requested
+    active_job = find_active_transcription_job(session, audio.id)
+    if active_job is not None:
+        # pending/retrying → queued; running → running.
+        status = (
+            TranscriptionStatus.running
+            if active_job.status is JobStatus.running
+            else TranscriptionStatus.queued
+        )
+    else:
+        status = transcriptions[-1].status if transcriptions else TranscriptionStatus.not_requested
+    latest_success = next(
+        (row for row in reversed(transcriptions) if row.status is TranscriptionStatus.succeeded),
+        None,
+    )
     return {
+        "audio_file_id": str(audio.id),
         "audio_url": f"/api/v1/audio/{audio.id}/file",
         "audio_mime": audio.original_mime,
         "transcription_status": status.value,
         "transcription_label": TRANSCRIPTION_LABELS.get(status, "Не расшифровано"),
+        "transcription_raw": latest_success.raw_text if latest_success is not None else None,
+        "transcription_button_label": (
+            "Перерасшифровать" if latest_success is not None else "Расшифровать"
+        ),
+        "active_job_id": str(active_job.id) if active_job is not None else None,
     }
 
 

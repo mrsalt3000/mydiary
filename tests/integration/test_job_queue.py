@@ -9,8 +9,8 @@ module functions registered per test.
 Covered: enqueue defaults, idempotency reuse, atomic claim semantics (two
 claimers never receive the same job), transient retries with growing backoff,
 permanent failure after ``max_attempts``, success, unknown job type, the
-Task 08 ``transcribe_audio`` placeholder, cancellation, restart survival, and
-stale-``running`` recovery.
+``transcribe_audio`` handler rejecting an invalid payload permanently,
+cancellation, restart survival, and stale-``running`` recovery.
 """
 
 from __future__ import annotations
@@ -325,7 +325,9 @@ def test_job_type_without_handler_fails_permanently(session_factory) -> None:
         assert "No job handler is registered for job type 'normalize'" in stored.error_summary
 
 
-def test_transcribe_audio_placeholder_fails_permanently(session_factory) -> None:
+def test_transcribe_audio_with_invalid_payload_fails_permanently(session_factory) -> None:
+    """The real (Task 09) handler rejects a transcribe job whose payload has no
+    valid audio_file_id as a deterministic failure — no retries are burned."""
     with session_factory() as session:
         job = JobRepository(session).enqueue(
             job_type=JobType.transcribe_audio,
@@ -340,10 +342,10 @@ def test_transcribe_audio_placeholder_fails_permanently(session_factory) -> None
         stored = JobRepository(session).get(job_id)
         assert stored is not None
         assert stored.status is JobStatus.failed
-        assert stored.attempts == 1
+        assert stored.attempts == 1  # failed immediately, not after max_attempts
         assert stored.error_summary is not None
-        assert "not implemented yet" in stored.error_summary
-        assert "Task 09" in stored.error_summary
+        assert "audio_file_id" in stored.error_summary
+        assert "not implemented" not in stored.error_summary
 
 
 # ---------------------------------------------------------------------------

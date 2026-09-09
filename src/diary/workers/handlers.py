@@ -18,10 +18,11 @@ the exceptions/messages a handler raises must never carry diary content or
 provider secrets. The worker stores only a short, non-sensitive summary of an
 exception in ``jobs.error_summary``.
 
-Task 08 ships no real processing (STT is Task 09, LLM pipelines arrive with
-Task 11+). ``transcribe_audio`` is registered with an explicit placeholder that
-fails permanently with a clear message instead of silently succeeding; the
-``normalize``/``summarize``/``wellbeing`` types have no handler yet and are
+``transcribe_audio`` (Task 09) is registered to the real STT pipeline: the
+handler delegates to :func:`diary.domain.transcription.service.run_transcription`
+and translates deterministic domain failures (missing audio, invalid payload,
+provider not installed, broken model configuration) into a permanent failure.
+The ``normalize``/``summarize``/``wellbeing`` types have no handler yet and are
 rejected by the worker as unknown job types (also permanent failure).
 """
 
@@ -31,7 +32,10 @@ from typing import Protocol
 
 from sqlalchemy.orm import Session
 
+from diary.core.models_config import ModelsConfigError
 from diary.db.models import Job, JobType
+from diary.domain.transcription import service as transcription_service
+from diary.domain.transcription.providers import ProviderUnavailableError
 
 
 class PermanentJobError(Exception):
@@ -72,20 +76,35 @@ def known_job_types() -> frozenset[str]:
 
 
 # ---------------------------------------------------------------------------
-# Task 08 placeholders
+# Handlers
 # ---------------------------------------------------------------------------
 
 
-def _transcribe_audio_not_implemented(session: Session, job: Job) -> None:
-    """Task 08 placeholder: real STT arrives with Task 09.
+def _transcribe_audio(session: Session, job: Job) -> None:
+    """Execute one ``transcribe_audio`` job (Task 09).
 
-    The job fails permanently with a clear, non-sensitive summary; a retry
-    would never succeed, so it must not burn ``max_attempts`` in backoff.
+    Deterministic failures are wrapped in :class:`PermanentJobError` so the
+    job fails immediately with a safe summary instead of burning retries:
+
+    - the payload has no valid ``audio_file_id`` (``TranscriptionPermanentError``);
+    - the audio row/bytes are gone;
+    - the optional faster-whisper runtime is not installed
+      (``ProviderUnavailableError``);
+    - the models configuration is missing/broken (``ModelsConfigError``).
+
+    Any other exception (provider runtime failure, decoder error) propagates
+    unchanged and follows the worker's transient retry policy; the domain
+    service writes the single terminal ``failed`` transcription row when the
+    last attempt fails.
     """
-    raise PermanentJobError(
-        "The transcribe_audio handler is not implemented yet "
-        "(planned in Task 09); the job was failed permanently."
-    )
+    try:
+        transcription_service.run_transcription(session, job)
+    except transcription_service.TranscriptionPermanentError as exc:
+        raise PermanentJobError(str(exc)) from exc
+    except ProviderUnavailableError as exc:
+        raise PermanentJobError(str(exc)) from exc
+    except ModelsConfigError as exc:
+        raise PermanentJobError(str(exc)) from exc
 
 
-register(JobType.transcribe_audio, _transcribe_audio_not_implemented)
+register(JobType.transcribe_audio, _transcribe_audio)

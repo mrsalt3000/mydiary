@@ -28,6 +28,13 @@ dev = [
     "mypy>=1.10",
     "pre-commit>=3.5",
 ]
+# Optional local speech-to-text runtime (Task 09): heavier native dependency.
+# It is NOT installed by default or in CI — transcription is triggered through
+# the provider abstraction, and a worker only needs faster-whisper when a
+# transcribe_audio job actually runs (see README "Транскрипция на CPU").
+stt = [
+    "faster-whisper>=1.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
