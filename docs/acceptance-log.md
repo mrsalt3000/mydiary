@@ -24,7 +24,7 @@
 | Task 08 — Implement durable SQLite-backed job queue and worker | accepted | 0 | — |
 | Task 09 — Implement local speech-to-text pipeline | accepted | 0 | — |
 | Task 10 — Define weekly export rules and implement original TXT export | accepted | 0 | — |
-| Task 11 — Implement reusable OpenAI-compatible LLM client | not_started | 0 | — |
+| Task 11 — Implement reusable OpenAI-compatible LLM client | accepted | 0 | — |
 | Task 12 — Implement LLM pipeline framework and artifact versioning | not_started | 0 | — |
 | Task 13 — Implement normalization pipeline (layer 2) | not_started | 0 | — |
 | Task 14 — Implement summarization pipeline (layer 3) | not_started | 0 | — |
