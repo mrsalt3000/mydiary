@@ -1,0 +1,14 @@
+{# Fragment returned by GET /messages/fragments/older (Task 06).
+
+   Body: the next older messages in chronological order (they are inserted at
+   the top of ``#message-list`` with hx-swap="afterbegin", i.e. prepended to
+   what is already shown, which keeps the boundary ordering exact even when
+   several messages share a ``created_at``).
+
+   Out-of-band tail: a fresh ``#older-control`` carrying the next cursor (or
+   the "start of history" marker when paging is exhausted) — htmx swaps it in
+   place of the previous button, so the client needs no cursor bookkeeping. #}
+{% for message in messages %}{% include "_message.html" %}{% endfor %}
+<div id="older-control" hx-swap-oob="outerHTML">
+  {% include "_older_button.html" %}
+</div>

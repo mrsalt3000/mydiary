@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Дневник — Local Diary{% endblock %}
+{% block content %}
+<main class="chat-page">
+  <h1 class="page-title">Дневник</h1>
+
+  <section class="history" aria-label="История записей">
+    {% if has_more %}
+    <div id="older-control">
+      {% include "_older_button.html" %}
+    </div>
+    {% endif %}
+
+    <div id="message-list" class="message-list">
+      {% if messages %}
+      {% for message in messages %}{% include "_message.html" %}{% endfor %}
+      {% else %}
+      <p id="message-empty" class="message-list__empty">
+        Пока нет записей. Напишите первую ниже.
+      </p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="compose" aria-label="Новая запись">
+    <form id="compose-form" class="compose-form" method="post" novalidate
+          data-max-length="{{ max_message_length }}">
+      <label class="visually-hidden" for="message-text">Текст записи</label>
+      <textarea id="message-text" name="body" rows="3" required
+                placeholder="Напишите запись…"></textarea>
+      <p id="form-error" class="form-error" role="alert" hidden></p>
+      <div class="compose-form__actions">
+        <button id="compose-submit" type="submit">Сохранить запись</button>
+      </div>
+      <noscript>
+        <p class="noscript-note">
+          Для добавления записей нужен включённый JavaScript. Просмотр истории
+          работает и без него.
+        </p>
+      </noscript>
+    </form>
+  </section>
+</main>
+{% endblock %}

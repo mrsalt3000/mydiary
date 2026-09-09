@@ -1,0 +1,224 @@
+/* Local Diary — minimal local stylesheet (Task 06).
+
+   No external fonts, icons or network resources: the diary page must not make
+   any request to the internet (docs/privacy-and-safety.md). The palette uses
+   CSS variables so the page stays readable in light and dark mode.
+
+   Names prefixed with htmx-* belong to the htmx behaviour contract:
+   - elements with .htmx-indicator are hidden until their request is in flight;
+   - the element issuing a request gets .htmx-request while it is in flight.
+*/
+
+:root {
+  --color-bg: #f7f5f0;
+  --color-surface: #ffffff;
+  --color-text: #1f2430;
+  --color-text-muted: #5b6472;
+  --color-accent: #3b5bdb;
+  --color-accent-contrast: #ffffff;
+  --color-border: #d8d5cc;
+  --color-error: #b3261e;
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.06);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #16181d;
+    --color-surface: #1f222a;
+    --color-text: #e8eaf0;
+    --color-text-muted: #a6adbb;
+    --color-accent: #7c9aff;
+    --color-accent-contrast: #0f1220;
+    --color-border: #343846;
+    --color-error: #ff8a80;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  line-height: 1.5;
+}
+
+.chat-page {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 1.25rem 1rem 3rem;
+}
+
+.page-title {
+  font-size: 1.5rem;
+  margin: 0 0 1rem;
+}
+
+/* ------------------------------- history -------------------------------- */
+
+.history {
+  margin-bottom: 1rem;
+}
+
+#older-control {
+  text-align: center;
+  margin: 0.25rem 0 0.75rem;
+}
+
+.older-button {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  color: var(--color-text);
+  cursor: pointer;
+  font: inherit;
+  padding: 0.35rem 0.9rem;
+}
+
+.older-button:hover,
+.older-button:focus-visible {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.history-start {
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  margin: 0.25rem 0;
+}
+
+/* htmx indicator: visible only while the "older" request is in flight. */
+.htmx-indicator {
+  display: none;
+}
+
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator {
+  display: inline;
+}
+
+/* Prevent a double click from loading the same window twice. */
+.htmx-request.older-button {
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+.message-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.message-list__empty {
+  color: var(--color-text-muted);
+  border: 1px dashed var(--color-border);
+  border-radius: 0.5rem;
+  padding: 1.5rem;
+  text-align: center;
+}
+
+.message {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 0.6rem;
+  box-shadow: var(--shadow-card);
+  padding: 0.6rem 0.85rem;
+}
+
+.message__meta {
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+  margin-bottom: 0.3rem;
+}
+
+.message__body {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* ------------------------------- compose -------------------------------- */
+
+.compose-form {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 0.6rem;
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+}
+
+.compose-form textarea {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 0.4rem;
+  color: var(--color-text);
+  font: inherit;
+  padding: 0.5rem 0.6rem;
+  resize: vertical;
+  width: 100%;
+}
+
+.compose-form textarea:focus-visible {
+  border-color: var(--color-accent);
+  outline: 2px solid color-mix(in srgb, var(--color-accent) 30%, transparent);
+}
+
+.compose-form__actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.compose-form button {
+  background: var(--color-accent);
+  border: 1px solid transparent;
+  border-radius: 0.4rem;
+  color: var(--color-accent-contrast);
+  cursor: pointer;
+  font: inherit;
+  padding: 0.4rem 1rem;
+}
+
+.compose-form button:hover:not(:disabled),
+.compose-form button:focus-visible {
+  filter: brightness(1.08);
+}
+
+.compose-form button:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.form-error {
+  color: var(--color-error);
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.noscript-note {
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  margin: 0.25rem 0 0;
+}
+
+/* ------------------------------ utilities ------------------------------- */
+
+.visually-hidden {
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}

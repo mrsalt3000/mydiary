@@ -1,0 +1,10 @@
+{# One diary message (Task 06). Reused by the chat page (initial window) and
+   by the "older messages" fragment. ``message`` is a template-facing dict:
+   id / created_at_iso / created_at_display / body. User text (``body``) is
+   escaped by Jinja2 autoescape — never rendered as markup. #}
+<article class="message" id="message-{{ message.id }}">
+  <header class="message__meta">
+    <time datetime="{{ message.created_at_iso }}">{{ message.created_at_display }}</time>
+  </header>
+  <div class="message__body">{{ message.body }}</div>
+</article>

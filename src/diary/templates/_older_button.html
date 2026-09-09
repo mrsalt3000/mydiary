@@ -1,0 +1,18 @@
+{# "Load older" control (Task 06). Rendered both on the chat page (initial
+   state) and inside the older-messages fragment response as an htmx OOB swap
+   that advances the cursor or stops paging. ``older_cursor`` is pre-URL-encoded
+   by the server. #}
+{% if has_more %}
+<button id="older-button"
+        type="button"
+        class="older-button"
+        hx-get="/messages/fragments/older?cursor={{ older_cursor }}"
+        hx-target="#message-list"
+        hx-swap="afterbegin"
+        hx-indicator="#older-loading">
+  Показать более старые записи
+</button>
+<span id="older-loading" class="htmx-indicator" role="status">Загрузка…</span>
+{% else %}
+<p class="history-start" id="history-start" role="status">Начало истории</p>
+{% endif %}
