@@ -34,6 +34,19 @@ _SUBDIR_FIELDS: dict[str, str] = {
     "backups_dir": "backups",
 }
 
+#: Default MIME types accepted for voice-message uploads (Task 07).
+#: Mirrors what browsers emit for MediaRecorder recordings and plain file
+#: uploads (architecture brief §8.1). Only types with a built-in storage
+#: profile in ``diary.domain.audio.service`` can be uploaded; entries unknown
+#: to that profile are rejected at upload time with a clear error.
+DEFAULT_ALLOWED_AUDIO_MIME_TYPES: list[str] = [
+    "audio/webm",  # MediaRecorder default in Chrome/Edge/Firefox (Opus).
+    "audio/ogg",  # Opus in an Ogg container (e.g. Firefox recordings).
+    "audio/wav",  # Uploaded PCM WAV.
+    "audio/mpeg",  # Uploaded MP3.
+    "audio/mp4",  # M4A / MediaRecorder output in Safari.
+]
+
 
 class AppSettings(BaseSettings):
     """Application-wide settings loaded from the environment and ``.env``.
@@ -49,6 +62,7 @@ class AppSettings(BaseSettings):
         env_file=PROJECT_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     #: IANA timezone name used for all local-time display and week math.
@@ -56,6 +70,15 @@ class AppSettings(BaseSettings):
     #: Maximum length (in characters) of a single text-message body. Applied
     #: at the API boundary (see ``diary.api.schemas.MessageCreate``).
     max_message_length: int = Field(default=20000, ge=1)
+    #: Maximum accepted size of one voice-message upload in mebibytes.
+    #: Read from ``APP_MAX_AUDIO_MB`` (the field name would otherwise map to
+    #: ``APP_MAX_AUDIO_SIZE_MB``; ``populate_by_name`` keeps construction by
+    #: field name working too).
+    max_audio_size_mb: int = Field(default=25, ge=1, validation_alias="APP_MAX_AUDIO_MB")
+    #: MIME types accepted for voice-message uploads (bare types, no
+    #: ``;codecs=...`` parameters). Env value is parsed as JSON, e.g.
+    #: ``APP_ALLOWED_AUDIO_MIME_TYPES='["audio/webm","audio/wav"]'``.
+    allowed_audio_mime_types: list[str] = DEFAULT_ALLOWED_AUDIO_MIME_TYPES
     #: Root directory for all private application data.
     data_root: Path = DEFAULT_DATA_ROOT
     #: SQLite database directory.
@@ -84,6 +107,26 @@ class AppSettings(BaseSettings):
             ) from exc
         return name
 
+    @field_validator("allowed_audio_mime_types")
+    @classmethod
+    def _validate_audio_mime_types(cls, value: list[str]) -> list[str]:
+        """Normalize allowed MIME entries: lowercase, trimmed, de-duplicated."""
+        normalized: list[str] = []
+        for entry in value:
+            cleaned = entry.strip().lower()
+            if not cleaned:
+                raise ValueError("Allowed audio MIME types must not contain empty entries.")
+            if ";" in cleaned or "/" not in cleaned:
+                raise ValueError(
+                    f"Allowed audio MIME type {cleaned!r} must be a bare type "
+                    "such as 'audio/webm' without parameters."
+                )
+            if cleaned not in normalized:
+                normalized.append(cleaned)
+        if not normalized:
+            raise ValueError("At least one allowed audio MIME type is required.")
+        return normalized
+
     @model_validator(mode="after")
     def _resolve_data_paths(self) -> Self:
         """Make data paths absolute and rebase per-directory defaults.
@@ -108,6 +151,11 @@ class AppSettings(BaseSettings):
     def tzinfo(self) -> ZoneInfo:
         """``ZoneInfo`` compiled from :attr:`timezone` (already validated)."""
         return ZoneInfo(self.timezone)
+
+    @property
+    def max_audio_size_bytes(self) -> int:
+        """Maximum accepted voice-message upload size in bytes."""
+        return self.max_audio_size_mb * 1024 * 1024
 
 
 @lru_cache(maxsize=1)

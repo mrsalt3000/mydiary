@@ -21,8 +21,9 @@ Rendering decisions
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -32,7 +33,8 @@ from sqlalchemy.orm import Session
 
 from diary.api.routes.messages import _decode_cursor, _encode_cursor, get_session
 from diary.core.settings import get_settings
-from diary.db.models import Message
+from diary.db.models import Message, MessageKind, TranscriptionStatus
+from diary.db.repositories import AudioFileRepository, TranscriptionRepository
 from diary.domain.chat.service import list_messages
 
 #: This module lives at ``src/diary/api/routes/pages.py``.
@@ -47,21 +49,64 @@ PAGE_LIMIT = 50
 #: Numeric-only codes: the rendering does not depend on the process locale.
 TIMESTAMP_FORMAT = "%d.%m.%Y %H:%M"
 
+#: Human-readable transcription-state captions for audio messages.
+TRANSCRIPTION_LABELS: dict[TranscriptionStatus, str] = {
+    TranscriptionStatus.not_requested: "Не расшифровано",
+    TranscriptionStatus.queued: "Ожидает расшифровки",
+    TranscriptionStatus.running: "Расшифровывается…",
+    TranscriptionStatus.succeeded: "Расшифровано",
+    TranscriptionStatus.failed: "Ошибка расшифровки",
+}
+
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 pages_router = APIRouter(tags=["pages"])
 
 
-def _message_view(record: Message) -> dict[str, str]:
-    """Map a message to template-ready fields in the application timezone."""
+def _audio_view(session: Session, message_id: uuid.UUID) -> dict[str, Any] | None:
+    """Template fields for the audio file of one ``kind=audio`` message.
+
+    Task 07 stores exactly one ``audio_files`` row per audio message; the row
+    is looked up by message id (never from any user-supplied path) and its
+    transcription state comes from the newest ``transcriptions`` row. Returns
+    ``None`` for text messages or when the linkage is missing (the template
+    then renders the message body only).
+    """
+    audio_files = AudioFileRepository(session).get_by_message(message_id)
+    if not audio_files:
+        return None
+    audio = audio_files[-1]
+    transcriptions = TranscriptionRepository(session).list_by_audio_file(audio.id)
+    status = transcriptions[-1].status if transcriptions else TranscriptionStatus.not_requested
+    return {
+        "audio_url": f"/api/v1/audio/{audio.id}/file",
+        "audio_mime": audio.original_mime,
+        "transcription_status": status.value,
+        "transcription_label": TRANSCRIPTION_LABELS.get(status, "Не расшифровано"),
+    }
+
+
+def _message_view(record: Message, session: Session) -> dict[str, Any]:
+    """Map a message to template-ready fields in the application timezone.
+
+    Audio messages additionally carry a server-generated ``audio_url`` and the
+    transcription-state caption; all values originate from the database, never
+    from user input, and are escaped by Jinja2 at render time.
+    """
     settings = get_settings()
     created_local = record.created_at.astimezone(settings.tzinfo)
-    return {
+    view: dict[str, Any] = {
         "id": str(record.id),
+        "kind": record.kind.value,
         "created_at_iso": created_local.isoformat(),
         "created_at_display": created_local.strftime(TIMESTAMP_FORMAT),
         "body": record.body_text,
     }
+    if record.kind is MessageKind.audio:
+        audio = _audio_view(session, record.id)
+        if audio is not None:
+            view.update(audio)
+    return view
 
 
 @pages_router.get("/", response_class=HTMLResponse)
@@ -72,15 +117,19 @@ def chat_page(
     """Render the chat page with the first (most recent) history window."""
     messages, next_cursor = list_messages(session, limit=PAGE_LIMIT)
     older_cursor = _encode_cursor(next_cursor) if next_cursor is not None else None
+    settings = get_settings()
     return templates.TemplateResponse(
         request,
         "chat.html",
         {
-            "messages": [_message_view(message) for message in messages],
+            "messages": [_message_view(message, session) for message in messages],
             "has_more": next_cursor is not None,
             # Pre-quoted for the hx-get URL; Jinja never sees raw "+" or "|".
             "older_cursor": quote(older_cursor, safe="") if older_cursor else None,
-            "max_message_length": get_settings().max_message_length,
+            "max_message_length": settings.max_message_length,
+            "max_audio_size_mb": settings.max_audio_size_mb,
+            # Client-side ``accept`` for the file-upload fallback.
+            "audio_accept": ",".join(settings.allowed_audio_mime_types),
         },
     )
 
@@ -109,7 +158,7 @@ def older_messages_fragment(
         request,
         "_older_messages.html",
         {
-            "messages": [_message_view(message) for message in messages],
+            "messages": [_message_view(message, session) for message in messages],
             "has_more": next_cursor is not None,
             "older_cursor": quote(older_cursor, safe="") if older_cursor else None,
         },

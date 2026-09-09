@@ -1,10 +1,33 @@
-{# One diary message (Task 06). Reused by the chat page (initial window) and
-   by the "older messages" fragment. ``message`` is a template-facing dict:
-   id / created_at_iso / created_at_display / body. User text (``body``) is
-   escaped by Jinja2 autoescape — never rendered as markup. #}
+{# One diary message (Tasks 06/07). Reused by the chat page (initial window)
+   and by the "older messages" fragment. ``message`` is a template-facing dict:
+   id / kind / created_at_iso / created_at_display / body, plus — for
+   ``kind == 'audio'`` — audio_url / audio_mime / transcription_status /
+   transcription_label.
+
+   Safety rules:
+   - user text (``body``) is escaped by Jinja2 autoescape — never markup;
+   - ``audio_url`` is always a server-generated path
+     (``/api/v1/audio/<uuid>/file``) built by the backend from a database row,
+     never from any user-supplied value (no user-controlled ``src``). #}
+{% if message.kind == 'audio' %}
+<article class="message message--audio" id="message-{{ message.id }}">
+  <header class="message__meta">
+    <time datetime="{{ message.created_at_iso }}">{{ message.created_at_display }}</time>
+    <span class="message__badge">Голосовое</span>
+  </header>
+  <div class="message__audio">
+    <audio controls preload="metadata" src="{{ message.audio_url }}"></audio>
+    <p class="message__caption">
+      <span class="visually-hidden">Статус расшифровки:</span>
+      {{ message.transcription_label }}
+    </p>
+  </div>
+</article>
+{% else %}
 <article class="message" id="message-{{ message.id }}">
   <header class="message__meta">
     <time datetime="{{ message.created_at_iso }}">{{ message.created_at_display }}</time>
   </header>
   <div class="message__body">{{ message.body }}</div>
 </article>
+{% endif %}

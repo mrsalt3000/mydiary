@@ -19,6 +19,7 @@ from uuid import UUID
 from pydantic import BaseModel, field_serializer, field_validator
 
 from diary.core.settings import get_settings
+from diary.db.models import TranscriptionStatus
 
 if TYPE_CHECKING:
     from diary.db.models import Message
@@ -78,5 +79,47 @@ def message_read_from(record: Message) -> MessageRead:
         id=record.id,
         kind=record.kind.value,
         body=record.body_text,
+        created_at=created_local,
+    )
+
+
+class AudioRead(BaseModel):
+    """A stored voice message as returned by ``POST /api/v1/audio``.
+
+    ``id`` is the ``audio_files`` row id (the playback endpoint is
+    ``GET /api/v1/audio/{id}/file``); ``message_id`` links it to the chat
+    history. No user-supplied file name is ever echoed back.
+    """
+
+    id: UUID
+    message_id: UUID
+    mime: str
+    size_bytes: int
+    transcription_status: Literal["not_requested", "queued", "running", "succeeded", "failed"]
+    created_at: datetime
+
+    @field_serializer("created_at")
+    def _serialize_created_at(self, value: datetime) -> str:
+        """ISO-8601 with offset (e.g. ``2026-01-01T05:45:00+05:45``)."""
+        return value.isoformat()
+
+
+def audio_read_from(
+    *,
+    audio_file_id: UUID,
+    message_id: UUID,
+    mime: str,
+    size_bytes: int,
+    transcription_status: TranscriptionStatus,
+    created_at: datetime,
+) -> AudioRead:
+    """Map a stored audio upload to ``AudioRead`` in the application timezone."""
+    created_local = created_at.astimezone(get_settings().tzinfo)
+    return AudioRead(
+        id=audio_file_id,
+        message_id=message_id,
+        mime=mime,
+        size_bytes=size_bytes,
+        transcription_status=transcription_status.value,
         created_at=created_local,
     )

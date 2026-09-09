@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from diary.api.routes import messages
+from diary.api.routes import audio, messages
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(messages.router)
+api_router.include_router(audio.router)

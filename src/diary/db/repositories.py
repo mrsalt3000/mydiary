@@ -154,7 +154,14 @@ class AudioFileRepository:
         sha256: str,
         duration_seconds: float | None = None,
         created_at: datetime | None = None,
+        id: uuid.UUID | None = None,
     ) -> AudioFile:
+        """Insert one audio-file metadata row.
+
+        ``id`` defaults to a fresh UUID; callers that already generated the
+        server-side file name (``<id>.<ext>``) pass it explicitly so the row
+        primary key and the on-disk name always match.
+        """
         audio_file = AudioFile(
             message_id=message_id,
             original_mime=original_mime,
@@ -164,6 +171,10 @@ class AudioFileRepository:
             duration_seconds=duration_seconds,
             created_at=created_at or utc_now(),
         )
+        if id is not None:
+            # Setting the attribute explicitly suppresses the column default,
+            # so the primary key matches the already-generated file name.
+            audio_file.id = id
         self._session.add(audio_file)
         self._session.flush()
         return audio_file

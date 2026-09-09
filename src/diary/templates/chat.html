@@ -23,6 +23,31 @@
   </section>
 
   <section class="compose" aria-label="Новая запись">
+    {# Voice messages (Task 07): recording through MediaRecorder and a file
+       upload fallback. Requires JavaScript (fetch upload), so the section
+       starts hidden and app.js reveals it only when it can work. The hidden
+       file input accepts exactly the server-side MIME allowlist. #}
+    <div class="voice" id="voice-compose" aria-label="Голосовое сообщение"
+         data-max-audio-mb="{{ max_audio_size_mb }}" hidden>
+      <p class="voice__title">Голосовое сообщение</p>
+      <div class="voice__controls">
+        <button id="voice-record" type="button" class="voice-button">
+          Записать голосовое
+        </button>
+        <button id="voice-stop" type="button" class="voice-button voice-button--stop" hidden>
+          Остановить запись
+        </button>
+        <label for="voice-file" class="voice-button voice-button--file">Загрузить файл</label>
+        <input id="voice-file" class="visually-hidden" type="file"
+               accept="{{ audio_accept }}">
+        <span id="voice-recording" class="voice-recording" role="status" hidden>
+          Идёт запись…
+        </span>
+      </div>
+      <p id="voice-status" class="voice-status" role="status" hidden></p>
+      <p id="voice-error" class="form-error" role="alert" hidden></p>
+    </div>
+
     <form id="compose-form" class="compose-form" method="post" novalidate
           data-max-length="{{ max_message_length }}">
       <label class="visually-hidden" for="message-text">Текст записи</label>
@@ -34,8 +59,8 @@
       </div>
       <noscript>
         <p class="noscript-note">
-          Для добавления записей нужен включённый JavaScript. Просмотр истории
-          работает и без него.
+          Для добавления записей (текста и голоса) нужен включённый
+          JavaScript. Просмотр истории работает и без него.
         </p>
       </noscript>
     </form>
