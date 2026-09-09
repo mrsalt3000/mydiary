@@ -21,3 +21,10 @@ data/**/*
 !data/**/
 !data/README.md
 !data/**/.gitkeep
+
+# ---------------------------------------------------------------------------
+# Working model/app configs (only *.example.* are tracked; real configs are
+# local and may reference environment variables by name)
+# ---------------------------------------------------------------------------
+configs/*.yaml
+!configs/*.example.yaml

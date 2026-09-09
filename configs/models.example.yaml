@@ -1,0 +1,55 @@
+# configs/models.example.yaml — СИНТЕТИЧЕСКИЙ ПРИМЕР (не рабочий конфиг).
+#
+# Политика: см. configs/README.md и docs/privacy-and-safety.md §2.
+# - Секретов в этом файле НЕТ. Поля api_key_env хранят только ИМЯ переменной
+#   окружения; значение резолвится из окружения в рантайме.
+# - Четыре задачи настраиваются независимо; провайдер/модель могут отличаться.
+# - transcription в MVP — только локальный faster_whisper;
+#   normalization/summarization/wellbeing_analysis — только openai_compatible.
+#
+# Как использовать: скопируйте файл в configs/models.yaml (в Git не
+# коммитится) и задайте значения. Путь к рабочему файлу можно переопределить
+# переменной окружения MODELS_CONFIG. Пример имен ключей — в .env.example.
+#
+# external: false — локальный эндпоинт (данные не покидают машину);
+# external: true  — внешний сервис: содержимое дневника уходит наружу и
+#                   требует явного включения и раскрытия в UI.
+
+profiles:
+  transcription:
+    provider: faster_whisper      # локальный STT (MVP)
+    model: small                  # имя/размер модели
+    language: ru                  # язык распознавания
+    device: cpu                   # cpu или cuda (опционально, WSL 2)
+    compute_type: int8            # int8/int8_float16/int8_float32/float16/float32
+    beam_size: 5
+
+  normalization:
+    provider: openai_compatible
+    base_url: http://127.0.0.1:11434/v1   # локальный OpenAI-совместимый эндпоинт (пример)
+    model: local-normalizer
+    api_key_env: NORMALIZATION_API_KEY    # имя переменной окружения, НЕ значение
+    timeout_s: 120
+    temperature: 0.0
+    max_tokens: 8000
+    external: false
+
+  summarization:
+    provider: openai_compatible
+    base_url: https://api.example.com/v1  # пример внешнего сервиса
+    model: summary-model
+    api_key_env: SUMMARIZATION_API_KEY
+    timeout_s: 120
+    temperature: 0.2
+    max_tokens: 2000
+    external: true                         # внешняя обработка: требует явного включения
+
+  wellbeing_analysis:
+    provider: openai_compatible
+    base_url: http://127.0.0.1:11434/v1
+    model: local-wellbeing
+    api_key_env: WELLBEING_API_KEY
+    timeout_s: 120
+    temperature: 0.2
+    max_tokens: 1500
+    external: false
