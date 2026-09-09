@@ -19,7 +19,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def upgrade_database_file(db_path: Path) -> None:
     """Upgrade ``db_path`` to head (in-process Alembic run)."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    config = AlembicConfig(str(REPO_ROOT / "alembic.ini"))
+    # No ``config_file_name`` on purpose: ``alembic/env.py`` must skip
+    # ``fileConfig(alembic.ini)`` so in-process migrations never reconfigure
+    # the root logger or disable ``diary.*`` loggers (caplog relies on them).
+    config = AlembicConfig()
     config.set_main_option("script_location", str(REPO_ROOT / "alembic"))
     config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path.as_posix()}")
     command.upgrade(config, "head")

@@ -25,8 +25,14 @@ ALEMBIC_DIR = REPO_ROOT / "alembic"
 
 
 def make_alembic_config(database_url: str) -> AlembicConfig:
-    """An Alembic ``Config`` pointed at ``database_url`` and the real scripts."""
-    config = AlembicConfig(str(ALEMBIC_INI))
+    """An Alembic ``Config`` pointed at ``database_url`` and the real scripts.
+
+    The config is built without a ``config_file_name`` so ``alembic/env.py``
+    skips ``fileConfig(alembic.ini)``: in-process migrations must not
+    reconfigure the root logger or disable pre-existing ``diary.*`` loggers
+    (which would break caplog-based log assertions in the Task-19 tests).
+    """
+    config = AlembicConfig()
     config.set_main_option("script_location", str(ALEMBIC_DIR))
     config.set_main_option("sqlalchemy.url", database_url)
     return config
