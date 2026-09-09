@@ -79,6 +79,16 @@ class AppSettings(BaseSettings):
     #: ``;codecs=...`` parameters). Env value is parsed as JSON, e.g.
     #: ``APP_ALLOWED_AUDIO_MIME_TYPES='["audio/webm","audio/wav"]'``.
     allowed_audio_mime_types: list[str] = DEFAULT_ALLOWED_AUDIO_MIME_TYPES
+    #: Retry policy for the durable SQLite job queue (Task 08, ADR-003):
+    #: default maximum attempts per job, exponential backoff base (seconds),
+    #: backoff multiplier, backoff cap (seconds) and the staleness threshold
+    #: (seconds) after which a ``running`` job is considered crashed and may be
+    #: reclaimed by a worker (see ``diary.workers.runner``).
+    job_max_attempts: int = Field(default=3, ge=1)
+    job_backoff_base_s: float = Field(default=2.0, gt=0)
+    job_backoff_multiplier: float = Field(default=2.0, gt=0)
+    job_max_backoff_s: float = Field(default=300.0, ge=0)
+    job_stale_after_s: float = Field(default=300.0, gt=0)
     #: Root directory for all private application data.
     data_root: Path = DEFAULT_DATA_ROOT
     #: SQLite database directory.

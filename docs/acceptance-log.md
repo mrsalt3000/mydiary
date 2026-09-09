@@ -21,7 +21,7 @@
 | Task 05 — Implement text diary messages and chat history API | accepted | 0 | — |
 | Task 06 — Implement initial chat UI | accepted | 0 | — |
 | Task 07 — Implement audio ingestion and storage | accepted | 0 | — |
-| Task 08 — Implement durable SQLite-backed job queue and worker | not_started | 0 | — |
+| Task 08 — Implement durable SQLite-backed job queue and worker | accepted | 0 | — |
 | Task 09 — Implement local speech-to-text pipeline | not_started | 0 | — |
 | Task 10 — Define weekly export rules and implement original TXT export | not_started | 0 | — |
 | Task 11 — Implement reusable OpenAI-compatible LLM client | not_started | 0 | — |

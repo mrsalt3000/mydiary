@@ -22,7 +22,7 @@ from diary.core.settings import get_settings
 from diary.db.models import TranscriptionStatus
 
 if TYPE_CHECKING:
-    from diary.db.models import Message
+    from diary.db.models import Job, Message
 
 
 class MessageCreate(BaseModel):
@@ -122,4 +122,50 @@ def audio_read_from(
         size_bytes=size_bytes,
         transcription_status=transcription_status.value,
         created_at=created_local,
+    )
+
+
+class JobRead(BaseModel):
+    """Job status as returned by the polling endpoints (Task 08).
+
+    Privacy rule: the response carries the status surface only — never the
+    ``payload_json``/``metadata_json`` (they may hold identifiers of diary
+    resources) and never diary content. ``error_summary`` is already a safe,
+    non-sensitive summary written by the worker.
+    """
+
+    id: UUID
+    job_type: str
+    status: str
+    attempts: int
+    max_attempts: int | None
+    error_summary: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    @field_serializer("created_at", "updated_at")
+    def _serialize_timestamp(self, value: datetime) -> str:
+        """ISO-8601 with offset (e.g. ``2026-01-01T05:45:00+05:45``)."""
+        return value.isoformat()
+
+
+class JobPage(BaseModel):
+    """Recent jobs of the listing endpoint ``GET /api/v1/jobs``."""
+
+    items: list[JobRead]
+    limit: int
+
+
+def job_read_from(record: Job) -> JobRead:
+    """Map an ORM job to ``JobRead`` in the application timezone."""
+    timezone_info = get_settings().tzinfo
+    return JobRead(
+        id=record.id,
+        job_type=record.job_type.value,
+        status=record.status.value,
+        attempts=record.attempts,
+        max_attempts=record.max_attempts,
+        error_summary=record.error_summary,
+        created_at=record.created_at.astimezone(timezone_info),
+        updated_at=record.updated_at.astimezone(timezone_info),
     )

@@ -6,17 +6,26 @@ integration tests and for the service layer of later tasks. Repositories
 contain no business logic: they flush on create (so constraint/FK errors
 surface immediately) but never commit — the caller owns the transaction and
 commits atomically at the end of its unit of work.
+
+The one deliberate exception is the durable job queue (Task 08, ADR-003): the
+queue *mechanics* (atomic claim, retry/backoff transitions, staleness reset)
+live on :class:`JobRepository` below, because they are purely persistence
+operations over the ``jobs`` table — there is no domain service for them yet.
+The callers of these methods (worker runner, API routes) still own all
+transactions.
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime
-from typing import Any
+from datetime import date, datetime, timedelta
+from typing import Any, cast
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
+from diary.core.settings import get_settings
 from diary.db.base import utc_now
 from diary.db.models import (
     Artifact,
@@ -417,8 +426,68 @@ class ArtifactRepository:
         return list(self._session.scalars(statement))
 
 
+# ---------------------------------------------------------------------------
+# Job-queue policy helpers (Task 08, ADR-003, architecture brief §11)
+# ---------------------------------------------------------------------------
+
+#: Job statuses for which an ``idempotency_key`` replay returns the existing
+#: job instead of creating a duplicate. A job that already succeeded counts as
+#: "already handled"; an in-flight or scheduled one must not be duplicated.
+#: Jobs that ended ``failed``/``cancelled`` do not block a fresh enqueue with
+#: the same key (the caller explicitly retries).
+_REUSABLE_IDEMPOTENCY_STATUSES: frozenset[JobStatus] = frozenset(
+    {
+        JobStatus.pending,
+        JobStatus.running,
+        JobStatus.retrying,
+        JobStatus.succeeded,
+    }
+)
+
+#: Upper bound for a stored ``error_summary`` / exception message fragment.
+MAX_ERROR_SUMMARY_LENGTH = 300
+
+
+def retry_delay_seconds(
+    *,
+    attempts: int,
+    base_s: float,
+    multiplier: float,
+    max_backoff_s: float,
+) -> float:
+    """Exponential-backoff delay before the next run after ``attempts`` tries.
+
+    The ``k``-th failed attempt (``attempts == k``) waits
+    ``base_s * multiplier ** (k - 1)`` seconds, capped at ``max_backoff_s``.
+    Deterministic (no jitter): the MVP runs one local worker, and deterministic
+    delays keep retry scheduling testable.
+    """
+    if attempts < 1:
+        raise ValueError(f"attempts must be >= 1, got {attempts}.")
+    return min(max_backoff_s, base_s * (multiplier ** (attempts - 1)))
+
+
 class JobRepository:
-    """Persistence for durable queue :class:`Job` records (ADR-003)."""
+    """Persistence for durable queue :class:`Job` records (ADR-003).
+
+    Task 04 fixed the schema; Task 08 adds the queue mechanics on top of it:
+
+    - :meth:`enqueue` — create a ``pending`` job with idempotency-key reuse;
+    - :meth:`claim_due` — atomically move one due job to ``running``
+      (single conditional ``UPDATE``, so two workers can never claim the same
+      job — SQLite serializes writers, WAL + ``busy_timeout`` are set up in
+      ``diary.db.session``);
+    - :meth:`mark_succeeded` / :meth:`mark_failed` / :meth:`cancel` —
+      terminal/transition updates, retries with exponential backoff;
+    - :meth:`reset_stale_running` — crash recovery of abandoned ``running``
+      jobs after a worker restart;
+    - :meth:`list_recent` — newest-first listing for status polling.
+
+    The schema intentionally stores no ``worker_id``/``started_at`` columns
+    (Task 04): a claim refreshes ``updated_at``, which therefore marks when the
+    job entered ``running`` and is used as the staleness reference. No method
+    commits — the caller owns the transaction and commits atomically.
+    """
 
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -451,7 +520,13 @@ class JobRepository:
         return self._session.get(Job, job_id)
 
     def get_by_idempotency_key(self, idempotency_key: str) -> Job | None:
-        statement = select(Job).where(Job.idempotency_key == idempotency_key)
+        """Return the most recent job recorded with ``idempotency_key``."""
+        statement = (
+            select(Job)
+            .where(Job.idempotency_key == idempotency_key)
+            .order_by(Job.created_at.desc(), Job.id.desc())
+            .limit(1)
+        )
         return self._session.scalar(statement)
 
     def list_by_status(self, status: JobStatus) -> list[Job]:
@@ -459,3 +534,185 @@ class JobRepository:
             select(Job).where(Job.status == status).order_by(Job.created_at.asc(), Job.id.asc())
         )
         return list(self._session.scalars(statement))
+
+    def list_recent(self, *, limit: int, status: JobStatus | None = None) -> list[Job]:
+        """The ``limit`` most recent jobs, newest first (stable id tie-break).
+
+        Optionally narrowed to one status. ``limit`` must be >= 1.
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}.")
+        statement = select(Job).order_by(Job.created_at.desc(), Job.id.desc())
+        if status is not None:
+            statement = statement.where(Job.status == status)
+        return list(self._session.scalars(statement.limit(limit)))
+
+    # ------------------------------------------------------------------
+    # Queue mechanics (Task 08)
+    # ------------------------------------------------------------------
+
+    def enqueue(
+        self,
+        *,
+        job_type: JobType,
+        payload_json: dict[str, Any] | None = None,
+        metadata_json: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        max_attempts: int | None = None,
+    ) -> Job:
+        """Create one ``pending`` job (or return an existing equivalent).
+
+        With an ``idempotency_key`` and a matching job in a reusable state
+        (pending/running/retrying/succeeded) no second row is created — the
+        existing job is returned unchanged. ``max_attempts`` defaults to the
+        configured ``job_max_attempts`` and must be >= 1. The payload holds
+        only input identifiers/parameters, never diary content.
+        """
+        if max_attempts is None:
+            max_attempts = get_settings().job_max_attempts
+        if max_attempts < 1:
+            raise ValueError(f"max_attempts must be >= 1, got {max_attempts}.")
+        if idempotency_key is not None and len(idempotency_key) > 255:
+            raise ValueError("idempotency_key must be at most 255 characters.")
+        if idempotency_key is not None:
+            existing = self.get_by_idempotency_key(idempotency_key)
+            if existing is not None and existing.status in _REUSABLE_IDEMPOTENCY_STATUSES:
+                return existing
+        job = Job(
+            job_type=job_type,
+            status=JobStatus.pending,
+            payload_json=payload_json,
+            metadata_json=metadata_json,
+            idempotency_key=idempotency_key,
+            max_attempts=max_attempts,
+        )
+        self._session.add(job)
+        self._session.flush()
+        return job
+
+    def claim_due(self, *, now: datetime | None = None) -> Job | None:
+        """Atomically claim one due job and return it as ``running``.
+
+        A job is due when it is ``pending``, or ``retrying`` with
+        ``next_retry_at`` already reached. The claim is a single conditional
+        ``UPDATE ... RETURNING`` that increments ``attempts`` and refreshes
+        ``updated_at`` (the staleness marker). Because the status check and the
+        transition happen in one serialized write statement, a concurrent
+        worker can never claim the same job (ADR-003).
+        """
+        claimed_at = now if now is not None else utc_now()
+        due_job_ids = (
+            select(Job.id)
+            .where(
+                or_(
+                    Job.status == JobStatus.pending,
+                    and_(
+                        Job.status == JobStatus.retrying,
+                        Job.next_retry_at <= claimed_at,
+                    ),
+                )
+            )
+            .order_by(Job.created_at.asc(), Job.id.asc())
+            .limit(1)
+        )
+        statement = (
+            update(Job)
+            .where(Job.id.in_(due_job_ids))
+            .values(
+                status=JobStatus.running,
+                attempts=Job.attempts + 1,
+                next_retry_at=None,
+                error_summary=None,
+                updated_at=claimed_at,
+            )
+            .returning(Job.id)
+        )
+        claimed_id = self._session.scalar(statement)
+        if claimed_id is None:
+            return None
+        return self._session.get(Job, claimed_id)
+
+    def mark_succeeded(self, job_id: uuid.UUID) -> Job | None:
+        """Mark a ``running`` job as ``succeeded`` (no commit; caller owns it)."""
+        job = self._session.get(Job, job_id)
+        if job is None:
+            return None
+        job.status = JobStatus.succeeded
+        job.next_retry_at = None
+        job.error_summary = None
+        self._session.flush()
+        return job
+
+    def mark_failed(
+        self,
+        job_id: uuid.UUID,
+        *,
+        error_summary: str,
+        permanent: bool = False,
+    ) -> Job | None:
+        """Apply the failure policy to a claimed job (no commit; caller owns it).
+
+        A transient failure moves the job to ``retrying`` with
+        ``next_retry_at`` computed by exponential backoff while attempts remain;
+        after ``max_attempts`` failures it becomes ``failed``. A ``permanent``
+        failure (unknown job type, explicit non-retryable handler error)
+        becomes ``failed`` immediately. ``error_summary`` is stored verbatim and
+        must already be a safe, non-sensitive summary.
+        """
+        job = self._session.get(Job, job_id)
+        if job is None:
+            return None
+        if permanent:
+            job.status = JobStatus.failed
+            job.next_retry_at = None
+        else:
+            effective_max = (
+                job.max_attempts
+                if job.max_attempts is not None
+                else get_settings().job_max_attempts
+            )
+            if job.attempts < effective_max:
+                policy = get_settings()
+                delay_s = retry_delay_seconds(
+                    attempts=job.attempts,
+                    base_s=policy.job_backoff_base_s,
+                    multiplier=policy.job_backoff_multiplier,
+                    max_backoff_s=policy.job_max_backoff_s,
+                )
+                job.status = JobStatus.retrying
+                job.next_retry_at = utc_now() + timedelta(seconds=delay_s)
+            else:
+                job.status = JobStatus.failed
+                job.next_retry_at = None
+        job.error_summary = error_summary
+        self._session.flush()
+        return job
+
+    def cancel(self, job_id: uuid.UUID) -> Job | None:
+        """Cancel a job that has not started yet (pending/retrying only).
+
+        ``running`` and terminal jobs cannot be cancelled: this returns
+        ``None``. No commit — the caller owns the transaction.
+        """
+        job = self._session.get(Job, job_id)
+        if job is None or job.status not in (JobStatus.pending, JobStatus.retrying):
+            return None
+        job.status = JobStatus.cancelled
+        job.next_retry_at = None
+        self._session.flush()
+        return job
+
+    def reset_stale_running(self, *, older_than: datetime) -> int:
+        """Move abandoned ``running`` jobs older than ``older_than`` to pending.
+
+        Crash recovery for workers: a claimed job whose ``updated_at`` is older
+        than the threshold was left behind by a crashed/restarted worker. The
+        job returns to ``pending`` (preserving its ``attempts``) so it is
+        immediately claimable again. Returns the number of reset jobs.
+        """
+        result = self._session.execute(
+            update(Job)
+            .where(Job.status == JobStatus.running, Job.updated_at < older_than)
+            .values(status=JobStatus.pending)
+        )
+        return int(cast("CursorResult[Any]", result).rowcount or 0)
