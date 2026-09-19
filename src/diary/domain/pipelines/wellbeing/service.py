@@ -78,6 +78,7 @@ def enqueue_wellbeing_run(session: Session, *, export_id: uuid.UUID, confirmed: 
         raise WellbeingInputUnavailableError(
             "The export has no normalized text yet; run normalization first."
         )
+    assert artifacts[-1].path is not None  # a normalized artifact is file-backed
     normalized_path = get_settings().data_root / artifacts[-1].path
     if not normalized_path.is_file():
         raise WellbeingInputUnavailableError(

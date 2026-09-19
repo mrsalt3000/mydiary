@@ -162,7 +162,9 @@ def _pipeline_run_metrics(session_factory: sessionmaker[Session], job: Job) -> d
             fields["tokens_input"] = _metric_text(usage.get("input_tokens"))
             fields["tokens_output"] = _metric_text(usage.get("output_tokens"))
         artifacts = ArtifactRepository(session).list_by_run(run.id)
-        if artifacts:
+        # A phase-2 result can be stored inline without a rendered file; then no
+        # artifact size is reported (task T08).
+        if artifacts and artifacts[-1].path is not None:
             artifact_path = get_settings().data_root / artifacts[-1].path
             try:
                 fields["artifact_bytes"] = str(artifact_path.stat().st_size)

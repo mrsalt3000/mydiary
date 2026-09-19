@@ -40,3 +40,4 @@
 | [ADR-005](ADR-005-immutable-originals-and-versioned-artifacts.md) | Первичные данные неизменяемы; производные артефакты версионируются | Accepted | 2026-09-09 |
 | [ADR-006](ADR-006-wellbeing-safety-boundaries.md) | Wellbeing-вывод — поддерживающая рефлексия, не диагноз; детерминированная эскалация | Accepted | 2026-09-09 |
 | [ADR-007](ADR-007-second-anchor-family-for-derivational-layers.md) | Вторая семья якорей происхождения для производных слоёв фазы 2 (вариант B) | Accepted | 2026-09-19 |
+| [ADR-008](ADR-008-second-anchor-family-persistence.md) | Персистентность второй семьи якорей в `artifacts` (дельта схемы под вариант B) | Accepted | 2026-09-19 |

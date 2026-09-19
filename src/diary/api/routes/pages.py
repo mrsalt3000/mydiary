@@ -321,6 +321,23 @@ def _artifact_download_url(export_id: uuid.UUID, artifact_id: uuid.UUID) -> str:
     return f"/api/v1/exports/{export_id}/artifacts/{artifact_id}/file"
 
 
+def _artifact_file_path(artifact: Artifact) -> Path:
+    """Absolute path of a first-family artifact file.
+
+    A result of the phase-2 second anchor family may be stored inline without a
+    rendered file (task T08); every artifact rendered on these pages belongs to
+    a weekly export and always has one.
+    """
+    assert artifact.path is not None
+    return get_settings().data_root / artifact.path
+
+
+def _artifact_file_name(artifact: Artifact) -> str:
+    """File name of a first-family artifact file (see :func:`_artifact_file_path`)."""
+    assert artifact.path is not None
+    return artifact.path.rsplit("/", 1)[-1]
+
+
 def _load_models_config() -> Any:
     """Return the current model configuration (module-level test seam).
 
@@ -503,12 +520,12 @@ def _export_management_view(
         layer = _PIPELINE_LAYER[pipeline]
         artifacts = ArtifactRepository(session).list_by_export_and_layer(record.id, layer)
         latest = artifacts[-1] if artifacts else None
-        file_present = latest is not None and (settings.data_root / latest.path).is_file()
+        file_present = latest is not None and _artifact_file_path(latest).is_file()
         artifact_info: dict[str, Any] | None = None
         if latest is not None:
             artifact_info = {
                 "version_label": f"v{latest.version}" if latest.version is not None else "",
-                "filename": latest.path.rsplit("/", 1)[-1],
+                "filename": _artifact_file_name(latest),
                 "download_url": _artifact_download_url(record.id, latest.id),
                 "file_present": file_present,
                 "created_display": _format_local(latest.created_at),
@@ -563,14 +580,13 @@ def _lineage_artifact_view(
         if producing_run is not None and producing_run.input_artifact_id is not None:
             input_artifact = ArtifactRepository(session).get(producing_run.input_artifact_id)
             if input_artifact is not None:
-                parent_caption = (
-                    "создан из нормализованного " + input_artifact.path.rsplit("/", 1)[-1]
-                )
-    file_present = (get_settings().data_root / artifact.path).is_file()
+                parent_caption = "создан из нормализованного " + _artifact_file_name(input_artifact)
+    file_present = _artifact_file_path(artifact).is_file()
+    assert artifact.sha256 is not None  # a first-family artifact always has a file hash
     return {
         "id": str(artifact.id),
         "layer": artifact.layer.value,
-        "filename": artifact.path.rsplit("/", 1)[-1],
+        "filename": _artifact_file_name(artifact),
         "version_label": f"v{artifact.version}" if artifact.version is not None else "",
         "sha_prefix": artifact.sha256[:16],
         "created_display": _format_local(artifact.created_at),
@@ -647,7 +663,7 @@ def _processing_run_view(
     if produced:
         artifact = produced[-1]
         output = {
-            "filename": artifact.path.rsplit("/", 1)[-1],
+            "filename": _artifact_file_name(artifact),
             "version_label": f"v{artifact.version}" if artifact.version is not None else "",
             "download_url": _artifact_download_url(export.id, artifact.id),
         }
@@ -859,10 +875,10 @@ def export_normalize_compare_page(
     normalized_text: str | None = None
     normalized_filename: str | None = None
     if latest is not None:
-        normalized_path = settings.data_root / latest.path
+        normalized_path = _artifact_file_path(latest)
         if normalized_path.is_file():
             normalized_text = normalized_path.read_text(encoding="utf-8")
-            normalized_filename = latest.path.rsplit("/", 1)[-1]
+            normalized_filename = _artifact_file_name(latest)
     return templates.TemplateResponse(
         request,
         "export_compare.html",
@@ -892,7 +908,6 @@ def export_summary_page(
     record = WeeklyExportRepository(session).get(export_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Export not found.")
-    settings = get_settings()
     artifacts = ArtifactRepository(session).list_by_export_and_layer(
         export_id, ArtifactLayer.summary
     )
@@ -904,10 +919,10 @@ def export_summary_page(
     summary_filename: str | None = None
     summary_download_url: str | None = None
     if latest is not None:
-        summary_path = settings.data_root / latest.path
+        summary_path = _artifact_file_path(latest)
         if summary_path.is_file():
             summary_text = summary_path.read_text(encoding="utf-8")
-            summary_filename = latest.path.rsplit("/", 1)[-1]
+            summary_filename = _artifact_file_name(latest)
             summary_download_url = f"/api/v1/exports/{export_id}/artifacts/{latest.id}/file"
     return templates.TemplateResponse(
         request,
@@ -960,7 +975,7 @@ def export_wellbeing_page(
     has_normalized = False
     normalized_text: str | None = None
     if normalized is not None:
-        normalized_path = settings.data_root / normalized.path
+        normalized_path = _artifact_file_path(normalized)
         if normalized_path.is_file():
             has_normalized = True
             normalized_text = normalized_path.read_text(encoding="utf-8")
@@ -972,10 +987,10 @@ def export_wellbeing_page(
     report_download_url: str | None = None
     report_created_display: str | None = None
     if latest_report is not None:
-        report_path = settings.data_root / latest_report.path
+        report_path = _artifact_file_path(latest_report)
         if report_path.is_file():
             report_text = report_path.read_text(encoding="utf-8")
-            report_filename = latest_report.path.rsplit("/", 1)[-1]
+            report_filename = _artifact_file_name(latest_report)
             report_download_url = f"/api/v1/exports/{export_id}/artifacts/{latest_report.id}/file"
             report_created_display = latest_report.created_at.astimezone(settings.tzinfo).strftime(
                 TIMESTAMP_FORMAT

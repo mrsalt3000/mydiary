@@ -156,6 +156,7 @@ class WellbeingPipeline(Pipeline[WellbeingResult]):
 
     def _load_normalized_text(self, input_artifact: Artifact) -> str:
         """Read the normalized input file (resolved by DB identity)."""
+        assert input_artifact.path is not None  # a layer-2 artifact is file-backed
         path: Path = get_settings().data_root / input_artifact.path
         try:
             return path.read_text(encoding="utf-8")
@@ -220,6 +221,7 @@ class WellbeingPipeline(Pipeline[WellbeingResult]):
         settings = get_settings()
         created_local = utc_now().astimezone(settings.tzinfo)
         sunday = export.week_end_date
+        assert context.input_artifact.path is not None  # a layer-2 artifact is file-backed
         source_filename = context.input_artifact.path.rsplit("/", 1)[-1]
         lines: list[str] = [
             "# Wellbeing-рефлексия",

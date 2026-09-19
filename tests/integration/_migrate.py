@@ -16,8 +16,13 @@ from alembic.config import Config as AlembicConfig
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def upgrade_database_file(db_path: Path) -> None:
-    """Upgrade ``db_path`` to head (in-process Alembic run)."""
+def migrate_database_file(db_path: Path, revision: str) -> None:
+    """Upgrade ``db_path`` to an explicit ``revision`` (in-process Alembic run).
+
+    ``revision`` may be a revision id (``"0002_messages_soft_delete"``) or
+    ``"head"``; used by tests that need to build a database at an older schema
+    and then migrate it forward.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     # No ``config_file_name`` on purpose: ``alembic/env.py`` must skip
     # ``fileConfig(alembic.ini)`` so in-process migrations never reconfigure
@@ -25,4 +30,9 @@ def upgrade_database_file(db_path: Path) -> None:
     config = AlembicConfig()
     config.set_main_option("script_location", str(REPO_ROOT / "alembic"))
     config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path.as_posix()}")
-    command.upgrade(config, "head")
+    command.upgrade(config, revision)
+
+
+def upgrade_database_file(db_path: Path) -> None:
+    """Upgrade ``db_path`` to head (in-process Alembic run)."""
+    migrate_database_file(db_path, "head")

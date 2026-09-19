@@ -350,6 +350,11 @@ class ExportArtifactRead(BaseModel):
 def artifact_read_from(record: Artifact) -> ExportArtifactRead:
     """Map an ORM ``Artifact`` row to ``ExportArtifactRead`` in the app tz."""
     timezone_info = get_settings().tzinfo
+    # Only first-family artifacts (weekly-export layers) are serialized here:
+    # their anchor check guarantees a rendered file, while a phase-2 result may
+    # be stored without one (task T08).
+    assert record.path is not None
+    assert record.sha256 is not None
     filename = record.path.rsplit("/", 1)[-1]
     return ExportArtifactRead(
         id=record.id,

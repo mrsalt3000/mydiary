@@ -465,6 +465,7 @@ def _resolve_default_input_artifact(
 def _ensure_input_file(*, export, input_artifact: Artifact | None) -> None:
     """Verify the input file exists on disk (path resolved by DB identity)."""
     if input_artifact is not None:
+        assert input_artifact.path is not None  # a derived input artifact is file-backed
         artifact_path = get_settings().data_root / input_artifact.path
         if not artifact_path.is_file():
             raise PipelineInputError("The input artifact file is missing on disk.")

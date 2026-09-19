@@ -46,6 +46,7 @@ def list_eligible_exports(session) -> list[WeeklyExport]:
         )
         if not normalized:
             continue
+        assert normalized[-1].path is not None  # a normalized artifact is file-backed
         normalized_path = get_settings().data_root / normalized[-1].path
         if not normalized_path.is_file():
             continue

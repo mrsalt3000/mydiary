@@ -244,6 +244,9 @@ def download_artifact_file(
     # Derived-artifact paths are data-root-relative ``exports/<layer>/<file>``
     # (the naming module is the single source of truth), so the containment
     # check resolves against that fixed location.
+    # The artifact belongs to this weekly export (checked above), so it is a
+    # first-family row and always carries a rendered file (task T08).
+    assert artifact.path is not None
     layer_dir = (settings.data_root / EXPORTS_PREFIX / layer_dirname(artifact.layer)).resolve()
     candidate = (settings.data_root / artifact.path).resolve()
     if not candidate.is_relative_to(layer_dir):
@@ -252,6 +255,7 @@ def download_artifact_file(
     if not candidate.is_file():
         raise HTTPException(status_code=404, detail="Artifact file not found.")
     extension = layer_output_extension(artifact.layer)
+    assert artifact.path is not None
     filename = artifact.path.rsplit("/", 1)[-1]
     return FileResponse(
         str(candidate),
