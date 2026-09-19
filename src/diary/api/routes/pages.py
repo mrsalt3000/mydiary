@@ -121,6 +121,8 @@ PIPELINE_LABELS: dict[PipelineType, str] = {
     PipelineType.stt_corrected: "Правка STT",
     # Phase-2 layer (task T05, second anchor family): per-day summary.
     PipelineType.daily_summary: "Саммари дня",
+    # Phase-2 layer (task T06, second anchor family): per-week merge.
+    PipelineType.weekly_summary: "Саммари недели",
 }
 
 #: Captions of durable job types (processing page).
@@ -133,6 +135,8 @@ JOB_TYPE_LABELS: dict[JobType, str] = {
     JobType.stt_corrected: "Правка STT",
     # Phase-2 layer (task T05, second anchor family).
     JobType.daily_summary: "Саммари дня",
+    # Phase-2 layer (task T06, second anchor family).
+    JobType.weekly_summary: "Саммари недели",
 }
 
 #: Captions of job statuses (processing page).
@@ -171,6 +175,9 @@ _PIPELINE_LAYER: dict[PipelineType, ArtifactLayer] = {
     # Phase-2 layer (task T05, second anchor family); it is anchored to a local
     # day, so it never appears in the export-scoped run lists above.
     PipelineType.daily_summary: ArtifactLayer.daily_summary,
+    # Phase-2 layer (task T06, second anchor family); it is anchored to an ISO
+    # week, so it never appears in the export-scoped run lists above.
+    PipelineType.weekly_summary: ArtifactLayer.weekly_summary,
 }
 
 #: Titles of artifact-layer sections on the exports/detail pages.
@@ -183,6 +190,8 @@ LAYER_TITLES: dict[ArtifactLayer, str] = {
     ArtifactLayer.stt_corrected: "Правка STT (фаза 2)",
     # Phase-2 layer (task T05).
     ArtifactLayer.daily_summary: "Саммари дня (фаза 2)",
+    # Phase-2 layer (task T06).
+    ArtifactLayer.weekly_summary: "Саммари недели (фаза 2)",
 }
 
 #: Short per-layer captions for compact chips/links.
@@ -194,6 +203,8 @@ LAYER_SHORT_TITLES: dict[ArtifactLayer, str] = {
     ArtifactLayer.stt_corrected: "Правка STT",
     # Phase-2 layer (task T05).
     ArtifactLayer.daily_summary: "Саммари дня",
+    # Phase-2 layer (task T06).
+    ArtifactLayer.weekly_summary: "Саммари недели",
 }
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))

@@ -102,6 +102,8 @@ def test_type_mappings_are_consistent() -> None:
         PipelineType.stt_corrected: ArtifactLayer.stt_corrected,
         # Phase-2 layer (task T05, second anchor family).
         PipelineType.daily_summary: ArtifactLayer.daily_summary,
+        # Phase-2 layer (task T06, second anchor family).
+        PipelineType.weekly_summary: ArtifactLayer.weekly_summary,
     }
     assert PIPELINE_TASK_TYPE[PipelineType.normalize] is TaskType.normalization
     assert PIPELINE_TASK_TYPE[PipelineType.summarize] is TaskType.summarization
@@ -114,6 +116,7 @@ def test_type_mappings_are_consistent() -> None:
         "wellbeing",
         "stt_corrected",
         "daily_summary",
+        "weekly_summary",
     }
     assert JOB_PIPELINE_TYPE[PIPELINE_JOB_TYPE[PipelineType.normalize]] is PipelineType.normalize
     assert JOB_PIPELINE_TYPE[PIPELINE_JOB_TYPE[PipelineType.stt_corrected]] is (
@@ -121,6 +124,9 @@ def test_type_mappings_are_consistent() -> None:
     )
     assert JOB_PIPELINE_TYPE[PIPELINE_JOB_TYPE[PipelineType.daily_summary]] is (
         PipelineType.daily_summary
+    )
+    assert JOB_PIPELINE_TYPE[PIPELINE_JOB_TYPE[PipelineType.weekly_summary]] is (
+        PipelineType.weekly_summary
     )
 
 
