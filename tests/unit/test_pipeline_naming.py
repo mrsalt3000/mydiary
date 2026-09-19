@@ -104,6 +104,8 @@ def test_type_mappings_are_consistent() -> None:
         PipelineType.daily_summary: ArtifactLayer.daily_summary,
         # Phase-2 layer (task T06, second anchor family).
         PipelineType.weekly_summary: ArtifactLayer.weekly_summary,
+        # Phase-2 layer (task T07, layer 5, second anchor family).
+        PipelineType.coach_note: ArtifactLayer.coach_note,
     }
     assert PIPELINE_TASK_TYPE[PipelineType.normalize] is TaskType.normalization
     assert PIPELINE_TASK_TYPE[PipelineType.summarize] is TaskType.summarization
@@ -117,6 +119,7 @@ def test_type_mappings_are_consistent() -> None:
         "stt_corrected",
         "daily_summary",
         "weekly_summary",
+        "coach_note",
     }
     assert JOB_PIPELINE_TYPE[PIPELINE_JOB_TYPE[PipelineType.normalize]] is PipelineType.normalize
     assert JOB_PIPELINE_TYPE[PIPELINE_JOB_TYPE[PipelineType.stt_corrected]] is (
@@ -127,6 +130,9 @@ def test_type_mappings_are_consistent() -> None:
     )
     assert JOB_PIPELINE_TYPE[PIPELINE_JOB_TYPE[PipelineType.weekly_summary]] is (
         PipelineType.weekly_summary
+    )
+    assert JOB_PIPELINE_TYPE[PIPELINE_JOB_TYPE[PipelineType.coach_note]] is (
+        PipelineType.coach_note
     )
 
 
@@ -140,6 +146,11 @@ def test_phase2_layer_maps_keep_the_task_type_map_export_only() -> None:
     assert PipelineType.stt_corrected not in PIPELINE_TASK_TYPE
     assert PIPELINE_PROFILE_NAME[PipelineType.stt_corrected] == "diary_stt"
     assert layer_output_extension(ArtifactLayer.stt_corrected) == ".txt"
+    # Layer 5 (task T07) is a phase-2 layer too: profile by name, no TaskType,
+    # and its own profile — never the layer-4 wellbeing task type.
+    assert PipelineType.coach_note not in PIPELINE_TASK_TYPE
+    assert PIPELINE_PROFILE_NAME[PipelineType.coach_note] == "diary_coach"
+    assert layer_output_extension(ArtifactLayer.coach_note) == ".md"
 
 
 # ---------------------------------------------------------------------------

@@ -21,8 +21,9 @@ to the data root with forward slashes, mirroring
 ``exports/02_normalized/2026-09-13_normalized_0001_r1_v1.txt``).
 
 Task T04 adds the first **phase-2** entry: the ``stt_corrected`` layer of the
-second anchor family (ADR-007); task T05 adds the ``daily_summary`` layer and
-task T06 the ``weekly_summary`` layer of the same family. Such a layer has no
+second anchor family (ADR-007); task T05 adds the ``daily_summary`` layer, task
+T06 the ``weekly_summary`` layer and task T07 the ``coach_note`` layer (layer 5,
+separate from the layer-4 ``wellbeing`` pipeline) of the same family. Such a layer has no
 weekly export, so it has no ``NNNN_rN`` file name and no layer directory — its
 validated result is stored inline by ``diary.db.results.save_layer_result``
 (ADR-008). Only the three maps the registry validates against are extended for
@@ -61,6 +62,8 @@ LAYER_OUTPUT_EXTENSIONS: dict[ArtifactLayer, str] = {
     ArtifactLayer.daily_summary: ".md",
     # Phase-2 layer (task T06): a week summary is rendered as Markdown.
     ArtifactLayer.weekly_summary: ".md",
+    # Phase-2 layer (task T07, layer 5): a coaching note is rendered as Markdown.
+    ArtifactLayer.coach_note: ".md",
 }
 
 #: Derived pipeline kind → the artifact layer it produces.
@@ -74,6 +77,9 @@ PIPELINE_LAYER: dict[PipelineType, ArtifactLayer] = {
     PipelineType.daily_summary: ArtifactLayer.daily_summary,
     # Phase-2 layer (task T06, second anchor family): one ISO week per run.
     PipelineType.weekly_summary: ArtifactLayer.weekly_summary,
+    # Phase-2 layer (task T07, layer 5, second anchor family): one upstream
+    # weekly-summary artifact per run. Separate from ``PipelineType.wellbeing``.
+    PipelineType.coach_note: ArtifactLayer.coach_note,
 }
 
 #: Derived pipeline kind → the Task-03 LLM profile task type it uses.
@@ -102,6 +108,9 @@ PIPELINE_PROFILE_NAME: dict[PipelineType, str] = {
     # Phase-2 layer (task T06): the week merge runs under the same summarization
     # profile as the day layer (``diary-sum``, temperature 0.25).
     PipelineType.weekly_summary: "diary_sum",
+    # Phase-2 layer (task T07, layer 5): its own coaching profile (temperature
+    # 0.4). It is not the layer-4 wellbeing task type.
+    PipelineType.coach_note: "diary_coach",
 }
 
 #: Derived pipeline kind → the durable job type that drives its execution.
@@ -115,6 +124,10 @@ PIPELINE_JOB_TYPE: dict[PipelineType, JobType] = {
     PipelineType.daily_summary: JobType.daily_summary,
     # Phase-2 layer (task T06): the job type of the same name (ADR-008 §3).
     PipelineType.weekly_summary: JobType.weekly_summary,
+    # Phase-2 layer (task T07, layer 5): the job type of the same name
+    # (ADR-008 §3). The layer registers no handler for it, so an enqueued
+    # ``coach_note`` job fails permanently instead of running by itself.
+    PipelineType.coach_note: JobType.coach_note,
 }
 
 #: Reverse mapping: job type → pipeline kind.

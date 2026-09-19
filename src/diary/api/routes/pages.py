@@ -123,6 +123,9 @@ PIPELINE_LABELS: dict[PipelineType, str] = {
     PipelineType.daily_summary: "Саммари дня",
     # Phase-2 layer (task T06, second anchor family): per-week merge.
     PipelineType.weekly_summary: "Саммари недели",
+    # Phase-2 layer (task T07, second anchor family, layer 5): cautious coaching
+    # note over one weekly summary — separate from the wellbeing layer 4.
+    PipelineType.coach_note: "Заметка коуча",
 }
 
 #: Captions of durable job types (processing page).
@@ -137,6 +140,8 @@ JOB_TYPE_LABELS: dict[JobType, str] = {
     JobType.daily_summary: "Саммари дня",
     # Phase-2 layer (task T06, second anchor family).
     JobType.weekly_summary: "Саммари недели",
+    # Phase-2 layer (task T07, second anchor family, layer 5).
+    JobType.coach_note: "Заметка коуча",
 }
 
 #: Captions of job statuses (processing page).
@@ -178,6 +183,10 @@ _PIPELINE_LAYER: dict[PipelineType, ArtifactLayer] = {
     # Phase-2 layer (task T06, second anchor family); it is anchored to an ISO
     # week, so it never appears in the export-scoped run lists above.
     PipelineType.weekly_summary: ArtifactLayer.weekly_summary,
+    # Phase-2 layer (task T07, second anchor family); it is anchored to an
+    # upstream weekly-summary artifact, so it never appears in the
+    # export-scoped run lists above.
+    PipelineType.coach_note: ArtifactLayer.coach_note,
 }
 
 #: Titles of artifact-layer sections on the exports/detail pages.
@@ -192,6 +201,8 @@ LAYER_TITLES: dict[ArtifactLayer, str] = {
     ArtifactLayer.daily_summary: "Саммари дня (фаза 2)",
     # Phase-2 layer (task T06).
     ArtifactLayer.weekly_summary: "Саммари недели (фаза 2)",
+    # Phase-2 layer (task T07): layer 5, deliberately not merged with layer 4.
+    ArtifactLayer.coach_note: "Заметка коуча (фаза 2, слой 5)",
 }
 
 #: Short per-layer captions for compact chips/links.
@@ -205,6 +216,8 @@ LAYER_SHORT_TITLES: dict[ArtifactLayer, str] = {
     ArtifactLayer.daily_summary: "Саммари дня",
     # Phase-2 layer (task T06).
     ArtifactLayer.weekly_summary: "Саммари недели",
+    # Phase-2 layer (task T07).
+    ArtifactLayer.coach_note: "Заметка коуча",
 }
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
