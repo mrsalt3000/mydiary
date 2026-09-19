@@ -39,10 +39,32 @@ model profiles yet (task T02/T04-T07 wire it into the profiles; recorded in
 ADR-007).
 
 Blacklist semantics: ``invariants.forbidden_lexemes`` is checked against the
-**generated text fields** of the output (``text``, ``facts``, ``themes``,
-``open_questions``, ``rollup``, ``observations``, ``hypotheses``,
-``experiment_7d``) — not against fixed constant fields (``disclaimer``), whose
-wording is mandated by the contract and disclaims rather than asserts.
+**generated text fields** of the output (:data:`GENERATED_TEXT_FIELDS`) up to
+fixed constant fields (``disclaimer``), whose wording is mandated by the
+contract and disclaims rather than asserts. Three eval-contract checks are
+always on and cannot be switched off by a chunk file:
+
+- ``no_advice_or_judgement`` — advice, praise, evaluation and morality lexemes
+  (:data:`ADVICE_EVALUATION_LEXEMES`) are absent from the generated fields;
+- ``no_causal_claims`` — causal connectors and asserted cause-effect phrasing
+  (:data:`CAUSAL_CONNECTOR_LEXEMES`) are absent from the **assertive** generated
+  fields (:data:`ASSERTIVE_TEXT_FIELDS`; ``open_questions`` is excluded on
+  purpose — a question marks an open point instead of asserting a cause, and
+  the set itself carries ``из-за чего сбился сон`` as a legitimate open
+  question);
+- ``no_new_facts`` — numbers, numeral words (:data:`NUMERAL_WORDS`) and proper
+  names of the output are grounded in the input.
+
+Documented limit of ``no_new_facts``: it is exact for digits, numeral words and
+proper names, but free-form content words are **not** machine-checkable without
+a semantic model — a paraphrase ("трудовой" for "работа") and an invention
+("плохое самочувствие") are indistinguishable to a lexical check. The harness
+therefore reports ungrounded long content tokens as *diagnostics* (never as a
+failure) instead of pretending to verify them.
+
+Context budget: ``chunk_tokens_est + reserve_tokens_for(category) <= num_ctx``
+where the reserve is the fixed overhead of the layer's call — its versioned
+prompt plus the generation cap of its profile (:data:`BUDGET_RESERVE_TOKENS`).
 """
 
 from __future__ import annotations
@@ -56,7 +78,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from diary.core.settings import PROJECT_ROOT
-from diary.domain.contracts.coach_note import COACH_DISCLAIMER
+from diary.domain.contracts.coach_note import COACH_DISCLAIMER, EXPERIMENT_HORIZON_DAYS
 from diary.domain.contracts.daily_summary import DailySummary, EnergyLevel
 from diary.domain.contracts.raw_entry import RawEntry
 from diary.domain.contracts.weekly_summary import WEEK_ID_PATTERN, WeeklySummary
@@ -83,7 +105,230 @@ CHARS_PER_TOKEN_EST = 2.5
 #: Lexemes that must not appear in any generated text field of a golden
 #: output: diagnostic labels, treatment plans and prescriptive advice
 #: (AGENTS.md §16; ADR-006). The check excludes fixed constant fields.
+#:
+#: This trio is the *base* blacklist embedded in every chunk file. It is kept
+#: byte-for-byte because the chunk files carry it explicitly; the harness adds
+#: :data:`ADVICE_EVALUATION_LEXEMES` on top of it for every chunk, so the
+#: effective check is the union.
 DEFAULT_FORBIDDEN_LEXEMES: tuple[str, ...] = ("диагноз", "лечение", "тебе следует")
+
+#: Eval-contract baseline of advice / praise / evaluation / morality lexemes.
+#: Added by T10 because ``DEFAULT_FORBIDDEN_LEXEMES`` alone accepted
+#: «ты молодец», «правильно сделала», «лучше было бы», «стоило бы» (the gap
+#: recorded by the T05 acceptance). Each entry is a **deliberately narrow
+#: phrase** rather than a bare root: a summary may legitimately contain
+#: «как следует», «правильный ответ» and similar, so the check only fires on
+#: wording that is advice, praise or a value judgement. The check is a
+#: substring test over the generated text fields, case-insensitive.
+ADVICE_EVALUATION_LEXEMES: tuple[str, ...] = (
+    # praise / evaluation of the person
+    "ты молодец",
+    "молодец",
+    "умница",
+    "правильно сделала",
+    "правильно поступила",
+    "правильно решила",
+    # counterfactual recommendation
+    "лучше было бы",
+    "лучше бы",
+    "стоило бы",
+    "стоит попробовать",
+    "стоит начать",
+    # direct prescription
+    "тебе следует",
+    "рекомендую",
+    "рекомендуется",
+    "советую",
+    "советует",
+    "попробуй",
+    "попробуйте",
+    # morality / obligation
+    "ты должен",
+    "ты должна",
+    "надо было",
+    "нужно было",
+)
+
+#: Eval-contract baseline of causal connectors and asserted cause-effect
+#: phrasing (T10; the T06 acceptance found «что привело к плохому
+#: самочувствию», «из-за ночных пробуждений, что повлияло на энергию» and the
+#: T07 acceptance found «привела к», «повлияла на» in live output while the
+#: prompts forbid them). Checked against the assertive generated fields only
+#: (:data:`ASSERTIVE_TEXT_FIELDS`), case-insensitive substring test. Formats
+#: with and without ``ё`` are both listed because models mix them.
+CAUSAL_CONNECTOR_LEXEMES: tuple[str, ...] = (
+    "из-за",
+    "потому что",
+    "поэтому",
+    "оттого",
+    "так как",
+    "поскольку",
+    "в результате",
+    "вследствие",
+    "причин",
+    "привел",
+    "привёл",
+    "привело к",
+    "привела к",
+    "привели к",
+    "повлиял",
+    "повлияла",
+    "повлияло",
+    "повлияли",
+    "влияние",
+)
+
+#: Cardinal numerals as words, mapped to their digit value. Used by the
+#: ``no_new_facts`` check: the golden set writes every quantity as digits
+#: (authoring rule 2), so a numeral word in the output is checked by
+#: normalizing it to digits and requiring that digit to occur in the input —
+#: this is exactly how the T07 finding «два созвона при трёх во входе» becomes
+#: machine-checkable. ``один/одна/одно`` are deliberately excluded (they are
+#: routinely non-counting: «один из», «однажды»), as are ``пара``, ``полтора``,
+#: ``несколько`` and ``много`` (vague, not numerals).
+NUMERAL_WORDS: dict[str, int] = {
+    "два": 2,
+    "две": 2,
+    "двух": 2,
+    "двум": 2,
+    "двумя": 2,
+    "три": 3,
+    "трёх": 3,
+    "трех": 3,
+    "трём": 3,
+    "трем": 3,
+    "тремя": 3,
+    "четыре": 4,
+    "четырёх": 4,
+    "четырех": 4,
+    "четырём": 4,
+    "четырем": 4,
+    "четырьмя": 4,
+    "пять": 5,
+    "пяти": 5,
+    "пятью": 5,
+    "шесть": 6,
+    "шести": 6,
+    "шестью": 6,
+    "семь": 7,
+    "семи": 7,
+    "семью": 7,
+    "восемь": 8,
+    "восьми": 8,
+    "восемью": 8,
+    "девять": 9,
+    "девяти": 9,
+    "десять": 10,
+    "десяти": 10,
+    "одиннадцать": 11,
+    "двенадцать": 12,
+    "тринадцать": 13,
+    "четырнадцать": 14,
+    "пятнадцать": 15,
+    "шестнадцать": 16,
+    "семнадцать": 17,
+    "восемнадцать": 18,
+    "девятнадцать": 19,
+    "двадцать": 20,
+    "тридцать": 30,
+    "сорок": 40,
+    "пятьдесят": 50,
+    "шестьдесят": 60,
+    "семьдесят": 70,
+    "восемьдесят": 80,
+    "девяносто": 90,
+    "сто": 100,
+    "тысяча": 1000,
+    "тысячи": 1000,
+    "тысяч": 1000,
+}
+
+#: Versioned prompt overhead of each layer in tokens (see
+#: :data:`BUDGET_RESERVE_TOKENS` for the sources).
+LAYER_PROMPT_TOKENS_EST: dict[str, int] = {
+    "stt_error": 1509,
+    "day": 1932,
+    "week": 1629,
+    "wellbeing": 1968,
+}
+
+#: Generation cap of the profile each category runs under, mirroring
+#: ``configs/models.example.yaml`` (``diary_stt`` 3072, ``diary_sum`` and
+#: ``diary_coach`` 4096). Kept next to the reserve so a configuration change is
+#: a one-line diff; ``tests/integration/test_eval_harness.py`` cross-checks it
+#: against the example configuration.
+PROFILE_MAX_TOKENS: dict[str, int] = {
+    "stt_error": 3072,
+    "day": 4096,
+    "week": 4096,
+    "wellbeing": 4096,
+}
+
+#: Tokens the harness reserves on top of ``chunk_tokens_est`` inside
+#: ``num_ctx``: the layer's versioned prompt plus the generation cap of its
+#: profile. Sources, in the order they were measured:
+#:
+#: - ``day`` — measured prompt of ``prompts/sum_daily/v1.md``: **1932** tokens
+#:   (T05 acceptance, ``/api/generate`` ``prompt_eval_count``);
+#: - ``week`` — estimated prompt of ``prompts/sum_weekly/v1.md``: **1629**
+#:   tokens (``estimate_tokens``, matches the T06 acceptance note);
+#: - ``stt_error`` — estimated prompt of ``prompts/stt_fix/v1.md``: 1509 tokens;
+#: - ``wellbeing`` — estimated prompt of ``prompts/coach_note/v1.md``: 1968
+#:   tokens (conservative: the T07 acceptance measured 1871 input tokens
+#:   including a 262-token input).
+#:
+#: The check ``chunk_tokens_est + reserve <= num_ctx`` therefore bounds the
+#: whole call, not just the payload, and the real run additionally compares the
+#: endpoint-reported ``input_tokens`` against the same budget.
+BUDGET_RESERVE_TOKENS: dict[str, int] = {
+    category: LAYER_PROMPT_TOKENS_EST[category] + PROFILE_MAX_TOKENS[category]
+    for category in LAYER_PROMPT_TOKENS_EST
+}
+
+#: Generated text fields of each contract: the fields the blacklist checks are
+#: applied to (fixed constant fields such as ``disclaimer`` are excluded).
+GENERATED_TEXT_FIELDS: dict[str, tuple[str, ...]] = {
+    "stt_corrected": ("text",),
+    "daily_summary": ("facts", "themes", "open_questions"),
+    "weekly_summary": ("rollup",),
+    "coach_note": ("observations", "hypotheses", "experiment_7d"),
+}
+
+#: Assertive generated fields of each contract — the subset that *states*
+#: something, used by the causal check. ``open_questions`` is excluded: a
+#: question marks an open point instead of asserting a cause, and the golden
+#: set itself carries «Непонятно, из-за чего сбился сон.» as a legitimate open
+#: question of the week-01 input.
+ASSERTIVE_TEXT_FIELDS: dict[str, tuple[str, ...]] = {
+    "stt_corrected": ("text",),
+    "daily_summary": ("facts", "themes"),
+    "weekly_summary": ("rollup",),
+    "coach_note": ("observations", "hypotheses", "experiment_7d"),
+}
+
+#: Input fields whose values are bookkeeping rather than content: identifiers
+#: and server-generated audio paths are excluded from the text the
+#: ``no_new_facts`` grounding check compares against (a UUID is not a fact).
+NON_CONTENT_INPUT_KEYS: frozenset[str] = frozenset({"id", "audio_path"})
+
+#: Contracts whose generated text is a *correction of the input* rather than a
+#: newly written text (``stt_corrected``). For them the advice/causal lexeme
+#: checks only fire on wording the layer **introduced**: a faithful STT
+#: correction must keep the speaker's words (T04 DoD: «не сглаживать эмоции»,
+#: «не улучшать стиль»), so a lexeme that is already in the source is not a
+#: violation — while the same lexeme appearing out of nowhere is. The
+#: generative layers (day/week/coach) get no such exemption: their prompts
+#: forbid advice and causes outright.
+LEXEME_FIDELITY_CONTRACTS: frozenset[str] = frozenset({"stt_corrected"})
+
+#: Digits a generated field is contractually required to carry, exempt from the
+#: ``no_new_facts`` grounding check for that field. The only such digit today is
+#: the 7-day horizon of the coaching experiment: the contract demands the digit
+#: ``7`` in ``experiment_7d`` (checked by ``experiment_horizon_days``), and the
+#: upstream week rollup is not required to mention it.
+CONTRACT_CONSTANT_DIGITS: dict[tuple[str, str], frozenset[str]] = {
+    ("coach_note", "experiment_7d"): frozenset({str(EXPERIMENT_HORIZON_DAYS)}),
+}
 
 #: Accepted values of ``GoldenChunk.origin``. Extend together with the eval
 #: README when a chunk may come from a source other than authoring.
@@ -250,8 +495,25 @@ class GoldenInvariants(BaseModel):
     check_input_unchanged: Literal[True] = True
 
     #: Lexemes that must not occur in the generated text fields (see the module
-    #: docstring for exactly which fields are checked).
+    #: docstring for exactly which fields are checked). The harness checks the
+    #: union of this list and :data:`ADVICE_EVALUATION_LEXEMES`.
     forbidden_lexemes: list[str] = Field(default_factory=lambda: list(DEFAULT_FORBIDDEN_LEXEMES))
+
+    #: No advice, praise, evaluation or morality in the generated text fields;
+    #: the check uses :data:`ADVICE_EVALUATION_LEXEMES`. Always ``True``: a
+    #: chunk file can add lexemes but cannot switch the check off.
+    no_advice_or_judgement: Literal[True] = True
+
+    #: No causal connector or asserted cause-effect phrasing in the assertive
+    #: generated text fields; the check uses :data:`CAUSAL_CONNECTOR_LEXEMES`
+    #: and :data:`ASSERTIVE_TEXT_FIELDS`. Always ``True``.
+    no_causal_claims: Literal[True] = True
+
+    #: No facts beyond the input: digits, numeral words
+    #: (:data:`NUMERAL_WORDS`) and proper names of the output are grounded in
+    #: the input. Always ``True``; free-form content words are reported as
+    #: diagnostics instead (see the module docstring for why).
+    no_new_facts: Literal[True] = True
 
 
 class SttInvariants(GoldenInvariants):
@@ -465,6 +727,36 @@ def estimate_tokens(char_count: int) -> int:
 def coach_disclaimer() -> str:
     """The fixed layer-5 disclaimer (re-exported for the harness)."""
     return COACH_DISCLAIMER
+
+
+def reserve_tokens_for(category: str) -> int:
+    """Tokens reserved for everything that is not the chunk input.
+
+    The versioned prompt of the layer plus the generation cap of its profile —
+    see :data:`BUDGET_RESERVE_TOKENS` for the measured/estimated sources. A
+    category without a reserve is a harness error rather than a silently
+    unchecked budget.
+    """
+    try:
+        return BUDGET_RESERVE_TOKENS[category]
+    except KeyError as exc:
+        raise ValueError(f"no context-budget reserve is defined for category {category!r}") from exc
+
+
+def generated_text_fields(contract: str) -> tuple[str, ...]:
+    """Generated text fields of ``contract`` (blacklist check surface)."""
+    try:
+        return GENERATED_TEXT_FIELDS[contract]
+    except KeyError as exc:
+        raise ValueError(f"no generated-text field list is defined for {contract!r}") from exc
+
+
+def assertive_text_fields(contract: str) -> tuple[str, ...]:
+    """Assertive generated fields of ``contract`` (causal check surface)."""
+    try:
+        return ASSERTIVE_TEXT_FIELDS[contract]
+    except KeyError as exc:
+        raise ValueError(f"no assertive-text field list is defined for {contract!r}") from exc
 
 
 # ---------------------------------------------------------------------------
