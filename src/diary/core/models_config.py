@@ -30,6 +30,11 @@ _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _COMPUTE_TYPES = frozenset({"int8", "int8_float16", "int8_float32", "float16", "float32"})
 
+#: Reasoning-effort levels accepted on the wire (standard OpenAI API field).
+#: ``None`` means "do not send the field at all" — that is the default, and it
+#: keeps the pre-T02b behaviour identical for every existing profile (ADR-009).
+ReasoningEffort = Literal["none", "low", "medium", "high"]
+
 #: Environment variable that overrides the model-configuration file path.
 MODELS_CONFIG_ENV_VAR = "MODELS_CONFIG"
 
@@ -106,6 +111,13 @@ class OpenAICompatibleProfile(BaseModel):
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     #: Maximum number of output tokens for a single request.
     max_tokens: int = Field(gt=0)
+    #: Optional reasoning-effort hint sent as the standard OpenAI field
+    #: ``reasoning_effort``; ``None`` (the default) means the field is **not**
+    #: sent at all, so the endpoint/provider default applies and no behaviour
+    #: changes for profiles that do not opt in (ADR-009). ``"none"`` switches
+    #: the reasoning channel off where the endpoint supports it, which keeps
+    #: the whole ``max_tokens`` budget for the answer (phase-2 layers).
+    reasoning_effort: ReasoningEffort | None = None
     #: Whether the endpoint is external (diary content may leave the machine).
     external: bool = False
 

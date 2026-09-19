@@ -7,7 +7,8 @@ Design notes
   pipeline wants to run. ``content`` may carry text derived from diary
   entries: it is an in-memory object only and must never be logged
   (AGENTS.md §8). Optional request fields (``model``, ``temperature``,
-  ``max_tokens``) override the task profile's defaults when set.
+  ``max_tokens``, ``reasoning_effort``) override the task profile's defaults
+  when set.
 * :class:`LLMResponse` — the normalised result: generated text plus the
   server-reported model, token-usage counters and timestamp when present.
   Metadata never embeds diary content — only integers and identifiers.
@@ -27,6 +28,8 @@ from enum import Enum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from diary.core.models_config import ReasoningEffort
 
 #: Roles supported by the normalised chat format (OpenAI-compatible subset).
 LLM_ROLE = Literal["system", "user", "assistant"]
@@ -68,6 +71,10 @@ class LLMRequest(BaseModel):
     model: str | None = Field(default=None, min_length=1)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     max_tokens: int | None = Field(default=None, gt=0)
+    #: Optional reasoning-effort override for this one call (a standard OpenAI
+    #: field). ``None`` means "use the profile default"; the field is sent only
+    #: when the profile or the request actually sets it (ADR-009).
+    reasoning_effort: ReasoningEffort | None = None
     #: Version of the prompt template this request was built from. Recorded in
     #: provenance only; never sent to the endpoint.
     prompt_version: str | None = Field(default=None, min_length=1)
@@ -80,6 +87,7 @@ class LLMRequest(BaseModel):
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
         prompt_version: str | None = None,
     ) -> LLMRequest:
         """A single-turn request wrapping ``prompt`` as the only user message."""
@@ -88,6 +96,7 @@ class LLMRequest(BaseModel):
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
             prompt_version=prompt_version,
         )
 

@@ -64,6 +64,15 @@ def test_request_rejects_unknown_fields() -> None:
         LLMRequest(messages=[LLMMessage(role="user", content="x")], bogus=True)  # type: ignore[call-arg]
 
 
+def test_request_reasoning_effort_is_optional_and_typed() -> None:
+    """T02b: the reasoning-effort override exists, defaults to ``None`` and only
+    accepts the four documented levels (ADR-009)."""
+    assert LLMRequest.from_prompt("x").reasoning_effort is None
+    assert LLMRequest.from_prompt("x", reasoning_effort="none").reasoning_effort == "none"
+    with pytest.raises(ValidationError):
+        LLMRequest.from_prompt("x", reasoning_effort="minimal")  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------------------
 # input digest
 # ---------------------------------------------------------------------------

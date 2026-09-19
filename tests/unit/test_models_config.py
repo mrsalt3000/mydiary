@@ -52,24 +52,29 @@ SECRET_VALUES = {
 #: ``temperature`` must equal ``PARAMETER temperature`` of the paired Modelfile
 #: and ``model`` must equal the Ollama tag: ``resolve_completion_params`` always
 #: sends the profile temperature, so a divergence would be a silent substitution.
+#: ``reasoning_effort`` is the T02b (ADR-009) switch that turns the reasoning
+#: channel off for the phase-2 layers.
 PHASE2_PROFILES: dict[str, dict[str, object]] = {
     "diary_stt": {
         "model": "diary-stt",
         "modelfile": "Modelfile.stt",
         "temperature": 0.15,
         "max_tokens": 3072,
+        "reasoning_effort": "none",
     },
     "diary_sum": {
         "model": "diary-sum",
         "modelfile": "Modelfile.sum",
         "temperature": 0.25,
         "max_tokens": 4096,
+        "reasoning_effort": "none",
     },
     "diary_coach": {
         "model": "diary-coach",
         "modelfile": "Modelfile.coach",
         "temperature": 0.4,
         "max_tokens": 4096,
+        "reasoning_effort": "none",
     },
 }
 
@@ -533,6 +538,7 @@ def test_example_provides_the_three_phase2_profiles(example_config: ModelsConfig
         assert profile.api_key_env == "OLLAMA_API_KEY"
         assert profile.temperature == pytest.approx(expected["temperature"])
         assert profile.max_tokens == expected["max_tokens"]
+        assert profile.reasoning_effort == expected["reasoning_effort"]
         assert profile.external is False
 
 
@@ -636,3 +642,79 @@ def test_phase2_profile_temperature_reaches_the_payload(
         assert payload["temperature"] == pytest.approx(expected["temperature"])
         assert payload["model"] == expected["model"]
         assert payload["max_tokens"] == expected["max_tokens"]
+        assert payload["reasoning_effort"] == expected["reasoning_effort"]
+
+
+# ---------------------------------------------------------------------------
+# reasoning_effort in the config file (T02b, ADR-009)
+# ---------------------------------------------------------------------------
+
+
+def test_config_without_reasoning_effort_is_valid(tmp_path: Path) -> None:
+    """(д) Backward compatibility: a pre-T02b config (no such field anywhere)
+    keeps loading, and the resolved default is ``None`` — "not sent"."""
+    profiles = _example_profiles()
+    for fields in profiles.values():
+        fields.pop("reasoning_effort", None)
+    config = _config_from_profiles(tmp_path, profiles)
+
+    llm_profiles = [
+        profile
+        for _, profile in config.profiles_by_task()
+        if isinstance(profile, OpenAICompatibleProfile)
+    ]
+    assert llm_profiles  # the four MVP profiles are still there
+    for profile in llm_profiles:
+        assert profile.reasoning_effort is None
+    for _, profile in config.phase2_profiles():
+        assert profile.reasoning_effort is None
+
+
+def test_mvp_profiles_keep_the_field_unset(example_config: ModelsConfig) -> None:
+    """T02b sets the switch for the phase-2 layers only; MVP profiles are
+    untouched, so their wire behaviour is byte-for-byte the old one."""
+    for task, profile in example_config.profiles_by_task():
+        if isinstance(profile, OpenAICompatibleProfile):
+            assert profile.reasoning_effort is None, task
+        else:
+            assert not hasattr(profile, "reasoning_effort"), task
+
+
+def test_invalid_reasoning_effort_rejected(tmp_path: Path) -> None:
+    """(г) An unknown level is a configuration error, reported with its path."""
+    for task in ("diary_stt", "normalization"):
+        with pytest.raises(ModelsConfigError) as exc:
+            _config_from_text(
+                tmp_path,
+                _yaml_for(tweaks={task: {"reasoning_effort": "minimal"}}),
+            )
+        assert f"{task}.reasoning_effort" in str(exc.value)
+
+
+def test_reasoning_effort_reaches_the_payload(
+    monkeypatch: pytest.MonkeyPatch, example_config: ModelsConfig
+) -> None:
+    """(б) The example config's ``reasoning_effort: none`` really goes on the
+    wire; a profile without it sends no such key (not ``null``)."""
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-local-fake")
+    seen: dict[str, dict[str, object]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen[str(request.url)] = json.loads(request.content)
+        return httpx.Response(200, json=_OK_CHAT_BODY)
+
+    url = f"{OLLAMA_BASE_URL}/chat/completions"
+
+    def payload_for(profile: OpenAICompatibleProfile) -> dict[str, object]:
+        seen.clear()
+        provider = OpenAICompatibleProvider(profile, transport=httpx.MockTransport(handler))
+        provider.complete(LLMRequest.from_prompt("синтетический запрос", prompt_version="v1"))
+        assert list(seen) == [url]
+        return seen[url]
+
+    profile = example_config.diary_stt
+    assert isinstance(profile, OpenAICompatibleProfile)
+    assert payload_for(profile)["reasoning_effort"] == "none"
+    assert "reasoning_effort" not in payload_for(
+        profile.model_copy(update={"reasoning_effort": None})
+    )

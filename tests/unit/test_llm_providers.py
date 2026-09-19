@@ -13,6 +13,7 @@ from typing import Callable
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from diary.core.models_config import OpenAICompatibleProfile
 from diary.domain.llm import errors as llm_errors
@@ -182,6 +183,88 @@ def test_request_overrides_beat_profile_defaults(monkeypatch: pytest.MonkeyPatch
     assert payload["model"] == "override-model"
     assert payload["temperature"] == 0.9
     assert payload["max_tokens"] == 7
+
+
+# ---------------------------------------------------------------------------
+# reasoning_effort (T02b, ADR-009)
+# ---------------------------------------------------------------------------
+
+
+def _sent_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    profile: OpenAICompatibleProfile | None = None,
+    request: LLMRequest | None = None,
+) -> dict[str, object]:
+    """Run one mocked completion and return the JSON payload sent."""
+    monkeypatch.setenv(KEY_ENV, KEY_VALUE)
+    seen: dict[str, object] = {}
+
+    def handler(incoming: httpx.Request) -> httpx.Response:
+        seen["payload"] = json.loads(incoming.content)
+        return httpx.Response(200, json=_OK_BODY)
+
+    provider = _provider(handler, profile) if profile is not None else _provider(handler)
+    provider.complete(request if request is not None else _request())
+    payload = seen["payload"]
+    assert isinstance(payload, dict)
+    return payload
+
+
+def test_reasoning_effort_absent_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """(a) Backward compatibility: unset field is not sent at all (not ``null``)."""
+    payload = _sent_payload(monkeypatch)
+    assert "reasoning_effort" not in payload
+
+
+def test_resolved_params_report_none_when_unset() -> None:
+    params = llm_providers.resolve_completion_params(_request(), _profile())
+    assert params["reasoning_effort"] is None
+
+
+def test_profile_reasoning_effort_reaches_the_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """(b) A profile-level value is sent verbatim."""
+    payload = _sent_payload(monkeypatch, profile=_profile(reasoning_effort="none"))
+    assert payload["reasoning_effort"] == "none"
+
+
+def test_request_reasoning_effort_beats_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """(c) Request-level override wins over the profile default."""
+    payload = _sent_payload(
+        monkeypatch,
+        profile=_profile(reasoning_effort="none"),
+        request=LLMRequest.from_prompt("x", reasoning_effort="high"),
+    )
+    assert payload["reasoning_effort"] == "high"
+
+
+def test_request_reasoning_effort_applies_without_profile_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(c) The override also works when the profile does not set the field."""
+    payload = _sent_payload(
+        monkeypatch,
+        profile=_profile(),
+        request=LLMRequest.from_prompt("x", reasoning_effort="low"),
+    )
+    assert payload["reasoning_effort"] == "low"
+
+
+@pytest.mark.parametrize("bad", ["minimal", "NONE", "yes", 1, ""])
+def test_invalid_reasoning_effort_rejected(bad: object) -> None:
+    """(d) Only the four documented levels are accepted, in profile and request."""
+    with pytest.raises(ValidationError):
+        _profile(reasoning_effort=bad)
+    with pytest.raises(ValidationError):
+        LLMRequest.from_prompt("x", reasoning_effort=bad)  # type: ignore[arg-type]
+
+
+def test_resolved_params_prefer_request_over_profile() -> None:
+    params = llm_providers.resolve_completion_params(
+        LLMRequest.from_prompt("x", reasoning_effort="medium"),
+        _profile(reasoning_effort="none"),
+    )
+    assert params["reasoning_effort"] == "medium"
 
 
 # ---------------------------------------------------------------------------

@@ -72,9 +72,11 @@ profiles:
 # max_tokens — cap генерации, а не резерв VRAM (KV-кэш преаллоцируется под
 # num_ctx). Запас нужен на канал reasoning: размышление тратит те же max_tokens,
 # и при исчерпании лимита content приходит пустым (невалидный вывод = failed
-# run). `reasoning_effort`/`think` через текущий провайдер недостижимы
-# (payload — model/temperature/max_tokens/messages), `… /no_think` в промпте не
-# действует (проверено). Для больших недельных входов (T06) и T10 перепроверить.
+# run). Поэтому у всех трёх профилей явно стоит `reasoning_effort: none` (T02b,
+# ADR-009) — канал размышлений выключен, лимит целиком уходит на ответ; поле
+# опционально, и при его отсутствии провайдер не отправляет его вовсе
+# (поведение по умолчанию не меняется). Для больших недельных входов (T06) и
+# порога T10 значения max_tokens перепроверить.
 #
 # num_ctx здесь НЕ задаётся: контекст — свойство созданной модели
 # (`PARAMETER num_ctx 8192` в Modelfile), OpenAI-совместимый API Ollama его не
@@ -92,6 +94,7 @@ profiles:
     timeout_s: 120
     temperature: 0.15                      # == PARAMETER temperature в ollama/Modelfile.stt
     max_tokens: 3072
+    reasoning_effort: none                 # канал размышлений выключен (T02b, ADR-009)
     external: false
 
   diary_sum:
@@ -102,6 +105,7 @@ profiles:
     timeout_s: 120
     temperature: 0.25                      # == PARAMETER temperature в ollama/Modelfile.sum
     max_tokens: 4096
+    reasoning_effort: none                 # канал размышлений выключен (T02b, ADR-009)
     external: false
 
   diary_coach:
@@ -112,4 +116,5 @@ profiles:
     timeout_s: 120
     temperature: 0.4                       # == PARAMETER temperature в ollama/Modelfile.coach
     max_tokens: 4096
+    reasoning_effort: none                 # канал размышлений выключен (T02b, ADR-009)
     external: false

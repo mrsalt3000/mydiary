@@ -33,7 +33,7 @@ from typing import Protocol, TypedDict
 
 import httpx
 
-from diary.core.models_config import OpenAICompatibleProfile
+from diary.core.models_config import OpenAICompatibleProfile, ReasoningEffort
 from diary.domain.llm.errors import (
     LLMAuthError,
     LLMError,
@@ -58,11 +58,18 @@ def chat_completions_url(base_url: str) -> str:
 
 
 class CompletionParams(TypedDict):
-    """Resolved completion parameters actually sent to the endpoint."""
+    """Resolved completion parameters actually sent to the endpoint.
+
+    ``reasoning_effort`` is ``None`` when neither the profile nor the request
+    sets it; the adapter then omits the key from the payload entirely instead
+    of sending ``null``, which an endpoint could reject as invalid
+    (ADR-009).
+    """
 
     model: str
     temperature: float
     max_tokens: int
+    reasoning_effort: ReasoningEffort | None
 
 
 def resolve_completion_params(
@@ -71,8 +78,8 @@ def resolve_completion_params(
     """Merge request-level overrides over the task-profile defaults.
 
     The profile stays authoritative for the endpoint and supplies defaults for
-    ``model``, ``temperature`` and ``max_tokens``; an explicitly set request
-    field wins over the profile default.
+    ``model``, ``temperature``, ``max_tokens`` and ``reasoning_effort``; an
+    explicitly set request field wins over the profile default.
     """
     return {
         "model": request.model if request.model is not None else profile.model,
@@ -80,6 +87,11 @@ def resolve_completion_params(
             request.temperature if request.temperature is not None else profile.temperature
         ),
         "max_tokens": request.max_tokens if request.max_tokens is not None else profile.max_tokens,
+        "reasoning_effort": (
+            request.reasoning_effort
+            if request.reasoning_effort is not None
+            else profile.reasoning_effort
+        ),
     }
 
 
@@ -129,7 +141,16 @@ class OpenAICompatibleProvider:
         """
         key = _resolve_api_key(self._profile)
         headers = {"Authorization": f"Bearer {key}"}
-        payload: dict[str, object] = dict(resolve_completion_params(request, self._profile))
+        # ``None``-valued parameters (today: an unset ``reasoning_effort``) are
+        # dropped instead of being sent as JSON ``null``: the field is optional
+        # in the OpenAI API and an explicit ``null`` can fail validation on
+        # external endpoints. Omitting it is also exactly the pre-T02b wire
+        # behaviour (ADR-009).
+        payload: dict[str, object] = {
+            name: value
+            for name, value in resolve_completion_params(request, self._profile).items()
+            if value is not None
+        }
         payload["messages"] = [message.model_dump() for message in request.messages]
         timeout = httpx.Timeout(self._profile.timeout_s)
         try:
