@@ -119,6 +119,8 @@ PIPELINE_LABELS: dict[PipelineType, str] = {
     PipelineType.wellbeing: "Wellbeing-рефлексия",
     # Phase-2 layer (task T04, second anchor family): per-message STT fix.
     PipelineType.stt_corrected: "Правка STT",
+    # Phase-2 layer (task T05, second anchor family): per-day summary.
+    PipelineType.daily_summary: "Саммари дня",
 }
 
 #: Captions of durable job types (processing page).
@@ -129,6 +131,8 @@ JOB_TYPE_LABELS: dict[JobType, str] = {
     JobType.wellbeing: "Wellbeing-рефлексия",
     # Phase-2 layer (task T04, second anchor family).
     JobType.stt_corrected: "Правка STT",
+    # Phase-2 layer (task T05, second anchor family).
+    JobType.daily_summary: "Саммари дня",
 }
 
 #: Captions of job statuses (processing page).
@@ -164,6 +168,9 @@ _PIPELINE_LAYER: dict[PipelineType, ArtifactLayer] = {
     # Phase-2 layer (task T04, second anchor family); it is anchored to a
     # message, so it never appears in the export-scoped run lists above.
     PipelineType.stt_corrected: ArtifactLayer.stt_corrected,
+    # Phase-2 layer (task T05, second anchor family); it is anchored to a local
+    # day, so it never appears in the export-scoped run lists above.
+    PipelineType.daily_summary: ArtifactLayer.daily_summary,
 }
 
 #: Titles of artifact-layer sections on the exports/detail pages.
@@ -174,6 +181,8 @@ LAYER_TITLES: dict[ArtifactLayer, str] = {
     ArtifactLayer.wellbeing: "Wellbeing-рефлексия (слой 4)",
     # Phase-2 layer (task T04): the phase-2 layers are not numbered 1-4.
     ArtifactLayer.stt_corrected: "Правка STT (фаза 2)",
+    # Phase-2 layer (task T05).
+    ArtifactLayer.daily_summary: "Саммари дня (фаза 2)",
 }
 
 #: Short per-layer captions for compact chips/links.
@@ -183,6 +192,8 @@ LAYER_SHORT_TITLES: dict[ArtifactLayer, str] = {
     ArtifactLayer.summary: "Саммари",
     ArtifactLayer.wellbeing: "Wellbeing",
     ArtifactLayer.stt_corrected: "Правка STT",
+    # Phase-2 layer (task T05).
+    ArtifactLayer.daily_summary: "Саммари дня",
 }
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))

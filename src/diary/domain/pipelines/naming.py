@@ -21,11 +21,12 @@ to the data root with forward slashes, mirroring
 ``exports/02_normalized/2026-09-13_normalized_0001_r1_v1.txt``).
 
 Task T04 adds the first **phase-2** entry: the ``stt_corrected`` layer of the
-second anchor family (ADR-007). Such a layer has no weekly export, so it has no
-``NNNN_rN`` file name and no layer directory — its validated result is stored
-inline by ``diary.db.results.save_layer_result`` (ADR-008). Only the three maps
-the registry validates against are extended for it: its artifact layer, its
-rendered-file extension and its job type; its LLM profile is selected by the
+second anchor family (ADR-007); task T05 adds the ``daily_summary`` layer of the
+same family. Such a layer has no weekly export, so it has no ``NNNN_rN`` file
+name and no layer directory — its validated result is stored inline by
+``diary.db.results.save_layer_result`` (ADR-008). Only the three maps the
+registry validates against are extended for each of them: its artifact layer,
+its rendered-file extension and its job type; its LLM profile is selected by the
 configuration field name (``PIPELINE_PROFILE_NAME``), not by a ``TaskType``.
 """
 
@@ -55,6 +56,8 @@ LAYER_OUTPUT_EXTENSIONS: dict[ArtifactLayer, str] = {
     ArtifactLayer.wellbeing: ".md",
     # Phase-2 layer (task T04): the corrected message text is plain text.
     ArtifactLayer.stt_corrected: ".txt",
+    # Phase-2 layer (task T05): a day summary is rendered as Markdown.
+    ArtifactLayer.daily_summary: ".md",
 }
 
 #: Derived pipeline kind → the artifact layer it produces.
@@ -64,6 +67,8 @@ PIPELINE_LAYER: dict[PipelineType, ArtifactLayer] = {
     PipelineType.wellbeing: ArtifactLayer.wellbeing,
     # Phase-2 layer (task T04, second anchor family): one message per run.
     PipelineType.stt_corrected: ArtifactLayer.stt_corrected,
+    # Phase-2 layer (task T05, second anchor family): one local day per run.
+    PipelineType.daily_summary: ArtifactLayer.daily_summary,
 }
 
 #: Derived pipeline kind → the Task-03 LLM profile task type it uses.
@@ -88,6 +93,7 @@ PIPELINE_TASK_TYPE: dict[PipelineType, TaskType] = {
 #: §9.8). Populated per layer as T04-T07 are implemented.
 PIPELINE_PROFILE_NAME: dict[PipelineType, str] = {
     PipelineType.stt_corrected: "diary_stt",
+    PipelineType.daily_summary: "diary_sum",
 }
 
 #: Derived pipeline kind → the durable job type that drives its execution.
@@ -97,6 +103,8 @@ PIPELINE_JOB_TYPE: dict[PipelineType, JobType] = {
     PipelineType.wellbeing: JobType.wellbeing,
     # Phase-2 layer (task T04): the job type of the same name (ADR-008 §3).
     PipelineType.stt_corrected: JobType.stt_corrected,
+    # Phase-2 layer (task T05): the job type of the same name (ADR-008 §3).
+    PipelineType.daily_summary: JobType.daily_summary,
 }
 
 #: Reverse mapping: job type → pipeline kind.
