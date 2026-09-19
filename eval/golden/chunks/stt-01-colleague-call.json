@@ -1,0 +1,35 @@
+{
+  "budget": {
+    "chunk_chars": 390,
+    "chunk_tokens_est": 156,
+    "chunks_planned": 1,
+    "num_ctx": 8192
+  },
+  "category": "stt_error",
+  "contract": "stt_corrected",
+  "id": "stt-01-colleague-call",
+  "input": [
+    {
+      "audio_path": "audio/2026/09/28f108d5-bbb7-4162-b06a-3868c0fd313a.webm",
+      "id": "58097fb1-32bb-4fff-969a-98a51f9909da",
+      "source": "voice",
+      "text": "щас созвонилась с мариной из отдела закупок она говорит что платёжку надо переделать к среде и прислать ей на почту до 15:30 ещё сказала заглянуть как его в табель и проверить 2 счёта от подрядчика вот такие дела",
+      "ts": "2026-09-14T18:20:00+03:00"
+    }
+  ],
+  "invariants": {
+    "check_input_unchanged": true,
+    "check_output_contract": true,
+    "forbidden_lexemes": [
+      "диагноз",
+      "лечение",
+      "тебе следует"
+    ],
+    "kind": "stt_corrected",
+    "names_and_numbers_grounded_in_input": true,
+    "uncertain_values_are_verbatim_substrings_of_text": true
+  },
+  "lang": "ru",
+  "origin": "authored-for-eval",
+  "synthetic": true
+}

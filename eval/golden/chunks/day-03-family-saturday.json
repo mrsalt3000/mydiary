@@ -1,0 +1,51 @@
+{
+  "budget": {
+    "chunk_chars": 629,
+    "chunk_tokens_est": 252,
+    "chunks_planned": 1,
+    "num_ctx": 8192
+  },
+  "category": "day",
+  "contract": "daily_summary",
+  "id": "day-03-family-saturday",
+  "input": [
+    {
+      "audio_path": null,
+      "id": "3f0e40df-64f0-47c9-8ca9-39665618d5d8",
+      "source": "text",
+      "text": "Съездили с детьми в музей, взяли 2 билета по 700 рублей, очереди не было.",
+      "ts": "2026-09-19T10:15:00+03:00"
+    },
+    {
+      "audio_path": "audio/2026/09/9e8bd72e-ac3a-4887-b33c-0fc63e3386a0.webm",
+      "id": "7110ace5-bbea-4b5d-a1ff-ababf3037594",
+      "source": "voice",
+      "text": "потом обедали в кафе на площади взяли по большой пицце и мороженое",
+      "ts": "2026-09-19T14:40:00+03:00"
+    },
+    {
+      "audio_path": null,
+      "id": "b4a13c7b-3b9f-487f-90ad-97e6b8986a51",
+      "source": "text",
+      "text": "Вечером разобрала фотографии за неделю и отправила 5 штук бабушке.",
+      "ts": "2026-09-19T20:30:00+03:00"
+    }
+  ],
+  "invariants": {
+    "check_input_unchanged": true,
+    "check_output_contract": true,
+    "expected_date": "2026-09-19",
+    "expected_energy": null,
+    "facts_non_empty": true,
+    "forbidden_lexemes": [
+      "диагноз",
+      "лечение",
+      "тебе следует"
+    ],
+    "kind": "daily_summary",
+    "numbers_grounded_in_input": true
+  },
+  "lang": "ru",
+  "origin": "authored-for-eval",
+  "synthetic": true
+}

@@ -1,0 +1,32 @@
+{
+  "additionalProperties": false,
+  "description": "Grounded rollup of the per-day summaries of one ISO week.",
+  "properties": {
+    "daily_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Daily Ids",
+      "type": "array"
+    },
+    "rollup": {
+      "minLength": 1,
+      "title": "Rollup",
+      "type": "string"
+    },
+    "week_id": {
+      "pattern": "^\\d{4}-W\\d{2}$",
+      "title": "Week Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "week_id",
+    "daily_ids",
+    "rollup"
+  ],
+  "title": "WeeklySummary",
+  "type": "object"
+}

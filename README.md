@@ -131,6 +131,21 @@ curl -s http://127.0.0.1:8000/health
 
 Полезные команды: `docker compose logs -f web`, `docker compose logs -f worker-stt`, `docker compose build`.
 
+## Контракты и golden-набор (фаза 2)
+
+Вторая фаза ([`docs/tasklist-phase2.md`](docs/tasklist-phase2.md), T00–T12; решение — [ADR-007](docs/decisions/ADR-007-second-anchor-family-for-derivational-layers.md)) вводит структурированные контракты производных слоёв — `raw_entry`, `stt_corrected`, `daily_summary`, `weekly_summary`, `coach_note` — и синтетический golden-набор для проверки качества:
+
+- модели контрактов: [`src/diary/domain/contracts/`](src/diary/domain/contracts) (Pydantic, `extra="forbid"`; JSON Schema выводятся из них);
+- [`schemas/`](schemas/README.md) — **производные** JSON Schema: правятся не руками, а правкой модели + регенерацией;
+- [`eval/golden/`](eval/golden/README.md) — 10 синтетических RU-чанков (3/3/2/2) и манифест с порогами (8/10) и лимитами латентности T10 (правка < 5 с, день < 15 с).
+
+```bash
+make contracts                                                  # перезаписать schemas/*.json из моделей
+.venv/bin/python scripts/generate_contract_schemas.py --check   # проверить расхождение, ничего не записывая
+```
+
+Это подготовленный, но ещё не подключённый слой: рантайм MVP (слои 1–4) работает как принято и модулей `domain/contracts` не использует — их подключают задачи T01–T12 (персистентность второй семьи якорей — только T08, `artifacts.export_id NOT NULL` снимается там же).
+
 ## Руководства и документация
 
 | Документ | Назначение |

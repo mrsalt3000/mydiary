@@ -9,7 +9,7 @@ VENV_PYTEST  := $(VENV)/bin/pytest
 VENV_RUFF    := $(VENV)/bin/ruff
 VENV_MYPY    := $(VENV)/bin/mypy
 
-.PHONY: install dev migrate test lint typecheck format
+.PHONY: install dev migrate contracts test lint typecheck format
 
 ## install — create .venv on Python 3.12 and install the package with dev extras
 install:
@@ -23,6 +23,10 @@ dev:
 ## migrate — apply Alembic migrations to the application database (data/db/diary.db)
 migrate:
 	$(VENV)/bin/alembic upgrade head
+
+## contracts — regenerate schemas/*.json from the Pydantic contracts (task T00)
+contracts:
+	$(VENV_PY) scripts/generate_contract_schemas.py
 
 ## test — run the test suite
 test:

@@ -1,0 +1,94 @@
+{
+  "budget": {
+    "chunk_chars": 982,
+    "chunk_tokens_est": 393,
+    "chunks_planned": 1,
+    "num_ctx": 8192
+  },
+  "category": "week",
+  "contract": "weekly_summary",
+  "id": "week-02-2026-w39",
+  "input": [
+    {
+      "date": "2026-09-21",
+      "energy": "medium",
+      "facts": [
+        "Начала новый проект: разобрала требования и составила план на 2 недели."
+      ],
+      "open_questions": [
+        "Нужно уточнить объём данных у аналитика."
+      ],
+      "themes": [
+        "работа"
+      ]
+    },
+    {
+      "date": "2026-09-22",
+      "energy": "low",
+      "facts": [
+        "Провела 3 встречи подряд, к вечеру было трудно сосредоточиться."
+      ],
+      "open_questions": [],
+      "themes": [
+        "нагрузка"
+      ]
+    },
+    {
+      "date": "2026-09-23",
+      "energy": "medium",
+      "facts": [
+        "Написала черновик раздела документации на 5 страниц.",
+        "Вечером ходила на прогулку с подругой."
+      ],
+      "open_questions": [],
+      "themes": [
+        "работа",
+        "общение"
+      ]
+    },
+    {
+      "date": "2026-09-24",
+      "energy": "high",
+      "facts": [
+        "Сдала раздел документации на проверку.",
+        "Сходила в бассейн, проплыла 800 метров."
+      ],
+      "open_questions": [],
+      "themes": [
+        "работа",
+        "спорт"
+      ]
+    },
+    {
+      "date": "2026-09-25",
+      "energy": "medium",
+      "facts": [
+        "Разбирала замечания по документации, внесла 12 правок.",
+        "Купила билеты на концерт 3 октября."
+      ],
+      "open_questions": [
+        "Неясно, успею ли закончить раздел до конца месяца."
+      ],
+      "themes": [
+        "работа",
+        "планы"
+      ]
+    }
+  ],
+  "invariants": {
+    "check_input_unchanged": true,
+    "check_output_contract": true,
+    "daily_ids_subset_of_input": true,
+    "expected_week_id": "2026-W39",
+    "forbidden_lexemes": [
+      "диагноз",
+      "лечение",
+      "тебе следует"
+    ],
+    "kind": "weekly_summary",
+    "rollup_non_empty": true
+  },
+  "lang": "ru",
+  "origin": "authored-for-eval",
+  "synthetic": true
+}

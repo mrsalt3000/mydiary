@@ -1,0 +1,48 @@
+{
+  "additionalProperties": false,
+  "description": "One diary message, exactly as recorded in the source tables.",
+  "properties": {
+    "audio_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Audio Path"
+    },
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "source": {
+      "enum": [
+        "text",
+        "voice"
+      ],
+      "title": "Source",
+      "type": "string"
+    },
+    "text": {
+      "default": "",
+      "title": "Text",
+      "type": "string"
+    },
+    "ts": {
+      "format": "date-time",
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "ts",
+    "source"
+  ],
+  "title": "RawEntry",
+  "type": "object"
+}

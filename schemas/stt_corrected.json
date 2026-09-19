@@ -1,0 +1,41 @@
+{
+  "additionalProperties": false,
+  "description": "One corrected message plus the fragments that stayed uncertain.",
+  "properties": {
+    "model": {
+      "minLength": 1,
+      "title": "Model",
+      "type": "string"
+    },
+    "prompt_ver": {
+      "pattern": "^v\\d+$",
+      "title": "Prompt Ver",
+      "type": "string"
+    },
+    "raw_id": {
+      "format": "uuid",
+      "title": "Raw Id",
+      "type": "string"
+    },
+    "text": {
+      "minLength": 1,
+      "title": "Text",
+      "type": "string"
+    },
+    "uncertain": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Uncertain",
+      "type": "array"
+    }
+  },
+  "required": [
+    "raw_id",
+    "text",
+    "model",
+    "prompt_ver"
+  ],
+  "title": "SttCorrection",
+  "type": "object"
+}

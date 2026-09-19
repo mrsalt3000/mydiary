@@ -1,0 +1,35 @@
+{
+  "budget": {
+    "chunk_chars": 474,
+    "chunk_tokens_est": 190,
+    "chunks_planned": 1,
+    "num_ctx": 8192
+  },
+  "category": "stt_error",
+  "contract": "stt_corrected",
+  "id": "stt-02-rainy-walk",
+  "input": [
+    {
+      "audio_path": "audio/2026/09/46d1646c-3090-4037-99b5-8a5ec78ca49c.webm",
+      "id": "53e7d59f-22d9-4096-9194-d1984bb57bbf",
+      "source": "voice",
+      "text": "кароче вышла погулять после работы и попала под дождь промокла вся насквозь зато дошла до парка там сейчас красиво листья уже жёлтые потом зашла к кате пили чай она рассказала про свою поездку в казань домой вернулась в 21:40 и сразу легла спать хотя надо было взять зонт ну как это всегда бывает",
+      "ts": "2026-09-16T22:05:00+03:00"
+    }
+  ],
+  "invariants": {
+    "check_input_unchanged": true,
+    "check_output_contract": true,
+    "forbidden_lexemes": [
+      "диагноз",
+      "лечение",
+      "тебе следует"
+    ],
+    "kind": "stt_corrected",
+    "names_and_numbers_grounded_in_input": true,
+    "uncertain_values_are_verbatim_substrings_of_text": true
+  },
+  "lang": "ru",
+  "origin": "authored-for-eval",
+  "synthetic": true
+}

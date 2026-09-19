@@ -1,0 +1,59 @@
+{
+  "additionalProperties": false,
+  "description": "Grounded rollup of one local calendar day of diary messages.",
+  "properties": {
+    "date": {
+      "format": "date",
+      "title": "Date",
+      "type": "string"
+    },
+    "energy": {
+      "anyOf": [
+        {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Energy"
+    },
+    "facts": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Facts",
+      "type": "array"
+    },
+    "open_questions": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Open Questions",
+      "type": "array"
+    },
+    "themes": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Themes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "date",
+    "facts"
+  ],
+  "title": "DailySummary",
+  "type": "object"
+}

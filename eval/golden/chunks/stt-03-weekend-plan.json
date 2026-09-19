@@ -1,0 +1,35 @@
+{
+  "budget": {
+    "chunk_chars": 374,
+    "chunk_tokens_est": 150,
+    "chunks_planned": 1,
+    "num_ctx": 8192
+  },
+  "category": "stt_error",
+  "contract": "stt_corrected",
+  "id": "stt-03-weekend-plan",
+  "input": [
+    {
+      "audio_path": "audio/2026/09/8d4d4763-5711-4dab-aa6e-c31f358230df.webm",
+      "id": "b8a1494a-9acf-4735-9020-ac48b4b17418",
+      "source": "voice",
+      "text": "надо не забыть купить билеты на 14:00 в музей это 2 билета и ещё забронировать столик в кафе на субботу вощем миле скажу вечером она просила напомнить про подарок для кого-то там как там его зовут",
+      "ts": "2026-09-18T08:40:00+03:00"
+    }
+  ],
+  "invariants": {
+    "check_input_unchanged": true,
+    "check_output_contract": true,
+    "forbidden_lexemes": [
+      "диагноз",
+      "лечение",
+      "тебе следует"
+    ],
+    "kind": "stt_corrected",
+    "names_and_numbers_grounded_in_input": true,
+    "uncertain_values_are_verbatim_substrings_of_text": true
+  },
+  "lang": "ru",
+  "origin": "authored-for-eval",
+  "synthetic": true
+}

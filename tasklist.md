@@ -1036,6 +1036,8 @@ These items must not be started without a new explicit task list or user confirm
 - Fine-tuning on diary data.
 - Kubernetes, Redis, Celery, Kafka, or distributed processing.
 
+Second-phase backlog (T00–T12: second anchor family, layer 5 `coach_note`, golden eval set) — [`docs/tasklist-phase2.md`](docs/tasklist-phase2.md); started only by an explicit user decision (see ADR-007).
+
 ---
 
 # Final MVP acceptance checklist

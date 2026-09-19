@@ -1,0 +1,51 @@
+{
+  "budget": {
+    "chunk_chars": 666,
+    "chunk_tokens_est": 267,
+    "chunks_planned": 1,
+    "num_ctx": 8192
+  },
+  "category": "day",
+  "contract": "daily_summary",
+  "id": "day-02-long-tuesday",
+  "input": [
+    {
+      "audio_path": null,
+      "id": "c07d743d-6568-4e67-86da-ca0bd970cf4f",
+      "source": "text",
+      "text": "Спала плохо, просыпалась 3 раза за ночь. К вечеру совсем вымоталась, сил почти не осталось.",
+      "ts": "2026-09-15T08:05:00+03:00"
+    },
+    {
+      "audio_path": null,
+      "id": "ee157d18-11d1-4dcb-b119-1c3aac7746bb",
+      "source": "text",
+      "text": "Созвон по проекту длился 1 час 20 минут, после него прошли ещё 2 встречи подряд.",
+      "ts": "2026-09-15T13:20:00+03:00"
+    },
+    {
+      "audio_path": "audio/2026/09/89c5ec12-922f-4727-899d-8c710c9cba0b.webm",
+      "id": "cd57959e-4acf-4ce3-8189-c994eaaf17f7",
+      "source": "voice",
+      "text": "дочитала отчёт и отправила его до 18:00 хотя по плану он был на четверг",
+      "ts": "2026-09-15T22:10:00+03:00"
+    }
+  ],
+  "invariants": {
+    "check_input_unchanged": true,
+    "check_output_contract": true,
+    "expected_date": "2026-09-15",
+    "expected_energy": "low",
+    "facts_non_empty": true,
+    "forbidden_lexemes": [
+      "диагноз",
+      "лечение",
+      "тебе следует"
+    ],
+    "kind": "daily_summary",
+    "numbers_grounded_in_input": true
+  },
+  "lang": "ru",
+  "origin": "authored-for-eval",
+  "synthetic": true
+}

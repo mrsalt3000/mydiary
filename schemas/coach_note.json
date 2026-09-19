@@ -1,0 +1,49 @@
+{
+  "additionalProperties": false,
+  "description": "Cautious, non-diagnostic note over one weekly summary.",
+  "properties": {
+    "disclaimer": {
+      "title": "Disclaimer",
+      "type": "string"
+    },
+    "experiment_7d": {
+      "minLength": 1,
+      "title": "Experiment 7D",
+      "type": "string"
+    },
+    "hypotheses": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 2,
+      "minItems": 2,
+      "title": "Hypotheses",
+      "type": "array"
+    },
+    "observations": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "title": "Observations",
+      "type": "array"
+    },
+    "summary_id": {
+      "minLength": 1,
+      "title": "Summary Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "summary_id",
+    "observations",
+    "hypotheses",
+    "experiment_7d",
+    "disclaimer"
+  ],
+  "title": "CoachNote",
+  "type": "object"
+}

@@ -1,0 +1,34 @@
+{
+  "budget_default": {
+    "num_ctx": 8192
+  },
+  "chunks": [
+    "stt-01-colleague-call",
+    "stt-02-rainy-walk",
+    "stt-03-weekend-plan",
+    "day-01-quiet-monday",
+    "day-02-long-tuesday",
+    "day-03-family-saturday",
+    "week-01-2026-w38",
+    "week-02-2026-w39",
+    "coach-01-low-energy-tuesday",
+    "coach-02-new-project-load"
+  ],
+  "counts": {
+    "day": 3,
+    "stt_error": 3,
+    "week": 2,
+    "wellbeing": 2
+  },
+  "lang": "ru",
+  "latency_budget_s": {
+    "daily": 15,
+    "stt_fix": 5
+  },
+  "synthetic": true,
+  "threshold": {
+    "pass": 8,
+    "total": 10
+  },
+  "version": 1
+}

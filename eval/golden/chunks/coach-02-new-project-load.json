@@ -1,0 +1,39 @@
+{
+  "budget": {
+    "chunk_chars": 654,
+    "chunk_tokens_est": 262,
+    "chunks_planned": 1,
+    "num_ctx": 8192
+  },
+  "category": "wellbeing",
+  "contract": "coach_note",
+  "id": "coach-02-new-project-load",
+  "input": {
+    "daily_ids": [
+      "2026-09-21",
+      "2026-09-22",
+      "2026-09-23",
+      "2026-09-24",
+      "2026-09-25"
+    ],
+    "rollup": "Неделя 21-25 сентября была про новый проект и документацию. В понедельник разобрала требования и составила план на 2 недели. Во вторник прошли 3 встречи подряд, к вечеру было трудно сосредоточиться и мало сил. В среду написала черновик раздела документации на 5 страниц и вечером гуляла с подругой. В четверг сдала раздел на проверку и проплыла в бассейне 800 метров. В пятницу разобрала замечания, внесла 12 правок и купила билеты на концерт 3 октября. Открытые вопросы: объём данных у аналитика и успею ли закончить раздел до конца месяца.",
+    "week_id": "2026-W39"
+  },
+  "invariants": {
+    "check_input_unchanged": true,
+    "check_output_contract": true,
+    "disclaimer_equals_coach_disclaimer": true,
+    "experiment_horizon_days": 7,
+    "forbidden_lexemes": [
+      "диагноз",
+      "лечение",
+      "тебе следует"
+    ],
+    "hypotheses_count": 2,
+    "kind": "coach_note",
+    "observations_count": 3
+  },
+  "lang": "ru",
+  "origin": "authored-for-eval",
+  "synthetic": true
+}

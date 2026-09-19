@@ -1,0 +1,51 @@
+{
+  "budget": {
+    "chunk_chars": 739,
+    "chunk_tokens_est": 296,
+    "chunks_planned": 1,
+    "num_ctx": 8192
+  },
+  "category": "day",
+  "contract": "daily_summary",
+  "id": "day-01-quiet-monday",
+  "input": [
+    {
+      "audio_path": null,
+      "id": "a91bdb39-5252-452b-a779-7c8d0ee13d2b",
+      "source": "text",
+      "text": "Проснулась рано, до будильника. Чувствую себя бодро, энергии много. Успела сделать зарядку и позавтракать без спешки.",
+      "ts": "2026-09-14T09:12:00+03:00"
+    },
+    {
+      "audio_path": null,
+      "id": "2c003dee-ec1a-4990-a8d8-75a93d05797a",
+      "source": "text",
+      "text": "На работе разобрала входящие письма, закрыла 4 задачи из списка и подготовила черновик отчёта по складу.",
+      "ts": "2026-09-14T11:30:00+03:00"
+    },
+    {
+      "audio_path": "audio/2026/09/b67f7cd9-7edf-43d6-96b5-ef29886ea3b5.webm",
+      "id": "53983d1d-b88f-4a42-b403-9bafb5cb0ec3",
+      "source": "voice",
+      "text": "вечером сходила в бассейн проплыла 1 километр потом приготовила ужин и почитала книгу минут 40",
+      "ts": "2026-09-14T19:45:00+03:00"
+    }
+  ],
+  "invariants": {
+    "check_input_unchanged": true,
+    "check_output_contract": true,
+    "expected_date": "2026-09-14",
+    "expected_energy": "high",
+    "facts_non_empty": true,
+    "forbidden_lexemes": [
+      "диагноз",
+      "лечение",
+      "тебе следует"
+    ],
+    "kind": "daily_summary",
+    "numbers_grounded_in_input": true
+  },
+  "lang": "ru",
+  "origin": "authored-for-eval",
+  "synthetic": true
+}
