@@ -1,4 +1,4 @@
-"""Contract ``daily_summary`` (layer 5, task T00).
+"""Contract ``daily_summary`` (phase-2 layer, task T00).
 
 Fixes the per-day aggregation contract of the phase-2 family (variant B;
 ADR-007)::

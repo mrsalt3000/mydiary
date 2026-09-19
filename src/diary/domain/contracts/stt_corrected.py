@@ -1,4 +1,4 @@
-"""Contract ``stt_corrected`` (layer 5, task T00).
+"""Contract ``stt_corrected`` (phase-2 layer, task T00).
 
 Fixes the STT-correction contract of the phase-2 family (variant B; ADR-007)::
 

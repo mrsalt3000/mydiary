@@ -1,4 +1,4 @@
-"""Contract ``weekly_summary`` (layer 5, task T00).
+"""Contract ``weekly_summary`` (phase-2 layer, task T00).
 
 Fixes the weekly rollup contract of the phase-2 family (variant B; ADR-007)::
 
