@@ -1,13 +1,17 @@
-"""Unit tests for model configuration loading/validation and diagnostics (Task 03).
+"""Unit tests for model configuration loading/validation and diagnostics (Task 03)
+plus the phase-2 optional profiles (task T02).
 
-Synthetic only: no network calls and no real API keys. Secrets are simulated
-with obviously fake values to prove they never leak into dumps or errors.
+Synthetic only: no network calls (the one payload test uses
+``httpx.MockTransport``) and no real API keys. Secrets are simulated with
+obviously fake values to prove they never leak into dumps or errors.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import httpx
 import pytest
 import yaml
 
@@ -26,6 +30,8 @@ from diary.core.profile_status import (
     validate_all,
 )
 from diary.core.settings import PROJECT_ROOT
+from diary.domain.llm.models import LLMRequest
+from diary.domain.llm.providers import OpenAICompatibleProvider
 
 EXAMPLE_CONFIG = PROJECT_ROOT / "configs" / "models.example.yaml"
 
@@ -33,12 +39,58 @@ API_KEY_NAMES = (
     "NORMALIZATION_API_KEY",
     "SUMMARIZATION_API_KEY",
     "WELLBEING_API_KEY",
+    "OLLAMA_API_KEY",
 )
 
 SECRET_VALUES = {
     "NORMALIZATION_API_KEY": "sk-normalization-fake-1111",
     "SUMMARIZATION_API_KEY": "sk-summarization-fake-2222",
     "WELLBEING_API_KEY": "sk-wellbeing-fake-3333",
+}
+
+#: Phase-2 optional profile fields (T02): field → aligned artifact values.
+#: ``temperature`` must equal ``PARAMETER temperature`` of the paired Modelfile
+#: and ``model`` must equal the Ollama tag: ``resolve_completion_params`` always
+#: sends the profile temperature, so a divergence would be a silent substitution.
+PHASE2_PROFILES: dict[str, dict[str, object]] = {
+    "diary_stt": {
+        "model": "diary-stt",
+        "modelfile": "Modelfile.stt",
+        "temperature": 0.15,
+        "max_tokens": 3072,
+    },
+    "diary_sum": {
+        "model": "diary-sum",
+        "modelfile": "Modelfile.sum",
+        "temperature": 0.25,
+        "max_tokens": 4096,
+    },
+    "diary_coach": {
+        "model": "diary-coach",
+        "modelfile": "Modelfile.coach",
+        "temperature": 0.4,
+        "max_tokens": 4096,
+    },
+}
+
+PHASE2_FIELDS = tuple(PHASE2_PROFILES)
+
+NUM_CTX = 8192
+OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
+
+_OK_CHAT_BODY: dict[str, object] = {
+    "id": "chatcmpl-fake",
+    "object": "chat.completion",
+    "created": 1780000000,
+    "model": "diary-stub",
+    "choices": [
+        {
+            "index": 0,
+            "message": {"role": "assistant", "content": "готово"},
+            "finish_reason": "stop",
+        }
+    ],
+    "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10},
 }
 
 
@@ -435,3 +487,152 @@ def test_validation_error_never_contains_secret_values(
     assert "SUMMARIZATION_API_KEY" in message
     for value in SECRET_VALUES.values():
         assert value not in message
+
+
+# ---------------------------------------------------------------------------
+# Phase-2 optional profiles (T02)
+# ---------------------------------------------------------------------------
+
+
+def _example_profiles() -> dict[str, dict[str, object]]:
+    """The ``profiles`` mapping of the tracked example file, freshly parsed."""
+    raw = yaml.safe_load(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
+    return raw["profiles"]
+
+
+def _config_from_profiles(tmp_path: Path, profiles: dict[str, dict[str, object]]) -> ModelsConfig:
+    return _config_from_text(tmp_path, yaml.safe_dump({"profiles": profiles}, sort_keys=False))
+
+
+def _modelfile_parameters(name: str) -> dict[str, str]:
+    """``PARAMETER`` name → value for ``ollama/<name>``."""
+    path = PROJECT_ROOT / "ollama" / name
+    assert path.is_file(), f"missing {path}"
+    params: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        keyword, _, value = line.partition(" ")
+        if keyword.upper() != "PARAMETER":
+            continue
+        param_name, _, param_value = value.strip().partition(" ")
+        params[param_name] = param_value.strip()
+    return params
+
+
+def test_example_provides_the_three_phase2_profiles(example_config: ModelsConfig) -> None:
+    pairs = example_config.phase2_profiles()
+    assert [name for name, _ in pairs] == list(PHASE2_FIELDS)
+    for name, profile in pairs:
+        expected = PHASE2_PROFILES[name]
+        assert isinstance(profile, OpenAICompatibleProfile)
+        assert profile.provider == "openai_compatible"
+        assert profile.base_url == OLLAMA_BASE_URL
+        assert profile.model == expected["model"]
+        assert profile.api_key_env == "OLLAMA_API_KEY"
+        assert profile.temperature == pytest.approx(expected["temperature"])
+        assert profile.max_tokens == expected["max_tokens"]
+        assert profile.external is False
+
+
+def test_config_without_phase2_profiles_is_valid(tmp_path: Path) -> None:
+    """(a) Backward compatibility: the pre-T02 config still loads."""
+    profiles = _example_profiles()
+    for field in PHASE2_FIELDS:
+        profiles.pop(field, None)
+    config = _config_from_profiles(tmp_path, profiles)
+    assert config.phase2_profiles() == []
+    assert config.diary_stt is None
+    assert config.diary_sum is None
+    assert config.diary_coach is None
+    # The four MVP profiles are untouched by the new optional fields.
+    assert [task for task, _ in config.profiles_by_task()] == list(TaskType)
+
+
+@pytest.mark.parametrize("field", PHASE2_FIELDS)
+def test_each_phase2_profile_is_optional_on_its_own(tmp_path: Path, field: str) -> None:
+    """(b) Any single phase-2 profile (and no other) is enough to load."""
+    profiles = _example_profiles()
+    for other in PHASE2_FIELDS:
+        if other != field:
+            profiles.pop(other, None)
+    config = _config_from_profiles(tmp_path, profiles)
+    assert [name for name, _ in config.phase2_profiles()] == [field]
+    single = getattr(config, field)
+    assert isinstance(single, OpenAICompatibleProfile)
+    assert single.model == PHASE2_PROFILES[field]["model"]
+    for other in PHASE2_FIELDS:
+        if other != field:
+            assert getattr(config, other) is None
+
+
+def test_phase2_profile_is_still_validated_when_present(tmp_path: Path) -> None:
+    """Optional means "may be absent", not "unchecked"."""
+    profiles = _example_profiles()
+    profiles["diary_stt"]["max_tokens"] = 0
+    with pytest.raises(ModelsConfigError) as exc:
+        _config_from_profiles(tmp_path, profiles)
+    assert "diary_stt.max_tokens" in str(exc.value)
+
+
+def test_unknown_key_next_to_phase2_profiles_still_rejected(tmp_path: Path) -> None:
+    """(c) ``extra="forbid"`` keeps its grip beside the new optional fields."""
+    wrong_name = {"diary_stt_fix": dict(_example_profiles()["diary_stt"])}
+    with pytest.raises(ModelsConfigError) as exc:
+        _config_from_text(tmp_path, _yaml_for(tweaks=wrong_name))
+    assert "diary_stt_fix" in str(exc.value)
+
+
+def test_phase2_yaml_temperature_matches_modelfile() -> None:
+    """(d) Modelfile ⇄ ``configs/models.example.yaml`` agreement (T02).
+
+    The profile temperature is what actually goes on the wire
+    (``resolve_completion_params``), so a divergence between the YAML and the
+    Modelfile ``PARAMETER temperature`` is a silent substitution — this test
+    fails on any mismatch, in either direction, and on drift of the decided
+    numbers themselves.
+    """
+    profiles = _example_profiles()
+    for field, expected in PHASE2_PROFILES.items():
+        profile = profiles[field]
+        params = _modelfile_parameters(str(expected["modelfile"]))
+        assert params["num_ctx"] == str(NUM_CTX), f"{field}: num_ctx must be {NUM_CTX}"
+        assert float(params["temperature"]) == pytest.approx(profile["temperature"]), (
+            f"{field}: Modelfile temperature {params['temperature']} != "
+            f"profile temperature {profile['temperature']}"
+        )
+        assert float(params["temperature"]) == pytest.approx(expected["temperature"])
+        assert float(profile["temperature"]) == pytest.approx(expected["temperature"])
+        assert profile["model"] == field.replace("_", "-")
+
+
+def test_phase2_profile_temperature_reaches_the_payload(
+    monkeypatch: pytest.MonkeyPatch, example_config: ModelsConfig
+) -> None:
+    """T02 DoD: the phase-2 profile really reaches the HTTP payload.
+
+    ``httpx.MockTransport`` only — no endpoint is contacted. Payload keys are
+    exactly what :meth:`OpenAICompatibleProvider.complete` builds: model,
+    temperature, max_tokens and messages.
+    """
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-local-fake")
+    seen: dict[str, dict[str, object]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen[str(request.url)] = json.loads(request.content)
+        return httpx.Response(200, json=_OK_CHAT_BODY)
+
+    pairs = example_config.phase2_profiles()
+    assert [name for name, _ in pairs] == list(PHASE2_FIELDS)
+    url = f"{OLLAMA_BASE_URL}/chat/completions"
+    for field, profile in pairs:
+        seen.clear()
+        provider = OpenAICompatibleProvider(profile, transport=httpx.MockTransport(handler))
+        provider.complete(LLMRequest.from_prompt("синтетический запрос", prompt_version="v1"))
+        assert list(seen) == [url]
+        payload = seen[url]
+        expected = PHASE2_PROFILES[field]
+        assert payload["temperature"] == pytest.approx(expected["temperature"])
+        assert payload["model"] == expected["model"]
+        assert payload["max_tokens"] == expected["max_tokens"]

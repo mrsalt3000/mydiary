@@ -146,7 +146,15 @@ ModelProfile = FasterWhisperProfile | OpenAICompatibleProfile
 
 
 class ModelsConfig(BaseModel):
-    """Validated per-task model profiles; all four tasks are required."""
+    """Validated per-task model profiles.
+
+    The four MVP task profiles are required. The phase-2 layer profiles
+    (:attr:`diary_stt`, :attr:`diary_sum`, :attr:`diary_coach`, task T02) are
+    **optional**: ``None`` means the layer is switched off, which is a valid
+    state and not an error (``docs/tasklist-phase2.md`` §9.8). The real working
+    ``configs/models.yaml`` is user-owned and uncommitted, so a required new
+    field would break the start of the already-accepted application.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -154,6 +162,14 @@ class ModelsConfig(BaseModel):
     normalization: OpenAICompatibleProfile
     summarization: OpenAICompatibleProfile
     wellbeing_analysis: OpenAICompatibleProfile
+
+    # --- профили слоёв фазы 2 (T02), все опциональные -----------------------
+    #: STT-правка (слой 2 фазы 2); тег Ollama ``diary-stt``.
+    diary_stt: OpenAICompatibleProfile | None = None
+    #: Сводка дня/недели (слой 3 фазы 2); тег Ollama ``diary-sum``.
+    diary_sum: OpenAICompatibleProfile | None = None
+    #: Заметка слоя 5 (wellbeing); тег Ollama ``diary-coach``.
+    diary_coach: OpenAICompatibleProfile | None = None
 
     def profiles_by_task(self) -> list[tuple[TaskType, ModelProfile]]:
         """Return the four fixed task profiles in deterministic order."""
@@ -163,6 +179,22 @@ class ModelsConfig(BaseModel):
             (TaskType.summarization, self.summarization),
             (TaskType.wellbeing_analysis, self.wellbeing_analysis),
         ]
+
+    def phase2_profiles(self) -> list[tuple[str, OpenAICompatibleProfile]]:
+        """Return the configured phase-2 profiles in deterministic order.
+
+        Profiles that are absent are simply not returned: absence is a valid
+        state ("layer switched off"), not an error (``docs/tasklist-phase2.md``
+        §9.8). The accessor is keyed by the configuration field name on purpose
+        and does **not** depend on :class:`TaskType`: extending that enum is a
+        change to an existing MVP enum and needs its own ADR (T02 decision).
+        """
+        candidates: tuple[tuple[str, OpenAICompatibleProfile | None], ...] = (
+            ("diary_stt", self.diary_stt),
+            ("diary_sum", self.diary_sum),
+            ("diary_coach", self.diary_coach),
+        )
+        return [(name, profile) for name, profile in candidates if profile is not None]
 
 
 def _resolve_config_path(path: Path | None) -> Path:

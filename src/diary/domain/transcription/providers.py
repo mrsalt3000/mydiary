@@ -94,7 +94,7 @@ class FasterWhisperProvider:
         is static and carries only the exception class name).
         """
         try:
-            from faster_whisper import WhisperModel  # type: ignore[import-not-found]
+            from faster_whisper import WhisperModel  # type: ignore[import-not-found,import-untyped]
         except ImportError as exc:  # pragma: no cover - exercised via a stubbed import
             raise ProviderUnavailableError(
                 "faster-whisper is not installed; local transcription is unavailable. "

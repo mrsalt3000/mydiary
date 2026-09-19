@@ -7,8 +7,10 @@
 # ~/.local/state/mydiary/. Внутрь репозитория не пишется ни бинарников,
 # ни логов, ни моделей (AGENTS.md §7–§8).
 #
-# Контекст модели (num_ctx 8192) задаётся только в ollama/Modelfile: серверные
-# переменные ниже влияют на скорость и расход VRAM, но не на размер контекста.
+# Контекст модели (num_ctx 8192) задаётся только в Modelfile: базовый
+# ollama/Modelfile (T01) и парные ollama/Modelfile.stt|sum|coach (T02) — у всех
+# трёх тегов профилей фазы 2 общий num_ctx. Серверные переменные ниже влияют на
+# скорость и расход VRAM, но не на размер контекста.
 # OLLAMA_MAX_LOADED_MODELS=1 и OLLAMA_NUM_PARALLEL=1 — GPU-серийность:
 # STT и LLM не работают одновременно (docs/tasklist-phase2.md §9.10).
 #
@@ -19,7 +21,11 @@
 #   scripts/serve-ollama.sh stop               # остановить serve по pidfile
 #   scripts/serve-ollama.sh unload <model>     # выгрузить модель из VRAM перед ASR-джобой
 #   scripts/serve-ollama.sh pull <model>       # скачать модель в OLLAMA_MODELS
-#   scripts/serve-ollama.sh create <name>      # создать тег из ollama/Modelfile
+#   scripts/serve-ollama.sh create <tag> [<modelfile>]
+#                                              # создать один тег; <modelfile> по
+#                                              # умолчанию ollama/Modelfile (T01)
+#   scripts/serve-ollama.sh create-phase2      # создать три тега профилей фазы 2
+#                                              # (T02): diary-stt, diary-sum, diary-coach
 #   scripts/serve-ollama.sh --help
 #
 # Переопределяемые переменные окружения:
@@ -39,6 +45,12 @@ STATE_DIR="$HOME/.local/state/mydiary"
 LOG="$STATE_DIR/ollama-serve.log"
 PIDFILE="$STATE_DIR/ollama-serve.pid"
 MODELFILE="$REPO_ROOT/ollama/Modelfile"
+
+# --- теги профилей фазы 2 (T02): тег → парный Modelfile ----------------------
+# Имена тегов — с дефисами (как в постановке), поля конфига — snake_case
+# (diary_stt/diary_sum/diary_coach в configs/models.example.yaml).
+PHASE2_TAGS=(diary-stt diary-sum diary-coach)
+PHASE2_MODELFILES=(ollama/Modelfile.stt ollama/Modelfile.sum ollama/Modelfile.coach)
 
 # --- рантайм-конфигурация ---------------------------------------------------
 OLLAMA_HOST="127.0.0.1:11434" # только loopback: наружу сервер не публикуется
@@ -225,11 +237,28 @@ cmd_pull() {
 }
 
 cmd_create() {
-    local name="${1:-}"
-    [ -n "$name" ] || die 'нужно имя тега: scripts/serve-ollama.sh create <name>'
+    local name="${1:-}" modelfile="${2:-$MODELFILE}"
+    [ -n "$name" ] || die 'нужно имя тега: scripts/serve-ollama.sh create <tag> [<modelfile>]'
     require_binary
-    [ -f "$MODELFILE" ] || die "нет $MODELFILE"
-    (cd "$REPO_ROOT" && "$OLLAMA_BIN" create "$name" -f ollama/Modelfile)
+    case "$modelfile" in
+        /*) ;;
+        *) modelfile="$REPO_ROOT/$modelfile" ;;
+    esac
+    [ -f "$modelfile" ] || die "нет $modelfile"
+    "$OLLAMA_BIN" create "$name" -f "$modelfile"
+}
+
+# create-phase2 — три тега профилей фазы 2 (T02) из парных Modelfile.
+# Идемпотентен: ollama create перезаписывает существующий тег, поэтому повторный
+# вызов безопасно пересоздаёт теги из Modelfile и `ollama rm` не требуется.
+cmd_create_phase2() {
+    local i tag modelfile
+    for i in "${!PHASE2_TAGS[@]}"; do
+        tag="${PHASE2_TAGS[$i]}"
+        modelfile="${PHASE2_MODELFILES[$i]}"
+        printf 'serve-ollama.sh: создаю тег %s из %s\n' "$tag" "$modelfile" >&2
+        cmd_create "$tag" "$modelfile"
+    done
 }
 
 cmd="${1:-}"
@@ -248,6 +277,7 @@ case "$cmd" in
     unload) cmd_unload "$@" ;;
     pull) cmd_pull "$@" ;;
     create) cmd_create "$@" ;;
+    create-phase2) cmd_create_phase2 ;;
     *)
         printf 'serve-ollama.sh: неизвестная команда %s\n\n' "$cmd" >&2
         usage >&2

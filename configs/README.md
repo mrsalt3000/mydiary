@@ -13,6 +13,18 @@
 ## Структура (ожидаемая с Task 03)
 
 - `app.example.yaml` — параметры приложения (пути, часовой пояс и т.п.).
-- `models.example.yaml` — профили задач `transcription`, `normalization`, `summarization`, `wellbeing_analysis`.
+- `models.example.yaml` — профили задач.
 
-См. также: `../docs/architecture-brief.md` §9; `../docs/privacy-and-safety.md` §2.
+### Состав профилей
+
+- **Четыре обязательных (MVP):** `transcription` (`faster_whisper`), `normalization`, `summarization`, `wellbeing_analysis` (`openai_compatible`). Их отсутствие — ошибка загрузки.
+- **Три опциональных (фаза 2, T02):** `diary_stt`, `diary_sum`, `diary_coach` — локальный Ollama (`provider: openai_compatible`, `base_url: http://127.0.0.1:11434/v1`, теги `diary-stt`/`diary-sum`/`diary-coach`). **Отсутствие профиля = слой отключён, а не ошибка** (`../docs/tasklist-phase2.md` §9.8): валидатор (`ModelsConfig`, `extra="forbid"`) принимает конфиг и без них, потому что рабочий `configs/models.yaml` не коммитится и существует у пользователя раньше T02.
+
+### Профили фазы 2: на что смотреть
+
+- **Теги создаются скриптом:** `scripts/serve-ollama.sh create-phase2` создаёт все три из парных `ollama/Modelfile.stt|sum|coach` (одиночный тег — `create <tag> [<modelfile>]`, по умолчанию базовый `ollama/Modelfile`).
+- **`temperature` обязана совпадать с Modelfile.** `num_ctx` (8192 у всех трёх) задаётся только в `Modelfile`, а `temperature` (0.15 / 0.25 / 0.4) стоит и там, и в профиле конфига; `resolve_completion_params()` всегда отправляет `temperature` из профиля, поэтому расхождение — тихая подмена. Согласование проверяет автотест `tests/unit/test_models_config.py`, он падает при любом расхождении.
+- **`api_key_env: OLLAMA_API_KEY` должен указывать на непустую переменную.** Значение Ollama не проверяет (принимает любое, включая произвольную строку), но приложение считает профиль неготовым при пустой/отсутствующей переменной — ключ обязан быть непустым.
+- **`max_tokens` (3072 / 4096 / 4096) включает запас на канал `reasoning`:** размышление модели тратит тот же лимит, и при его исчерпании `content` приходит пустым (невалидный вывод = failed run). `reasoning_effort`/`think` через текущий провайдер недостижимы, `… /no_think` в промпте не действует (проверено). Для больших входов T06 и порога T10 значения перепроверить.
+
+См. также: `../docs/architecture-brief.md` §9; `../docs/privacy-and-safety.md` §2; `../docs/tasklist-phase2.md` §5, §9.

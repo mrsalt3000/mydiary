@@ -1,0 +1,31 @@
+# Ollama Modelfile — тег профиля `diary-sum` (T02, роль A1): сводка дня и недели.
+#
+# num_ctx задаётся только здесь, потому что OpenAI-совместимый API Ollama его
+# не принимает (docs.ollama.com/api/openai-compatibility): контекст — свойство
+# созданной модели, а не параметр запроса. Значение 8192 одинаково у всех трёх
+# тегов фазы 2 (`diary-stt`, `diary-sum`, `diary-coach`) — это DoD T02.
+#
+# temperature 0.25 — из диапазона брифа 0.2–0.3 для саммаризации. Диапазон — это
+# границы выбора; в Modelfile и в конфиг попадает одно число. То же значение
+# обязано стоять в профиле `diary_sum` файла configs/models.example.yaml:
+# resolve_completion_params() (src/diary/domain/llm/providers.py) всегда
+# отправляет temperature из профиля, поэтому расхождение — тихая подмена
+# (замерено: Modelfile проигрывает). Согласование Modelfile ⇄ пример конфига
+# проверяет tests/unit/test_models_config.py.
+#
+# presence_penalty 1.5, top_k 20 и top_p 0.95 наследуются от базовой модели
+# qwen3.5:4b и в T02 намеренно НЕ переопределяются.
+#
+# max_tokens (4096) — параметр профиля в configs/models.yaml, а не Modelfile.
+# Запас нужен на канал reasoning: размышление тратит те же max_tokens, и при
+# исчерпании лимита `content` приходит пустым (невалидный вывод = failed run).
+# Это cap генерации, а не резерв VRAM: KV-кэш преаллоцируется под num_ctx.
+# Для больших недельных входов (T06, правило 16384/дробление из eval-контракта)
+# и порога T10 значения перепроверить.
+#
+# TEMPLATE, RENDERER и PARSER не объявляются — наследуются от qwen3.5:4b.
+
+FROM qwen3.5:4b
+
+PARAMETER num_ctx 8192
+PARAMETER temperature 0.25
