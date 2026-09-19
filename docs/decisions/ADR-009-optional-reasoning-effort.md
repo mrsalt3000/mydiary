@@ -1,6 +1,6 @@
 # ADR-009: Опциональное поле `reasoning_effort` у LLM-профиля и запроса
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-19
 
 ## Context
