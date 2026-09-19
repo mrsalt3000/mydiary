@@ -91,6 +91,26 @@ ln -sf /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so.13 \
 
 В `configs/models.yaml` профиль `transcription` по умолчанию: `device: cpu`, `compute_type: int8`, `language: ru` (см. `configs/models.example.yaml`). Кнопка «Расшифровать» у аудио-сообщения ставит задачу воркеру; модель скачивается в локальный кэш при первом использовании. Если extra не установлен — понятная ошибка, аудио не теряется. GPU/CUDA — опционально (`docs/wsl2-deployment-brief.md`).
 
+## Локальный LLM (Ollama) — фаза 2, T01
+
+Рантайм производных слоёв фазы 2 — базовая модель `qwen3.5:4b` под Ollama. Устанавливается в user space, root не нужен; бинарник, модели, лог и pidfile лежат вне репозитория (`~/.local/…`, `~/.ollama/models`):
+
+```bash
+scripts/serve-ollama.sh install [<tag>]      # закреплённый релиз (по умолчанию v0.34.2) → ~/.local/{bin,lib}
+scripts/serve-ollama.sh start                # serve в фоне; повторный start переиспользует живой сервер
+scripts/serve-ollama.sh status               # health + `ollama ps` (колонка PROCESSOR — доля GPU)
+scripts/serve-ollama.sh pull qwen3.5:4b      # скачать модель в OLLAMA_MODELS (~/.ollama/models)
+scripts/serve-ollama.sh create diary-llm-8k  # создать тег с num_ctx 8192 из ollama/Modelfile
+scripts/serve-ollama.sh unload diary-llm-8k  # выгрузить модель с GPU
+scripts/serve-ollama.sh stop                 # остановить сервер
+```
+
+- `num_ctx` (8192) задаётся **только** в [`ollama/Modelfile`](ollama/Modelfile): OpenAI-совместимый API Ollama этот параметр не принимает, поэтому контекст — свойство созданного тега, а не поле профиля в `configs/models.yaml` (`docs/tasklist-phase2.md` §5, §9.9).
+- Лог сервера — `~/.local/state/mydiary/ollama-serve.log` (pidfile рядом: `ollama-serve.pid`). Внутри репозитория не создаётся ни бинарников, ни логов, ни моделей.
+- Скрипт экспортирует рантайм-конфигурацию: `OLLAMA_NO_CLOUD=1`, `OLLAMA_MAX_LOADED_MODELS=1`, `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_KV_CACHE_TYPE=q8_0`, `OLLAMA_KEEP_ALIVE=5m`, `OLLAMA_HOST=127.0.0.1:11434` (только loopback).
+- **STT и LLM не работают одновременно:** перед ASR-джобой LLM выгружается (`scripts/serve-ollama.sh unload <model>`) — одновременная загрузка Whisper и LLM в 6 ГБ VRAM запрещена (veto). Правило и его границы: [`docs/tasklist-phase2.md`](docs/tasklist-phase2.md) §9.10.
+- **Предупреждение (это T02+, в T01 не настраивается):** слоям фазы 2 понадобятся локальная модель `diary-llm-8k` (базовый тег T01; профильные теги `diary-stt`/`diary-sum`/`diary-coach` вводятся в T02), базовый URL `http://127.0.0.1:11434/v1` и непустой `<PROFILE>_API_KEY` в локальном `.env`. В T01 создаются только рантайм-артефакты — установка Ollama, модель и профили не настраиваются.
+
 ## Бэкапы и восстановление (CLI)
 
 ```bash

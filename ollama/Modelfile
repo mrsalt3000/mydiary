@@ -1,0 +1,16 @@
+# Ollama Modelfile — базовая модель фазы 2 (T01, роль A1).
+#
+# num_ctx задаётся только здесь, потому что OpenAI-совместимый API Ollama его
+# не принимает (docs.ollama.com/api/openai-compatibility): контекст — свойство
+# созданной модели, а не параметр запроса.
+#
+# Ниже перечислены только документированные параметры Modelfile: num_ctx,
+# repeat_last_n, repeat_penalty, temperature, seed, stop, num_predict, top_k,
+# top_p, min_p. Переменные вида num_gpu / f16_kv / flash_attn — это переменные
+# окружения сервера, а не параметры Modelfile, поэтому их тут нет (flash-attn
+# включается в scripts/serve-ollama.sh через OLLAMA_FLASH_ATTENTION).
+# temperature появится в T02 (три тега моделей), не в T01.
+
+FROM qwen3.5:4b
+
+PARAMETER num_ctx 8192
