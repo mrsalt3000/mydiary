@@ -1,7 +1,17 @@
 """Abstract pipeline interface and error taxonomy (Task 12).
 
-A concrete pipeline (Tasks 13-15) implements four responsibilities over one
-derived-artifact layer:
+Two kinds of derived layer live here:
+
+* :class:`Pipeline` — the export-driven layers of the MVP (normalize,
+  summarize, wellbeing): their input is a weekly export and/or a lower derived
+  artifact, and the framework renders their result into a file;
+* :class:`SecondFamilyLayer` — the phase-2 layers of the second anchor family
+  (task T04 and the layers built on the same bridge): their input is one source
+  object (message/day/week/upstream summary) and their validated result is
+  stored inline under the source anchor, without a weekly export.
+
+A concrete export-driven pipeline (Tasks 13-15) implements four
+responsibilities over one derived-artifact layer:
 
 * class attributes identify it: ``pipeline_type`` (which durable job type
   drives it), ``layer`` (the artifact layer it produces), ``output_ext``
@@ -190,6 +200,40 @@ class Pipeline(ABC, Generic[SchemaT]):
         )
 
 
+class SecondFamilyLayer(ABC, Generic[SchemaT]):
+    """A phase-2 derivational layer of the second anchor family (task T04).
+
+    The phase-2 layers (``stt_corrected``, and the daily/weekly summaries and
+    the coaching note that follow the same pattern) are **not** driven by a
+    weekly export (ADR-007 §1): their input is one source object — a message, a
+    local day, an ISO week or an upstream weekly summary — and their validated
+    result is stored inline by ``diary.db.results.save_layer_result`` under its
+    own anchor (ADR-008). They therefore share neither the export-shaped
+    :meth:`Pipeline.build_request` signature nor the file-rendering step, and
+    are registered in their own registry (``registry.register`` dispatches on
+    the class kind).
+
+    The class attributes mirror their export-driven counterparts so the same
+    registry validation applies: ``layer`` must be the layer the naming
+    conventions map to ``pipeline_type``, ``output_ext`` must be that layer's
+    extension, and ``profile_name`` must be the phase-2 profile field name the
+    naming conventions declare for it (``diary_stt`` for ``stt_corrected``).
+    There is no ``TaskType`` here on purpose: the phase-2 profiles are named
+    configuration fields, not newly added task types.
+    """
+
+    #: Pipeline kind that drives this layer (``PipelineType.stt_corrected``, ...).
+    pipeline_type: ClassVar[PipelineType]
+    #: Artifact layer the layer produces (``ArtifactLayer.stt_corrected``, ...).
+    layer: ClassVar[ArtifactLayer]
+    #: File extension of the layer's rendered text (``.txt`` for a correction).
+    output_ext: ClassVar[str]
+    #: Field name of the phase-2 profile in ``configs/models.yaml``.
+    profile_name: ClassVar[str]
+    #: Pydantic contract the layer's structured output validates against.
+    result_schema: ClassVar[type[SchemaT]]
+
+
 __all__ = [
     "Pipeline",
     "PipelineError",
@@ -200,4 +244,5 @@ __all__ = [
     "PipelineOutputError",
     "PipelinePermanentError",
     "PipelineStorageError",
+    "SecondFamilyLayer",
 ]

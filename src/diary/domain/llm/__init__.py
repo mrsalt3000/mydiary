@@ -11,7 +11,9 @@ into workers/API here):
 * :mod:`diary.domain.llm.providers` — the ``LLMProvider`` protocol, the
   HTTPX-based ``OpenAICompatibleProvider`` and the registry-backed factory;
 * :mod:`diary.domain.llm.service` — per-task profile resolution and
-  provenance recording helpers.
+  provenance recording helpers;
+* :mod:`diary.domain.llm.structured` — the strict bridge from a completion to a
+  validated phase-2 contract, with backend-filled envelope fields (task T04).
 
 Secrets are resolved from the environment by variable *name* on every request
 and are never stored, logged or echoed. Diary content/prompts/completions are
@@ -26,6 +28,7 @@ from diary.domain.llm.errors import (
     LLMProviderUnavailableError,
     LLMRateLimitError,
     LLMServerError,
+    LLMStructuredOutputError,
     LLMTimeoutError,
 )
 from diary.domain.llm.models import (
@@ -49,9 +52,11 @@ from diary.domain.llm.providers import (
 from diary.domain.llm.service import (
     LLM_TASK_TYPES,
     failure_provenance,
+    resolve_phase2_profile,
     resolve_profile,
     success_provenance,
 )
+from diary.domain.llm.structured import parse_contract_json, parse_contract_response
 
 __all__ = [
     "LLMAuthError",
@@ -67,6 +72,7 @@ __all__ = [
     "LLMRequest",
     "LLMResponse",
     "LLMServerError",
+    "LLMStructuredOutputError",
     "LLMTimeoutError",
     "LLM_TASK_TYPES",
     "LLMUsage",
@@ -75,8 +81,11 @@ __all__ = [
     "chat_completions_url",
     "create_llm_provider",
     "failure_provenance",
+    "parse_contract_json",
+    "parse_contract_response",
     "request_input_sha256",
     "resolve_completion_params",
+    "resolve_phase2_profile",
     "resolve_profile",
     "success_provenance",
     "utc_now",

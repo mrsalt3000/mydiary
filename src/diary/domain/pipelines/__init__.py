@@ -5,7 +5,8 @@ summarization and wellbeing pipelines (implemented in Tasks 13-15):
 
 * :mod:`diary.domain.pipelines.base` — the abstract :class:`Pipeline`
   interface (request building, structured-output parsing, backend rendering)
-  and the permanent-failure error taxonomy;
+  and the permanent-failure error taxonomy, plus :class:`SecondFamilyLayer`
+  for the phase-2 layers of the second anchor family (task T04);
 * :mod:`diary.domain.pipelines.naming` — derived-artifact naming and layer
   conventions (``YYYY-MM-DD_<layer>_NNNN_rN_vM.<ext>``, per-layer
   directories/extensions, pipeline/job/task type mappings);
@@ -30,6 +31,7 @@ from diary.domain.pipelines.base import (
     PipelineOutputError,
     PipelinePermanentError,
     PipelineStorageError,
+    SecondFamilyLayer,
 )
 from diary.domain.pipelines.naming import (
     JOB_PIPELINE_TYPE,
@@ -37,6 +39,7 @@ from diary.domain.pipelines.naming import (
     LAYER_OUTPUT_EXTENSIONS,
     PIPELINE_JOB_TYPE,
     PIPELINE_LAYER,
+    PIPELINE_PROFILE_NAME,
     PIPELINE_TASK_TYPE,
     artifact_data_root_relative_path,
     derived_filename,
@@ -45,7 +48,9 @@ from diary.domain.pipelines.naming import (
 )
 from diary.domain.pipelines.registry import (
     REGISTRY,
+    SECOND_FAMILY_REGISTRY,
     get_pipeline,
+    get_second_family_pipeline,
     known_pipeline_types,
     register,
 )
@@ -61,8 +66,10 @@ __all__ = [
     "LAYER_OUTPUT_EXTENSIONS",
     "PIPELINE_JOB_TYPE",
     "PIPELINE_LAYER",
+    "PIPELINE_PROFILE_NAME",
     "PIPELINE_TASK_TYPE",
     "REGISTRY",
+    "SECOND_FAMILY_REGISTRY",
     "Pipeline",
     "PipelineError",
     "PipelineExportNotFoundError",
@@ -72,11 +79,13 @@ __all__ = [
     "PipelineOutputError",
     "PipelinePermanentError",
     "PipelineStorageError",
+    "SecondFamilyLayer",
     "artifact_data_root_relative_path",
     "derived_filename",
     "enqueue_pipeline_run",
     "find_active_pipeline_job",
     "get_pipeline",
+    "get_second_family_pipeline",
     "known_pipeline_types",
     "layer_dirname",
     "layer_output_extension",

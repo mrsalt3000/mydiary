@@ -117,6 +117,8 @@ PIPELINE_LABELS: dict[PipelineType, str] = {
     PipelineType.normalize: "Нормализация",
     PipelineType.summarize: "Саммаризация",
     PipelineType.wellbeing: "Wellbeing-рефлексия",
+    # Phase-2 layer (task T04, second anchor family): per-message STT fix.
+    PipelineType.stt_corrected: "Правка STT",
 }
 
 #: Captions of durable job types (processing page).
@@ -125,6 +127,8 @@ JOB_TYPE_LABELS: dict[JobType, str] = {
     JobType.normalize: "Нормализация",
     JobType.summarize: "Саммаризация",
     JobType.wellbeing: "Wellbeing-рефлексия",
+    # Phase-2 layer (task T04, second anchor family).
+    JobType.stt_corrected: "Правка STT",
 }
 
 #: Captions of job statuses (processing page).
@@ -157,6 +161,9 @@ _PIPELINE_LAYER: dict[PipelineType, ArtifactLayer] = {
     PipelineType.normalize: ArtifactLayer.normalized,
     PipelineType.summarize: ArtifactLayer.summary,
     PipelineType.wellbeing: ArtifactLayer.wellbeing,
+    # Phase-2 layer (task T04, second anchor family); it is anchored to a
+    # message, so it never appears in the export-scoped run lists above.
+    PipelineType.stt_corrected: ArtifactLayer.stt_corrected,
 }
 
 #: Titles of artifact-layer sections on the exports/detail pages.
@@ -165,6 +172,8 @@ LAYER_TITLES: dict[ArtifactLayer, str] = {
     ArtifactLayer.normalized: "Нормализованный (слой 2)",
     ArtifactLayer.summary: "Саммари (слой 3)",
     ArtifactLayer.wellbeing: "Wellbeing-рефлексия (слой 4)",
+    # Phase-2 layer (task T04): the phase-2 layers are not numbered 1-4.
+    ArtifactLayer.stt_corrected: "Правка STT (фаза 2)",
 }
 
 #: Short per-layer captions for compact chips/links.
@@ -173,6 +182,7 @@ LAYER_SHORT_TITLES: dict[ArtifactLayer, str] = {
     ArtifactLayer.normalized: "Нормализация",
     ArtifactLayer.summary: "Саммари",
     ArtifactLayer.wellbeing: "Wellbeing",
+    ArtifactLayer.stt_corrected: "Правка STT",
 }
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))

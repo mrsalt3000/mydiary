@@ -19,6 +19,14 @@ can be validated for internal consistency). Stored artifact paths are relative
 to the data root with forward slashes, mirroring
 ``diary.domain.exports.service`` (e.g.
 ``exports/02_normalized/2026-09-13_normalized_0001_r1_v1.txt``).
+
+Task T04 adds the first **phase-2** entry: the ``stt_corrected`` layer of the
+second anchor family (ADR-007). Such a layer has no weekly export, so it has no
+``NNNN_rN`` file name and no layer directory — its validated result is stored
+inline by ``diary.db.results.save_layer_result`` (ADR-008). Only the three maps
+the registry validates against are extended for it: its artifact layer, its
+rendered-file extension and its job type; its LLM profile is selected by the
+configuration field name (``PIPELINE_PROFILE_NAME``), not by a ``TaskType``.
 """
 
 from __future__ import annotations
@@ -45,6 +53,8 @@ LAYER_OUTPUT_EXTENSIONS: dict[ArtifactLayer, str] = {
     ArtifactLayer.normalized: ".txt",
     ArtifactLayer.summary: ".md",
     ArtifactLayer.wellbeing: ".md",
+    # Phase-2 layer (task T04): the corrected message text is plain text.
+    ArtifactLayer.stt_corrected: ".txt",
 }
 
 #: Derived pipeline kind → the artifact layer it produces.
@@ -52,13 +62,32 @@ PIPELINE_LAYER: dict[PipelineType, ArtifactLayer] = {
     PipelineType.normalize: ArtifactLayer.normalized,
     PipelineType.summarize: ArtifactLayer.summary,
     PipelineType.wellbeing: ArtifactLayer.wellbeing,
+    # Phase-2 layer (task T04, second anchor family): one message per run.
+    PipelineType.stt_corrected: ArtifactLayer.stt_corrected,
 }
 
 #: Derived pipeline kind → the Task-03 LLM profile task type it uses.
+#:
+#: Only the export-driven MVP pipelines appear here: their LLM profile is
+#: selected by :class:`~diary.core.models_config.TaskType`. The phase-2 layers
+#: are configured by *profile name* instead (``PIPELINE_PROFILE_NAME``), because
+#: their profiles (``diary_stt``/``diary_sum``/``diary_coach``) are optional
+#: additions to ``configs/models.yaml`` and the four MVP task types are not
+#: extended by the phase-2 backlog (task T02/T04).
 PIPELINE_TASK_TYPE: dict[PipelineType, TaskType] = {
     PipelineType.normalize: TaskType.normalization,
     PipelineType.summarize: TaskType.summarization,
     PipelineType.wellbeing: TaskType.wellbeing_analysis,
+}
+
+#: Phase-2 pipeline kind → the ``configs/models.yaml`` profile field it uses.
+#:
+#: The phase-2 counterpart of :data:`PIPELINE_TASK_TYPE`: a layer of the second
+#: anchor family selects its LLM profile by the configuration field name, and an
+#: absent profile means "the layer is switched off" (``docs/tasklist-phase2.md``
+#: §9.8). Populated per layer as T04-T07 are implemented.
+PIPELINE_PROFILE_NAME: dict[PipelineType, str] = {
+    PipelineType.stt_corrected: "diary_stt",
 }
 
 #: Derived pipeline kind → the durable job type that drives its execution.
@@ -66,6 +95,8 @@ PIPELINE_JOB_TYPE: dict[PipelineType, JobType] = {
     PipelineType.normalize: JobType.normalize,
     PipelineType.summarize: JobType.summarize,
     PipelineType.wellbeing: JobType.wellbeing,
+    # Phase-2 layer (task T04): the job type of the same name (ADR-008 §3).
+    PipelineType.stt_corrected: JobType.stt_corrected,
 }
 
 #: Reverse mapping: job type → pipeline kind.
@@ -129,6 +160,7 @@ __all__ = [
     "LAYER_OUTPUT_EXTENSIONS",
     "PIPELINE_JOB_TYPE",
     "PIPELINE_LAYER",
+    "PIPELINE_PROFILE_NAME",
     "PIPELINE_TASK_TYPE",
     "artifact_data_root_relative_path",
     "derived_filename",

@@ -4,6 +4,9 @@
   ``openai_compatible`` profile. Only normalization, summarization and
   wellbeing analysis run through an LLM provider; transcription uses the local
   STT provider (Task 09) and is rejected here with a clear error.
+* :func:`resolve_phase2_profile` maps a phase-2 profile *name*
+  (``diary_stt``/``diary_sum``/``diary_coach``) to its optional profile; an
+  absent profile means the layer is switched off (task T02/T04).
 * :func:`success_provenance` / :func:`failure_provenance` build a
   :class:`~diary.domain.llm.models.LLMCallProvenance` for one completion
   attempt. Provenance carries metadata only — never diary content, prompts or
@@ -71,6 +74,29 @@ def resolve_profile(models_config: ModelsConfig, task_type: TaskType) -> OpenAIC
     if not isinstance(profile, OpenAICompatibleProfile):
         raise LLMProviderUnavailableError(
             f"Task {task_type.value!r} is not configured with an openai_compatible LLM profile."
+        )
+    return profile
+
+
+def resolve_phase2_profile(
+    models_config: ModelsConfig, profile_name: str
+) -> OpenAICompatibleProfile:
+    """Return the phase-2 layer profile stored under ``profile_name``.
+
+    The phase-2 layers (``stt_corrected``, ``daily_summary``, ``weekly_summary``,
+    ``coach_note``) are configured by *profile name* — ``diary_stt``,
+    ``diary_sum``, ``diary_coach`` — rather than by a :class:`TaskType`: their
+    profiles are optional additions to ``configs/models.yaml`` (T02), and the
+    four MVP task types are not extended by the phase-2 backlog.
+
+    An absent profile means "this layer is switched off" and raises
+    :class:`LLMProviderUnavailableError` (never retryable), naming only the
+    configuration field (AGENTS.md §8).
+    """
+    profile = getattr(models_config, profile_name, None)
+    if not isinstance(profile, OpenAICompatibleProfile):
+        raise LLMProviderUnavailableError(
+            f"The phase-2 profile {profile_name!r} is not configured; the layer is switched off."
         )
     return profile
 
@@ -152,6 +178,7 @@ def failure_provenance(
 __all__ = [
     "LLM_TASK_TYPES",
     "failure_provenance",
+    "resolve_phase2_profile",
     "resolve_profile",
     "success_provenance",
 ]

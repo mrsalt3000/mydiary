@@ -97,6 +97,21 @@ class LLMMalformedResponseError(LLMError):
     retryable: ClassVar[bool] = False
 
 
+class LLMStructuredOutputError(LLMError):
+    """A completion that is not the strict structured output of its contract.
+
+    Raised by :mod:`diary.domain.llm.structured` when a completion is not a
+    single JSON object, or when that object does not validate against the
+    Pydantic contract of the calling layer (task T04 and the phase-2 layers
+    built on the same bridge). An invalid structured output is a **failed
+    run** — the caller stores no partial artifact (AGENTS.md §15) — and the
+    identical request would produce the same invalid shape again, so the
+    failure is **not retryable**.
+    """
+
+    retryable: ClassVar[bool] = False
+
+
 __all__ = [
     "LLMAuthError",
     "LLMError",
@@ -105,5 +120,6 @@ __all__ = [
     "LLMProviderUnavailableError",
     "LLMRateLimitError",
     "LLMServerError",
+    "LLMStructuredOutputError",
     "LLMTimeoutError",
 ]

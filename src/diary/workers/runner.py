@@ -433,12 +433,17 @@ def main(argv: list[str] | None = None) -> int:
     # Task 13-15: register the implemented pipelines (normalization,
     # summarization, wellbeing) before any job runs, so real
     # ``normalize``/``summarize``/``wellbeing`` jobs no longer fail
-    # permanently with "pipeline not registered yet". The functions are
-    # guarded and idempotent; importing them here (not at module import time)
-    # keeps the registry free of import side effects for the web process and
-    # the test suite.
+    # permanently with "pipeline not registered yet". Task T04 adds the
+    # phase-2 STT-correction layer to the second-family half of the registry
+    # (it is per message, not per weekly export). The functions are guarded and
+    # idempotent; importing them here (not at module import time) keeps the
+    # registry free of import side effects for the web process and the test
+    # suite.
     from diary.domain.pipelines.normalize.registration import (
         ensure_normalize_pipeline_registered,
+    )
+    from diary.domain.pipelines.stt_fix.registration import (
+        ensure_stt_fix_pipeline_registered,
     )
     from diary.domain.pipelines.summarize.registration import (
         ensure_summarize_pipeline_registered,
@@ -450,6 +455,7 @@ def main(argv: list[str] | None = None) -> int:
     ensure_normalize_pipeline_registered()
     ensure_summarize_pipeline_registered()
     ensure_wellbeing_pipeline_registered()
+    ensure_stt_fix_pipeline_registered()
     worker_id = args.worker_id or _default_worker_id()
     settings: AppSettings = get_settings()
     engine = create_engine(settings=settings)

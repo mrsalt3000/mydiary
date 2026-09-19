@@ -23,6 +23,7 @@ from diary.domain.pipelines.naming import (
     LAYER_DIRNAMES,
     PIPELINE_JOB_TYPE,
     PIPELINE_LAYER,
+    PIPELINE_PROFILE_NAME,
     PIPELINE_TASK_TYPE,
     artifact_data_root_relative_path,
     derived_filename,
@@ -97,14 +98,36 @@ def test_type_mappings_are_consistent() -> None:
         PipelineType.normalize: ArtifactLayer.normalized,
         PipelineType.summarize: ArtifactLayer.summary,
         PipelineType.wellbeing: ArtifactLayer.wellbeing,
+        # Phase-2 layer (task T04, second anchor family).
+        PipelineType.stt_corrected: ArtifactLayer.stt_corrected,
     }
     assert PIPELINE_TASK_TYPE[PipelineType.normalize] is TaskType.normalization
     assert PIPELINE_TASK_TYPE[PipelineType.summarize] is TaskType.summarization
     assert PIPELINE_TASK_TYPE[PipelineType.wellbeing] is TaskType.wellbeing_analysis
     # The job-type map is the exact inverse of the pipeline-type map.
     assert set(JOB_PIPELINE_TYPE) == set(PIPELINE_JOB_TYPE.values())
-    assert {job.value for job in JOB_PIPELINE_TYPE} == {"normalize", "summarize", "wellbeing"}
+    assert {job.value for job in JOB_PIPELINE_TYPE} == {
+        "normalize",
+        "summarize",
+        "wellbeing",
+        "stt_corrected",
+    }
     assert JOB_PIPELINE_TYPE[PIPELINE_JOB_TYPE[PipelineType.normalize]] is PipelineType.normalize
+    assert JOB_PIPELINE_TYPE[PIPELINE_JOB_TYPE[PipelineType.stt_corrected]] is (
+        PipelineType.stt_corrected
+    )
+
+
+def test_phase2_layer_maps_keep_the_task_type_map_export_only() -> None:
+    """The phase-2 layer is mapped by profile name, not by a TaskType.
+
+    ``TaskType`` has no phase-2 member (extending an MVP enum needs its own
+    ADR, task T02), so the phase-2 profile is selected by the configuration
+    field name and the layer must not appear in the task-type map.
+    """
+    assert PipelineType.stt_corrected not in PIPELINE_TASK_TYPE
+    assert PIPELINE_PROFILE_NAME[PipelineType.stt_corrected] == "diary_stt"
+    assert layer_output_extension(ArtifactLayer.stt_corrected) == ".txt"
 
 
 # ---------------------------------------------------------------------------
