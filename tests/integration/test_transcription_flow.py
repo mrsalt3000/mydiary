@@ -16,10 +16,13 @@ button, statuses and raw text.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from _audio_samples import WAV_MIME, wav_bytes
@@ -45,6 +48,8 @@ from diary.workers import handlers
 from diary.workers.runner import process_due_jobs
 
 AUDIO_URL = "/api/v1/audio"
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _ENV_VARS = (
     "APP_TIMEZONE",
@@ -604,13 +609,35 @@ def test_chat_page_renders_failed_state_after_terminal_failure(
 
 def test_importing_stt_modules_does_not_require_faster_whisper() -> None:
     """The STT domain/worker modules must import without the optional
-    faster-whisper package (it is imported lazily inside the adapter)."""
-    import importlib.util
+    faster-whisper package (it is imported lazily inside the adapter).
 
-    assert importlib.util.find_spec("faster_whisper") is None
-    import diary.domain.transcription  # noqa: F401
-    import diary.workers.handlers  # noqa: F401
-    import diary.workers.runner  # noqa: F401
+    Absence is *simulated* in a fresh interpreter instead of being assumed
+    from the environment: the package is genuinely present as soon as the
+    ``stt`` extra is installed, and the invariant has to hold either way.
+    """
+    probe = """
+import sys
+
+sys.modules["faster_whisper"] = None  # forces ImportError on import
+try:
+    import faster_whisper
+except ImportError:
+    pass
+else:
+    raise SystemExit("faster-whisper was importable: absence was not simulated")
+
+import diary.domain.transcription
+import diary.workers.handlers
+import diary.workers.runner
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_no_automatic_transcription_on_upload(session_factory, api_client) -> None:
