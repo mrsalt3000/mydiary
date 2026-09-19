@@ -41,6 +41,27 @@ curl -s http://127.0.0.1:8000/ready    # {"status":"ready"} — SQLite дост�
 
 Качество кода: `make test`, `make lint`, `make typecheck`. Перед коммитами: `.venv/bin/pre-commit install`.
 
+### Запуск с GPU-транскрипцией (опционально)
+
+Транскрипцию можно выполнять на видеокарте. На проверенной конфигурации с 6 ГБ VRAM это позволяет держать `large-v3` примерно за то же время, какое CPU тратил на `small` (разброс 0.7–1.6×), а `large-v3-turbo` — примерно на порядок быстрее CPU. Окружение для этого собирается из нескольких неочевидных частей, поэтому используйте скрипт:
+
+```bash
+scripts/run-local.sh web       # uvicorn на 127.0.0.1:8000
+scripts/run-local.sh worker    # воркер очереди
+```
+
+Он делает три вещи, которые при ручном запуске легко упустить: экспортирует `.env` в окружение процесса (иначе `*_API_KEY` не резолвятся — `load_dotenv` в проекте нет), добавляет в `LD_LIBRARY_PATH` каталог с `libcublas.so.12`, и включает `HF_HUB_OFFLINE=1`, чтобы каждая задача не проверяла ревизию модели в HuggingFace. Подробности — `scripts/run-local.sh --help`.
+
+Предварительные условия для GPU: профиль `transcription` в `configs/models.yaml` с `device: cuda` и подходящим `compute_type` — `int8_float16` укладывается в 6 ГБ, `float16` быстрее, но требует ~5.8 ГБ VRAM и оставляет слишком мало запаса, — а также резолвящийся `libcublas.so.12`. ctranslate2 собран под CUDA 12, тогда как в системе может стоять CUDA 13 — тогда достаточно симлинка:
+
+```bash
+mkdir -p ~/.local/lib/ct2-cuda
+ln -sf /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so.13 \
+       ~/.local/lib/ct2-cuda/libcublas.so.12
+```
+
+Откат на CPU: верните в профиле `device: cpu` и `compute_type: int8`. Автоматического фолбэка нет — при занятой видеокарте или нехватке VRAM задача расшифровки завершится ошибкой.
+
 ## Конфигурация
 
 - **Окружение** — `.env` (git-ignored), переменные с префиксом `APP_*`. Все параметры описаны в `.env.example`: таймзона, лимиты сообщений/аудио, политика очереди (retry/backoff/stale), размеры чанков нормализации и саммаризации, `APP_WELLBEING_ENABLED`, пути каталогов данных, `APP_TEMP_RETENTION_S`.
