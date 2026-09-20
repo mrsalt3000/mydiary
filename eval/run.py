@@ -124,17 +124,11 @@ from diary.domain.contracts import (
 )
 from diary.domain.contracts.golden import (
     ADVICE_EVALUATION_LEXEMES,
-    CAUSAL_CONNECTOR_LEXEMES,
-    CONTRACT_CONSTANT_DIGITS,
-    LEXEME_FIDELITY_CONTRACTS,
-    NON_CONTENT_INPUT_KEYS,
-    NUMERAL_WORDS,
     CoachInvariants,
     DailyInvariants,
     GoldenChunk,
     GoldenManifest,
     WeekInvariants,
-    assertive_text_fields,
     canonical_input_json,
     chunk_path,
     coach_disclaimer,
@@ -143,6 +137,18 @@ from diary.domain.contracts.golden import (
     load_chunk,
     load_manifest,
     reserve_tokens_for,
+)
+from diary.domain.contracts.invariants import (
+    InputFacts,
+    InvariantViolation,
+    advice_and_judgement_violations,
+    causal_claim_violations,
+    generated_values,
+    input_facts_from_models,
+    introduced_lexemes,
+    new_fact_violations,
+    numbers,
+    proper_names,
 )
 from diary.domain.llm.models import LLMRequest, LLMResponse, LLMUsage
 from diary.domain.llm.providers import LLMProvider, create_llm_provider
@@ -258,12 +264,6 @@ EXTRA_CHECKS: tuple[str, ...] = (
 )
 
 _WORD_RE = re.compile(r"[а-яёa-z]+")
-_DIGIT_RE = re.compile(r"\d+")
-#: Sentence split used to exclude a sentence-initial capital from the names:
-#: sentence-ending punctuation followed by whitespace, or a line break.
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+|\n+")
-#: A capitalized word (Cyrillic or Latin) — candidate proper name.
-_CAPITALIZED_RE = re.compile(r"[А-ЯЁ][а-яё]+|[A-Z][a-z]+")
 
 #: Function words ignored by the (informational) content-word diagnostics.
 _STOPWORDS: frozenset[str] = frozenset(
@@ -292,10 +292,6 @@ _STOPWORDS: frozenset[str] = frozenset(
 #: used for its (informational) grounding test.
 _DIAGNOSTIC_MIN_LEN = 6
 _DIAGNOSTIC_STEM_LEN = 5
-
-#: Stem length used when checking that a proper name occurs in the input (long
-#: enough to tolerate Russian inflection, short enough to reject a new name).
-_NAME_STEM_LEN = 5
 
 
 class HarnessError(Exception):
@@ -382,106 +378,6 @@ def load_golden_set(
 
 
 # ---------------------------------------------------------------------------
-# Text helpers
-# ---------------------------------------------------------------------------
-
-
-def _content_strings(value: object) -> Iterator[str]:
-    """String leaves of a payload, skipping non-content keys (ids, paths)."""
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, Mapping):
-        for key, item in value.items():
-            if key in NON_CONTENT_INPUT_KEYS:
-                continue
-            yield from _content_strings(item)
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            yield from _content_strings(item)
-
-
-def _generated_values(payload: Mapping[str, object], fields: Sequence[str]) -> Iterator[str]:
-    """Values of the generated text ``fields`` of one output payload."""
-    for _, value in _generated_field_values(payload, fields):
-        yield value
-
-
-def _generated_field_values(
-    payload: Mapping[str, object], fields: Sequence[str]
-) -> Iterator[tuple[str, str]]:
-    """``(field, value)`` pairs of the generated text fields of a payload."""
-    for name in fields:
-        value = payload.get(name)
-        if isinstance(value, str):
-            yield name, value
-        elif isinstance(value, (list, tuple)):
-            for item in value:
-                if isinstance(item, str):
-                    yield name, item
-
-
-def _input_content_text(chunk: GoldenChunk) -> str:
-    """Casefolded content text of a chunk input, used for grounding checks."""
-    return " ".join(_content_strings(input_payload(chunk.input))).casefold()
-
-
-def _input_numbers(chunk: GoldenChunk) -> frozenset[str]:
-    """Digit tokens of the chunk input (identifiers and audio paths excluded)."""
-    return frozenset(_numbers(_input_content_text(chunk)))
-
-
-def _numbers(text_value: str) -> set[str]:
-    """Digit sequences of a text value (``15:30`` contributes ``15`` and ``30``)."""
-    return set(_DIGIT_RE.findall(text_value))
-
-
-def _numeral_word_digits(text_value: str) -> dict[str, str]:
-    """Map ``digit`` → the numeral word that produced it, for the output text."""
-    found: dict[str, str] = {}
-    for token in _WORD_RE.findall(text_value.casefold()):
-        value = NUMERAL_WORDS.get(token)
-        if value is not None:
-            found.setdefault(str(value), token)
-    return found
-
-
-def _proper_names(text_value: str) -> list[str]:
-    """Capitalized words of ``text_value`` that are not sentence-initial.
-
-    Sentence starts are excluded because every Russian sentence begins with a
-    capital by orthography; the first capitalized word of each sentence is
-    therefore not a name candidate.
-    """
-    names: list[str] = []
-    for sentence in _SENTENCE_SPLIT_RE.split(text_value):
-        stripped = sentence.lstrip()
-        skip = _CAPITALIZED_RE.match(stripped)
-        skipped = skip.group(0) if skip else ""
-        for token in _CAPITALIZED_RE.findall(sentence):
-            if token == skipped:
-                skipped = ""
-                continue
-            names.append(token)
-    return names
-
-
-def _lexeme_hits(text_value: str, lexemes: Sequence[str]) -> list[str]:
-    """Lexemes of ``lexemes`` occurring in ``text_value`` (case-insensitive)."""
-    folded = text_value.casefold()
-    return [lexeme for lexeme in lexemes if lexeme.casefold() in folded]
-
-
-def _name_is_grounded(name: str, input_text: str) -> bool:
-    """Whether ``name`` occurs in the (casefolded) input, inflections allowed.
-
-    A stem match tolerates Russian inflection (``Марина`` vs ``мариной``) while
-    still rejecting a name that is nowhere in the input.
-    """
-    folded = name.casefold()
-    return folded in input_text or folded[:_NAME_STEM_LEN] in input_text
-
-
-# ---------------------------------------------------------------------------
 # Check context and the checks themselves
 # ---------------------------------------------------------------------------
 
@@ -533,50 +429,50 @@ def _check_input_unchanged(ctx: CheckContext) -> list[Violation]:
     return []
 
 
-def _introduced_lexemes(ctx: CheckContext, value: str, lexemes: Sequence[str]) -> list[str]:
-    """Lexeme hits the layer introduced rather than copied from the source.
-
-    For a correction layer (:data:`LEXEME_FIDELITY_CONTRACTS`) the generated
-    text must stay faithful to the input, so a lexeme already present in the
-    input is not a violation — only wording the layer added is. Generative
-    layers get no exemption at all.
-    """
-    hits = _lexeme_hits(value, lexemes)
-    if ctx.chunk.contract not in LEXEME_FIDELITY_CONTRACTS:
-        return hits
-    return [hit for hit in hits if hit.casefold() not in ctx.input_text]
-
-
 def _check_forbidden_lexemes(ctx: CheckContext) -> list[Violation]:
     """The chunk blacklist plus the eval-contract advice/evaluation baseline."""
     lexemes = sorted(set(ctx.chunk.invariants.forbidden_lexemes) | set(ADVICE_EVALUATION_LEXEMES))
     violations: list[Violation] = []
-    for value in _generated_values(ctx.payload, generated_text_fields(ctx.chunk.contract)):
-        for hit in _introduced_lexemes(ctx, value, lexemes):
+    for value in generated_values(ctx.payload, generated_text_fields(ctx.chunk.contract)):
+        for hit in introduced_lexemes(ctx.chunk.contract, value, lexemes, ctx.input_text):
             violations.append(
                 Violation("forbidden_lexemes", f"forbidden lexeme {hit!r} is present")
             )
     return violations
 
 
+def _chunk_facts(chunk: GoldenChunk) -> InputFacts:
+    """The reduced source of a chunk, as the shared checks expect it (T17)."""
+    return input_facts_from_models(chunk.input)
+
+
+def _ctx_facts(ctx: CheckContext) -> InputFacts:
+    """The reduced source carried by a check context."""
+    return InputFacts(text=ctx.input_text, numbers=ctx.input_numbers)
+
+
+def _shared_violations(found: Sequence[InvariantViolation]) -> list[Violation]:
+    """Adapt shared invariant violations to the harness ``Violation`` type."""
+    return [Violation(item.check, item.detail) for item in found]
+
+
 def _check_advice_and_judgement_absent(ctx: CheckContext) -> list[Violation]:
-    """No advice, praise, evaluation or morality in the generated text fields."""
-    violations: list[Violation] = []
-    for value in _generated_values(ctx.payload, generated_text_fields(ctx.chunk.contract)):
-        for hit in _introduced_lexemes(ctx, value, ADVICE_EVALUATION_LEXEMES):
-            violations.append(
-                Violation("advice_and_judgement_absent", f"advice/evaluation lexeme {hit!r}")
-            )
-    return violations
+    """No advice, praise, evaluation or morality in the generated text fields.
+
+    Delegates to :mod:`diary.domain.contracts.invariants` — the implementation
+    the runtime gate enforces (T17) — so the harness and production cannot
+    drift apart.
+    """
+    return _shared_violations(
+        advice_and_judgement_violations(ctx.chunk.contract, ctx.payload, _ctx_facts(ctx))
+    )
 
 
 def _check_causal_claims_absent(ctx: CheckContext) -> list[Violation]:
     """No causal connector in the assertive generated text fields."""
-    violations: list[Violation] = []
-    for value in _generated_values(ctx.payload, assertive_text_fields(ctx.chunk.contract)):
-        for hit in _introduced_lexemes(ctx, value, CAUSAL_CONNECTOR_LEXEMES):
-            violations.append(Violation("causal_claims_absent", f"causal connector {hit!r}"))
-    return violations
+    return _shared_violations(
+        causal_claim_violations(ctx.chunk.contract, ctx.payload, _ctx_facts(ctx))
+    )
 
 
 def _check_no_new_facts(ctx: CheckContext) -> list[Violation]:
@@ -584,33 +480,9 @@ def _check_no_new_facts(ctx: CheckContext) -> list[Violation]:
 
     Exact for the three classes it covers; free-form content words are left to
     the diagnostics, because a lexical check cannot tell a paraphrase from an
-    invention (see the module docstring). Digits a field is contractually
-    required to carry (:data:`CONTRACT_CONSTANT_DIGITS`) are exempt.
+    invention (see the module docstring).
     """
-    violations: list[Violation] = []
-    for field_name, value in _generated_field_values(
-        ctx.payload, generated_text_fields(ctx.chunk.contract)
-    ):
-        allowed = CONTRACT_CONSTANT_DIGITS.get((ctx.chunk.contract, field_name), frozenset())
-        for digit in sorted(_numbers(value)):
-            if digit not in ctx.input_numbers and digit not in allowed:
-                violations.append(
-                    Violation("no_new_facts", f"number {digit!r} does not occur in the input")
-                )
-        for digit, word in sorted(_numeral_word_digits(value).items()):
-            if digit not in ctx.input_numbers and digit not in allowed:
-                violations.append(
-                    Violation(
-                        "no_new_facts",
-                        f"numeral word {word!r} ({digit}) does not occur in the input",
-                    )
-                )
-        for proper in _proper_names(value):
-            if not _name_is_grounded(proper, ctx.input_text):
-                violations.append(
-                    Violation("no_new_facts", f"proper name {proper!r} does not occur in the input")
-                )
-    return violations
+    return _shared_violations(new_fact_violations(ctx.chunk.contract, ctx.payload, _ctx_facts(ctx)))
 
 
 def _check_uncertain_substrings(ctx: CheckContext) -> list[Violation]:
@@ -625,12 +497,12 @@ def _check_names_and_numbers_grounded(ctx: CheckContext) -> list[Violation]:
     """The strict STT invariant: names and numbers come from the source."""
     assert isinstance(ctx.model, SttCorrection)
     violations: list[Violation] = []
-    for digit in sorted(_numbers(ctx.model.text)):
+    for digit in sorted(numbers(ctx.model.text)):
         if digit not in ctx.input_numbers:
             violations.append(
                 Violation("names_and_numbers_grounded", f"number {digit!r} is not in the input")
             )
-    for name in _proper_names(ctx.model.text):
+    for name in proper_names(ctx.model.text):
         if name.casefold() not in ctx.input_text:
             violations.append(
                 Violation("names_and_numbers_grounded", f"proper name {name!r} is not in the input")
@@ -678,7 +550,7 @@ def _check_numbers_grounded(ctx: CheckContext) -> list[Violation]:
     assert isinstance(ctx.model, DailySummary)
     violations: list[Violation] = []
     for value in [*ctx.model.facts, *ctx.model.themes, *ctx.model.open_questions]:
-        for digit in sorted(_numbers(value)):
+        for digit in sorted(numbers(value)):
             if digit not in ctx.input_numbers:
                 violations.append(
                     Violation("numbers_grounded", f"number {digit!r} does not occur in the input")
@@ -802,7 +674,7 @@ def content_word_diagnostics(ctx: CheckContext) -> list[str]:
     **not** a pass/fail criterion.
     """
     found: set[str] = set()
-    for value in _generated_values(ctx.payload, generated_text_fields(ctx.chunk.contract)):
+    for value in generated_values(ctx.payload, generated_text_fields(ctx.chunk.contract)):
         for token in _WORD_RE.findall(value.casefold()):
             if len(token) < _DIAGNOSTIC_MIN_LEN or token in _STOPWORDS:
                 continue
@@ -1075,8 +947,8 @@ def evaluate_chunk(
             model=model,
             payload=payload,
             input_json_before=input_json_before,
-            input_text=_input_content_text(chunk),
-            input_numbers=_input_numbers(chunk),
+            input_text=_chunk_facts(chunk).text,
+            input_numbers=_chunk_facts(chunk).numbers,
         )
         for name in (*GENERIC_CHECKS, *KIND_CHECKS[chunk.invariants.kind]):
             outcome.violations.extend(CHECKERS[name](ctx))
