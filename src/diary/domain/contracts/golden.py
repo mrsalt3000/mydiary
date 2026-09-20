@@ -65,6 +65,9 @@ failure) instead of pretending to verify them.
 Context budget: ``chunk_tokens_est + reserve_tokens_for(category) <= num_ctx``
 where the reserve is the fixed overhead of the layer's call — its versioned
 prompt plus the generation cap of its profile (:data:`BUDGET_RESERVE_TOKENS`).
+The prompt half of that reserve is *recomputed from the template file* by the
+harness on every run (T20): :data:`LAYER_PROMPT_TOKENS_EST` is the declared
+expectation a test pins against the file, not the number the check trusts.
 """
 
 from __future__ import annotations
@@ -243,39 +246,63 @@ NUMERAL_WORDS: dict[str, int] = {
     "тысяч": 1000,
 }
 
-#: Versioned prompt overhead of each layer in tokens (see
-#: :data:`BUDGET_RESERVE_TOKENS` for the sources).
+#: Declared prompt overhead of each layer, in estimated tokens — the
+#: **expectation**, not the source of truth. T20 stopped treating a
+#: hand-maintained number as the authority: the harness recomputes the estimate
+#: from the versioned prompt template at run time (the same
+#: :data:`CHARS_PER_TOKEN_EST` estimate as the chunk input) and a test in
+#: ``tests/integration/test_eval_harness.py`` fails when these numbers and the
+#: files disagree in either direction. A prompt that grows must be re-measured
+#: and the budget re-decided; it can no longer be absorbed silently.
+#:
+#: The values are the file-derived estimates of the prompt versions the layers
+#: load today (T20 measurement). The earlier numbers were stale by up to two
+#: times (``week`` remembered 1629 against 3132, ``wellbeing`` 1968 against
+#: 4113), which made the declared budget check optimistic exactly where the
+#: reserve was tight.
 LAYER_PROMPT_TOKENS_EST: dict[str, int] = {
-    "stt_error": 1509,
-    "day": 1932,
-    "week": 1629,
-    "wellbeing": 1968,
+    "stt_error": 1509,  # prompts/stt_fix/v1.md
+    "day": 2124,  # prompts/sum_daily/v1.md
+    "week": 3132,  # prompts/sum_weekly/v2.md
+    "wellbeing": 4113,  # prompts/coach_note/v3.md
 }
 
 #: Generation cap of the profile each category runs under, mirroring
 #: ``configs/models.example.yaml`` (``diary_stt`` 3072, ``diary_sum`` and
-#: ``diary_coach`` 4096). Kept next to the reserve so a configuration change is
-#: a one-line diff; ``tests/integration/test_eval_harness.py`` cross-checks it
-#: against the example configuration.
+#: ``diary_week`` 4096, ``diary_coach`` 2048). Kept next to the reserve so a
+#: configuration change is a one-line diff; a test cross-checks it against the
+#: example configuration.
+#:
+#: ``wellbeing`` left the blanket 4096 in T20 because with the honest prompt
+#: estimate the coach envelope did not close: 4113 + 4096 = 8209 estimated tokens
+#: is **more than the 8192 window** before a single character of the week rollup,
+#: so the old check passed only because the constant was understated. The coach
+#: contract asks for 3 observations, 2 hypotheses and one short experiment — the
+#: live run of T07 produced ~200 tokens — so 2048 keeps an order of magnitude of
+#: headroom over the observed output and leaves 2031 estimated tokens for the
+#: input. The layer enforces the same envelope at run time before the call.
 PROFILE_MAX_TOKENS: dict[str, int] = {
     "stt_error": 3072,
     "day": 4096,
     "week": 4096,
-    "wellbeing": 4096,
+    "wellbeing": 2048,
 }
 
 #: Tokens the harness reserves on top of ``chunk_tokens_est`` inside
 #: ``num_ctx``: the layer's versioned prompt plus the generation cap of its
-#: profile. Sources, in the order they were measured:
+#: profile. Since T20 the reserve is **derived from the prompt file at run
+#: time** — the harness reads the template the layer itself loads and estimates
+#: it with :func:`estimate_tokens` — while this mapping stays as the declared
+#: expectation that a test cross-checks against the file. A prompt can therefore
+#: grow loudly instead of eating the window unnoticed.
 #:
-#: - ``day`` — measured prompt of ``prompts/sum_daily/v1.md``: **1932** tokens
-#:   (T05 acceptance, ``/api/generate`` ``prompt_eval_count``);
-#: - ``week`` — estimated prompt of ``prompts/sum_weekly/v1.md``: **1629**
-#:   tokens (``estimate_tokens``, matches the T06 acceptance note);
-#: - ``stt_error`` — estimated prompt of ``prompts/stt_fix/v1.md``: 1509 tokens;
-#: - ``wellbeing`` — estimated prompt of ``prompts/coach_note/v1.md``: 1968
-#:   tokens (conservative: the T07 acceptance measured 1871 input tokens
-#:   including a 262-token input).
+#: Source of the declared numbers: the T20 measurement of the prompt versions
+#: the layers load today (``estimate_tokens`` over the template file), with the
+#: live runs of 2026-09-20 as the sanity check of the estimate's pessimism: an
+#: input of 2420 estimated tokens measured 2324 for a day chunk and 3819
+#: estimated measured ~2900 for a week chunk, so the character-based estimate
+#: runs 4-24 % above what the model really counts. That is the safe direction —
+#: an envelope that holds under the estimate holds in the window.
 #:
 #: The check ``chunk_tokens_est + reserve <= num_ctx`` therefore bounds the
 #: whole call, not just the payload, and the real run additionally compares the
@@ -415,15 +442,30 @@ class GoldenBudgetDefault(BaseModel):
 
 
 class GoldenLatencyBudget(BaseModel):
-    """Latency budget of the T10 harness, in seconds."""
+    """Latency budget of the T10 harness, in seconds — **per inference route**.
+
+    T21 stopped treating the budget as one number for the whole run: the STT and
+    day layers run on the GPU tags, while the weekly rollup runs on the CPU twin
+    ``diary-sum-cpu`` (the hybrid decision of T13b, ``docs/device-choice.md``),
+    and a GPU-calibrated budget is unreachable there. A category without a
+    declared budget (the coaching note, which is launched explicitly and rarely)
+    is measured and reported as ``n/a`` instead of being silently compared with
+    a foreign number.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    #: One STT correction.
+    #: One STT correction (GPU, ``diary-stt``).
     stt_fix: int = Field(ge=1)
 
-    #: One day summary.
+    #: One day summary (GPU, ``diary-sum``).
     daily: int = Field(ge=1)
+
+    #: One weekly rollup (CPU, ``diary-sum-cpu``). Deliberately much looser than
+    #: the GPU budgets: the device-choice measurements put a CPU week at up to
+    #: 126.5 s, and the project owner's own bound for a batch operation is «до 3
+    #: минут». The value is a decision, not a measurement rounded up.
+    weekly: int = Field(ge=1)
 
 
 class GoldenManifest(BaseModel):
@@ -730,12 +772,15 @@ def coach_disclaimer() -> str:
 
 
 def reserve_tokens_for(category: str) -> int:
-    """Tokens reserved for everything that is not the chunk input.
+    """The **declared** reserve of a category: its prompt estimate plus the cap.
 
-    The versioned prompt of the layer plus the generation cap of its profile —
-    see :data:`BUDGET_RESERVE_TOKENS` for the measured/estimated sources. A
-    category without a reserve is a harness error rather than a silently
-    unchecked budget.
+    This is the expectation, not the number the harness checks with: since T20 the
+    harness derives the prompt half from the template file itself
+    (``eval/run.py: prompt_tokens_est_for``) and compares the two here through
+    ``tests/integration/test_eval_harness.py``. The declared value is what the
+    documents and the chunk budgets talk about, so it stays available — see
+    :data:`BUDGET_RESERVE_TOKENS` for the sources. A category without a reserve is
+    a harness error rather than a silently unchecked budget.
     """
     try:
         return BUDGET_RESERVE_TOKENS[category]

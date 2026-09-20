@@ -23,7 +23,8 @@
   "lang": "ru",
   "latency_budget_s": {
     "daily": 15,
-    "stt_fix": 5
+    "stt_fix": 5,
+    "weekly": 180
   },
   "synthetic": true,
   "threshold": {

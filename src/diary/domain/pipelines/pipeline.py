@@ -980,6 +980,7 @@ def run_coach_step(
             session,
             week_id=week_id,
             provider=step_provider,
+            profile=active_coach_profile,
             coach_input=run_input,
             processing_run_id=run_id,
             created_at=created_at,

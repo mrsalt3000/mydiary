@@ -33,6 +33,14 @@ Properties that matter for the T07 definition of done:
   :func:`run_coach_note` itself;
 * **one weekly summary per run**, read only; the layer's single write is
   ``save_layer_result`` into ``artifacts``;
+* **the request fits the context window before it is sent** (T20): when the
+  caller supplies the resolved ``diary_coach`` profile, the request is checked
+  against ``NUM_CTX - profile.max_tokens`` and an oversized one raises
+  :class:`~diary.domain.pipelines.base.PipelinePermanentError` **before** the
+  provider is called. The profile carries the generation cap the check needs, so
+  a caller that supplies only a provider skips the check — both production entry
+  points (:func:`run_coach_note` and the T09 orchestrator) pass it, and a test
+  pins that wiring;
 * a week without a weekly summary, or a summary of another week, fails loudly
   before any request is sent;
 * an invalid completion raises
@@ -60,7 +68,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from diary.core.models_config import ModelsConfig, load_models_config
+from diary.core.models_config import ModelsConfig, OpenAICompatibleProfile, load_models_config
 from diary.db.models import Artifact, ArtifactLayer
 from diary.db.results import save_layer_result
 from diary.domain.contracts import CoachNote
@@ -88,6 +96,7 @@ def coach_note(
     *,
     week_id: str,
     provider: LLMProvider,
+    profile: OpenAICompatibleProfile | None = None,
     coach_input: CoachInput | None = None,
     processing_run_id: uuid.UUID | None = None,
     created_at: datetime | None = None,
@@ -100,6 +109,12 @@ def coach_note(
     run fails loudly before any provider call. The provider is injected so
     tests (and the GPU-arbitrated orchestrator of T09) control the call; it
     carries this layer's ``diary_coach`` completion parameters.
+
+    ``profile`` is the resolved ``diary_coach`` profile of this run. When it is
+    supplied, every attempt checks its request against the context budget before
+    the call and refuses an oversized one (T20); the profile is the only place
+    the generation cap lives, so a caller that passes a provider alone skips the
+    check — :func:`run_coach_note` and the T09 orchestrator always pass it.
 
     The result is anchored to the **artifact id** of the input weekly summary
     (``save_layer_result(..., summary_id=coach_input.artifact.id)``) while the
@@ -116,6 +131,8 @@ def coach_note(
 
     def generate(_attempt: int) -> CoachNote:
         request = pipeline.build_request(summary=run_input.summary)
+        if profile is not None:
+            pipeline.require_request_fits(request, profile=profile)
         response = provider.complete(request)
         return pipeline.parse_result(response, week_id=run_input.week_id)
 
@@ -162,6 +179,7 @@ def run_coach_note(
         session,
         week_id=week_id,
         provider=active_provider,
+        profile=profile,
         coach_input=coach_input,
         processing_run_id=processing_run_id,
         created_at=created_at,

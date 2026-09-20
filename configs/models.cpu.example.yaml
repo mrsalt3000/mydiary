@@ -157,6 +157,6 @@ profiles:
     api_key_env: OLLAMA_API_KEY
     timeout_s: 600
     temperature: 0.4                       # == PARAMETER temperature в ollama/Modelfile.coach-cpu
-    max_tokens: 4096
+    max_tokens: 2048                       # T20: при 4096 промпт (4113) и лимит не влезали в окно
     reasoning_effort: none                 # канал размышлений выключен (T02b, ADR-009)
     external: false

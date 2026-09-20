@@ -83,7 +83,10 @@ PHASE2_PROFILES: dict[str, dict[str, object]] = {
         "model": "diary-coach",
         "modelfile": "Modelfile.coach",
         "temperature": 0.4,
-        "max_tokens": 4096,
+        # T20: the blanket 4096 did not fit the window together with the coach
+        # prompt (4113 estimated tokens of 8192), so the cap went to 2048 — ten
+        # times the ~200 tokens a live coaching note used.
+        "max_tokens": 2048,
         "reasoning_effort": "none",
     },
 }

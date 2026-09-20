@@ -107,6 +107,8 @@ def test_manifest_identity() -> None:
     assert MANIFEST.budget_default.num_ctx == DEFAULT_NUM_CTX
     assert MANIFEST.latency_budget_s.stt_fix == 5
     assert MANIFEST.latency_budget_s.daily == 15
+    # T21: the weekly rollup runs on the CPU twin, so it carries its own budget.
+    assert MANIFEST.latency_budget_s.weekly == 180
 
 
 def test_manifest_declares_ten_unique_chunks_with_the_required_mix() -> None:

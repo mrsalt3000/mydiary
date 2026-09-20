@@ -32,13 +32,22 @@ from diary.core.settings import PROJECT_ROOT
 from diary.domain.contracts import DailySummary
 from diary.domain.contracts.golden import (
     BUDGET_RESERVE_TOKENS,
+    DEFAULT_NUM_CTX,
     LAYER_PROMPT_TOKENS_EST,
     PROFILE_MAX_TOKENS,
     DailyInvariants,
     GoldenChunk,
-    reserve_tokens_for,
 )
 from diary.domain.llm.errors import LLMStructuredOutputError
+from diary.domain.llm.service import resolve_phase2_profile
+from diary.domain.pipelines.coach.pipeline import PROFILE_NAME as COACH_PROFILE_NAME
+from diary.domain.pipelines.coach.pipeline import PROMPT_PATH as COACH_PROMPT_PATH
+from diary.domain.pipelines.stt_fix.pipeline import PROFILE_NAME as STT_PROFILE_NAME
+from diary.domain.pipelines.stt_fix.pipeline import PROMPT_PATH as STT_PROMPT_PATH
+from diary.domain.pipelines.sum_daily.pipeline import PROFILE_NAME as SUM_PROFILE_NAME
+from diary.domain.pipelines.sum_daily.pipeline import PROMPT_PATH as SUM_PROMPT_PATH
+from diary.domain.pipelines.sum_weekly.pipeline import PROFILE_NAME as WEEK_PROFILE_NAME
+from diary.domain.pipelines.sum_weekly.pipeline import PROMPT_PATH as WEEK_PROMPT_PATH
 
 EVAL_RUN = PROJECT_ROOT / "eval" / "run.py"
 EXAMPLE_CONFIG = PROJECT_ROOT / "configs" / "models.example.yaml"
@@ -192,7 +201,13 @@ def test_ci_mode_passes_all_ten_chunks(chunks: list[GoldenChunk], models_config)
         assert outcome.requests >= 1
         # The mock reports no usage, so the measured budget check stays silent.
         assert outcome.usage is None
-    assert harness.summarize(outcomes).passed == 10
+    summary = harness.summarize(outcomes)
+    assert summary.invariants_passed == 10
+    assert summary.fully_passed == 10
+    # Eight chunks declare a latency budget (three STT, three days, two weeks);
+    # the coaching note declares none and is not counted as measured (T21).
+    assert summary.latency_measured == 8
+    assert summary.latency_within_budget == 8
 
 
 def test_selecting_chunks_keeps_the_manifest_order(chunks: list[GoldenChunk]) -> None:
@@ -211,9 +226,69 @@ def test_declared_budget_holds_for_every_chunk(chunks: list[GoldenChunk]) -> Non
     for chunk in chunks:
         assert harness.check_budget(chunk) == [], chunk.id
         assert (
-            chunk.budget.chunk_tokens_est + reserve_tokens_for(chunk.category)
+            chunk.budget.chunk_tokens_est
+            + harness.prompt_tokens_est_for(chunk.category)
+            + PROFILE_MAX_TOKENS[chunk.category]
             <= chunk.budget.num_ctx
         )
+
+
+def test_the_declared_prompt_overhead_matches_the_template_files() -> None:
+    """T20: the declared constant is an expectation the prompt files must meet.
+
+    The harness derives the reserve from the template the layer loads, so a stale
+    constant can no longer hide an oversized request. This test keeps the two in
+    step in **both** directions: a prompt that grew (or was re-measured) and a
+    bumped constant are the only ways to change either without failing here.
+    """
+    for category, declared in LAYER_PROMPT_TOKENS_EST.items():
+        assert harness.prompt_tokens_est_for(category) == declared, category
+
+
+def test_the_harness_reads_the_prompt_template_its_layer_loads() -> None:
+    """The file the harness estimates is the file the layer sends."""
+    by_layer = {
+        "stt_error": STT_PROMPT_PATH,
+        "day": SUM_PROMPT_PATH,
+        "week": WEEK_PROMPT_PATH,
+        "wellbeing": COACH_PROMPT_PATH,
+    }
+    for category, path in by_layer.items():
+        assert harness.PROMPT_PATH_BY_CATEGORY[category] == path
+        assert path.read_text(encoding="utf-8").strip()
+
+
+def test_the_harness_runs_the_profile_of_each_layer() -> None:
+    """F6: the harness must measure the profile the layer really runs under.
+
+    The weekly layer moved to the CPU twin ``diary_week`` in T13b while the
+    harness kept sending its chunks through the day profile, so the hybrid
+    routing and the tag ``diary-sum-cpu`` had no regression coverage at all.
+    Pinning the mapping to the layers' own constants means a rename or a
+    re-routing fails here instead of silently changing what the run measures.
+    """
+    by_layer = {
+        "stt_error": STT_PROFILE_NAME,
+        "day": SUM_PROFILE_NAME,
+        "week": WEEK_PROFILE_NAME,
+        "wellbeing": COACH_PROFILE_NAME,
+    }
+    assert harness.PROFILE_NAME_BY_CATEGORY == by_layer
+    # The explicit shape of the F6 defect: the week must not be the day profile.
+    assert WEEK_PROFILE_NAME == "diary_week"
+    assert harness.PROFILE_NAME_BY_CATEGORY["week"] != SUM_PROFILE_NAME
+
+
+def test_latency_budgets_are_declared_per_inference_route() -> None:
+    """T21: a budget belongs to a route, not to the run."""
+    assert harness._latency_budgets() == {"stt_error": 5.0, "day": 15.0, "week": 180.0}
+    assert harness._latency_budget_for(_chunk("stt-01-colleague-call")) == 5.0
+    assert harness._latency_budget_for(_chunk("day-01-quiet-monday")) == 15.0
+    week = _chunk("week-01-2026-w38")
+    assert harness.PROFILE_NAME_BY_CATEGORY[week.category] == "diary_week"
+    assert harness._latency_budget_for(week) == 180.0
+    # The coaching note declares no budget: it must not inherit the weekly one.
+    assert harness._latency_budget_for(_chunk("coach-01-low-energy-tuesday")) is None
 
 
 def test_reserve_is_prompt_plus_generation_cap() -> None:
@@ -230,7 +305,7 @@ def test_generation_caps_mirror_the_example_configuration() -> None:
     by_profile = {
         "stt_error": parsed.diary_stt,
         "day": parsed.diary_sum,
-        "week": parsed.diary_sum,
+        "week": parsed.diary_week,
         "wellbeing": parsed.diary_coach,
     }
     for category, profile in by_profile.items():
@@ -238,12 +313,36 @@ def test_generation_caps_mirror_the_example_configuration() -> None:
         assert PROFILE_MAX_TOKENS[category] == profile.max_tokens
 
 
+def test_the_coach_generation_cap_leaves_room_for_its_prompt() -> None:
+    """T20: with the honest prompt estimate the coach envelope has to close.
+
+    The old blanket cap of 4096 made prompt and cap alone (8209) exceed the 8192
+    window, so the declared check passed only because the prompt constant was
+    understated.
+    """
+    prompt_est = harness.prompt_tokens_est_for("wellbeing")
+    assert prompt_est + PROFILE_MAX_TOKENS["wellbeing"] <= 8192
+    assert PROFILE_MAX_TOKENS["wellbeing"] < 4096
+
+
+def test_the_prompt_and_the_cap_alone_fit_every_window() -> None:
+    """The tightest form of the envelope, stated for every category (T20).
+
+    The chunk-level check subsumes this, but stating it separately makes the
+    arithmetic explicit: even a chunk with an empty input must fit, and this is
+    exactly the inequality the coaching layer used to violate.
+    """
+    for category, cap in PROFILE_MAX_TOKENS.items():
+        assert harness.prompt_tokens_est_for(category) + cap <= DEFAULT_NUM_CTX, category
+
+
 def test_a_budget_overflow_is_detected(chunks: list[GoldenChunk]) -> None:
     chunk = _chunk("week-01-2026-w38")
+    reserve = harness.prompt_tokens_est_for("week") + PROFILE_MAX_TOKENS["week"]
     oversized = chunk.model_copy(
         update={
             "budget": chunk.budget.model_copy(
-                update={"chunk_tokens_est": chunk.budget.num_ctx - reserve_tokens_for("week") + 1}
+                update={"chunk_tokens_est": chunk.budget.num_ctx - reserve + 1}
             )
         }
     )
@@ -446,3 +545,212 @@ def test_report_lists_latency_and_pass_state(chunks: list[GoldenChunk], models_c
     assert "PASS" in report
     assert "threshold 8/10" in report
     assert "latency stt_error" in report
+    # Each row names the profile the chunk ran under, so a route is visible (T19).
+    assert "diary_stt" in report
+    # A subset run cannot meet the threshold of the whole set (T18).
+    assert "invariants: 2/2 passed (threshold 8/10, 2/10 chunks measured)" in report
+    assert "latency: 2/2 within budget" in report
+
+
+# ---------------------------------------------------------------------------
+# T18: the two natures of a failure are counted, and reported, apart
+# ---------------------------------------------------------------------------
+
+
+def test_a_latency_overrun_is_not_a_broken_invariant(models_config) -> None:
+    """The count the threshold talks about must survive a cold model load.
+
+    This is the defect T18 closes: the run used to fold a missed latency budget
+    into the same number as a violated invariant, so a slow first call read as
+    «content broken» and the red gate looked like a checklist violation.
+    """
+    chunk = _chunk("day-01-quiet-monday")
+    outcome = _run(chunk, _passing(chunk), models_config)
+    assert outcome.latency_within_budget
+    # A cold start: the content is clean, only the clock failed.
+    outcome.latency_budget_s = 0.0
+    harness._apply_latency_budget(outcome)
+    assert not outcome.latency_within_budget
+    assert outcome.content_violations == []
+    summary = harness.summarize([outcome])
+    assert summary.invariants_passed == 1
+    assert summary.latency_measured == 1
+    assert summary.latency_within_budget == 0
+    assert summary.fully_passed == 0
+    report = harness.format_report([outcome], harness.golden_manifest())
+    assert "FAIL:latency" in report
+    assert "FAIL:content" not in report
+    assert "invariants: 1/1 passed" in report
+    assert "latency: 0/1 within budget" in report
+
+
+def test_a_content_violation_is_not_counted_as_latency(models_config) -> None:
+    """The mirror case: the clock is fine and the content is not."""
+    chunk = _chunk("day-01-quiet-monday")
+    payload = _passing(chunk)
+    payload["facts"] = ["Ты молодец."]
+    outcome = _run(chunk, payload, models_config)
+    assert outcome.latency_within_budget
+    assert outcome.content_violations
+    summary = harness.summarize([outcome])
+    assert summary.invariants_passed == 0
+    assert summary.latency_within_budget == summary.latency_measured == 1
+    report = harness.format_report([outcome], harness.golden_manifest())
+    assert "FAIL:content" in report
+    assert "FAIL:latency" not in report
+    assert "invariants: 0/1 passed" in report
+
+
+def test_the_ci_run_reports_both_counts_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
+    """The CI definition of done, read from the report the CLI prints."""
+    assert harness.main(["--strict"]) == 0
+    output = capsys.readouterr().out
+    assert "OK: invariants 10/10 (required 10)" in output
+    assert "latency 8/8 within budget" in output
+    # The mock reports no usage, so the measured-token line stays absent.
+    assert "measured input tokens" not in output
+
+
+def test_the_cli_fails_the_run_on_a_latency_overrun(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T18 keeps latency a gate: the run fails, and it is not a content failure.
+
+    The budget of every chunk is forced to zero, so the only failed check is the
+    clock one — exactly the shape of a cold model load. The exit code must be
+    nonzero (latency is still a gate) while the invariant count stays clean and
+    the message names latency, not content.
+    """
+    monkeypatch.setattr(harness, "_latency_budget_for", lambda chunk: 0.0)
+    assert harness.main(["--chunk", "day-01-quiet-monday"]) == 1
+    output = capsys.readouterr().out
+    assert "FAILED: latency 1 chunk(s) over budget" in output
+    assert "FAIL:latency" in output
+    assert "invariants: 1/1 passed" in output
+
+
+# ---------------------------------------------------------------------------
+# a layer switched off is a skip, not a crash (T19 DoD 4, §9.8)
+# ---------------------------------------------------------------------------
+
+
+def _config_without_week(tmp_path) -> Any:
+    """The tracked example config with the weekly profile removed."""
+    config = yaml.safe_load(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
+    config["profiles"].pop("diary_week")
+    path = tmp_path / "models-without-week.yaml"
+    path.write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
+    return path
+
+
+def test_the_example_config_resolves_every_category_profile(models_config) -> None:
+    """Coverage guard: the tracked config must be able to run every category.
+
+    Without this, a profile renamed in the example config would turn a whole
+    category into skips and the CI run would still be green — the failure mode
+    the skip handling has to avoid.
+    """
+    for category, profile_name in harness.PROFILE_NAME_BY_CATEGORY.items():
+        profile = resolve_phase2_profile(models_config, profile_name)
+        assert profile is not None, category
+
+
+def test_a_config_without_the_weekly_profile_skips_the_week_instead_of_crashing(
+    tmp_path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T19 DoD 4: an absent ``diary_week`` means «the layer is off», not a crash.
+
+    The product path reads an absent phase-2 profile as ``profile_off`` and skips
+    the layer; before this test the harness raised ``LLMProviderUnavailableError``
+    straight out of ``main`` and died with a traceback, so the golden run could
+    not be used at all on a configuration without the weekly profile.
+    """
+    config = _config_without_week(tmp_path)
+    assert harness.main(["--models-config", str(config)]) == 0
+    output = capsys.readouterr().out
+    assert "SKIP:profile_off" in output
+    assert "skipped (profile off): 2 chunk(s)" in output
+    # The skipped chunks are outside the counts: eight were measured, not ten.
+    assert "invariants: 8/8 passed" in output
+    assert "8/10 chunks measured" in output
+    assert "OK: invariants 8/8 (required 8)" in output
+
+
+def test_a_run_that_measured_nothing_fails_closed(
+    tmp_path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verifying nothing is not the same as verifying that everything is fine."""
+    config = _config_without_week(tmp_path)
+    code = harness.main(["--chunk", "week-01-2026-w38", "--models-config", str(config)])
+    assert code == 1
+    output = capsys.readouterr().out
+    assert "FAILED: nothing was measured" in output
+    assert "SKIP:profile_off" in output
+
+
+def test_the_skipped_category_is_not_reported_as_measured(
+    tmp_path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`latency week: max 0.00s` next to `latency: not measured` reads as a lie."""
+    config = _config_without_week(tmp_path)
+    harness.main(["--models-config", str(config)])
+    output = capsys.readouterr().out
+    assert "latency week: n/a (skipped, layer off)" in output
+    assert "latency week: max" not in output
+
+
+def test_strict_is_never_softer_than_a_plain_run(
+    tmp_path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T19 fix review: `--strict` must not pass where the plain run fails.
+
+    With only the STT profile configured, seven chunks are skipped. The plain run
+    already fails (three measured, threshold eight), and `--strict` — which demands
+    full coverage — must not turn that into a green run.
+    """
+    config = yaml.safe_load(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
+    # Keep the MVP profiles and the STT profile; every other phase-2 layer is off.
+    config["profiles"] = {
+        name: value
+        for name, value in config["profiles"].items()
+        if not name.startswith("diary_") or name == "diary_stt"
+    }
+    path = tmp_path / "models-stt-only.yaml"
+    path.write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
+
+    assert harness.main(["--models-config", str(path)]) == 1
+    plain = capsys.readouterr().out
+    assert "FAILED: invariants 3/3 measured, 7 skipped (profile off), 8 required" in plain
+    assert harness.main(["--strict", "--models-config", str(path)]) == 1
+    strict = capsys.readouterr().out
+    assert "FAILED: invariants 3/3 measured, 7 skipped (profile off), 10 required" in strict
+    # A single selected chunk that is measured still passes on the same config.
+    code = harness.main(["--chunk", "stt-01-colleague-call", "--models-config", str(path)])
+    assert code == 0
+
+
+def test_a_skipped_chunk_is_excluded_from_both_counts() -> None:
+    """The skip must not inflate the score, in either counter."""
+    chunk = _chunk("week-01-2026-w38")
+    skipped = harness._skipped_outcome(chunk)
+    assert skipped.skipped
+    assert skipped.skipped_reason == "profile_off"
+    assert skipped.violations == []
+    assert harness._result_label(skipped) == "SKIP:profile_off"
+    summary = harness.summarize([skipped])
+    assert summary.skipped == 1
+    assert summary.measured == 0
+    assert summary.invariants_passed == 0
+    assert summary.latency_measured == 0
+    assert summary.fully_passed == 0
+
+
+def test_the_report_names_the_measured_prompt_when_the_endpoint_reports_it(
+    models_config,
+) -> None:
+    """T20 evidence in the report itself: estimate against the real count."""
+    chunk = _chunk("day-01-quiet-monday")
+    outcome = _run(chunk, _passing(chunk), models_config)
+    outcome.usage = harness.LLMUsage(input_tokens=1871, output_tokens=214)
+    report = harness.format_report([outcome], harness.golden_manifest())
+    assert "measured input tokens (endpoint), max per category: day 1871 (cap 4096)" in report

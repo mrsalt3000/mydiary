@@ -59,6 +59,7 @@ from diary.domain.pipelines.coach.coach_input import (
     week_summary_artifact,
 )
 from diary.domain.pipelines.coach.pipeline import (
+    NUM_CTX,
     PROFILE_NAME,
     PROMPT_PATH,
     PROMPT_VERSION,
@@ -69,6 +70,7 @@ from diary.domain.pipelines.coach.registration import ensure_coach_pipeline_regi
 from diary.domain.pipelines.coach.service import CoachNoteOutcome, coach_note, run_coach_note
 
 __all__ = [
+    "NUM_CTX",
     "PROFILE_NAME",
     "PROMPT_PATH",
     "PROMPT_VERSION",

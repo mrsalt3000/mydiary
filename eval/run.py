@@ -25,8 +25,10 @@ Two modes
     ``--models-config``) with the real ``OpenAICompatibleProvider`` and reports
     latency, pass/fail and the failed check names per chunk — never any diary
     content, only chunk ids and metrics. The definition of done of T10 is
-    asserted here: an STT correction under 5 s, a day summary under 15 s and at
-    least 8 of 10 chunks passing.
+    asserted here as **two separate numbers**: at least 8 of 10 chunks clean on
+    the invariants, and every measured chunk inside the latency budget of its
+    route (T18/T21) — a cold model load fails the run by the latency count and is
+    never reported as a content defect.
 
 What is checked
 ===============
@@ -42,12 +44,30 @@ lexeme lists, the numeral words and the budget reserve. The checks are:
 * the generic eval-contract checks added by T10 — no advice/evaluation, no
   causal claims, no new facts (digits, numeral words, proper names) — plus the
   invariant fields the manifest already described;
-* the context budget ``chunk_tokens_est + reserve_tokens_for(category) <=
-  num_ctx`` and, when the endpoint reports usage, the *measured*
-  ``input_tokens + profile.max_tokens <= num_ctx``;
+* the context budget ``chunk_tokens_est + prompt_tokens_est + max_tokens <=
+  num_ctx``, where the prompt overhead is estimated from the versioned template
+  the layer itself loads (T20, so the reserve cannot be understated) and, when
+  the endpoint reports usage, the *measured* ``input_tokens + profile.max_tokens
+  <= num_ctx``;
 * the raw source rows of an STT/day chunk are unchanged by the run, and the
   in-memory chunk input is not mutated;
-* the latency budget of the manifest (STT under 5 s, day under 15 s).
+* the latency budget declared for the **route of the category** (T21: an STT
+  correction under 5 s and a day under 15 s on the GPU tags, a weekly rollup
+  under 180 s on the CPU twin ``diary-sum-cpu``; the coaching note declares none
+  and is reported as ``n/a``).
+
+Two counts, never one (T18): a chunk can fail because its *content* broke an
+invariant or because it missed its latency budget, and the report names the two
+separately — the manifest threshold applies to the invariant count alone, while a
+latency overrun still fails the run. A cold model load is not a content defect,
+and reading the two as one number is what once made a red run look like a
+checklist violation.
+
+A chunk whose layer is switched off in the configuration is reported as
+``SKIP:profile_off`` and excluded from both counts — the product treats an absent
+phase-2 profile as «the layer is off» (§9.8), not as an error, and the harness
+follows instead of aborting the run (T19). A run that measured nothing is still a
+failure: verifying nothing is not the same as verifying that everything is fine.
 
 Deliberate limits (stated, not hidden)
 ======================================
@@ -124,6 +144,7 @@ from diary.domain.contracts import (
 )
 from diary.domain.contracts.golden import (
     ADVICE_EVALUATION_LEXEMES,
+    PROFILE_MAX_TOKENS,
     CoachInvariants,
     DailyInvariants,
     GoldenChunk,
@@ -132,11 +153,11 @@ from diary.domain.contracts.golden import (
     canonical_input_json,
     chunk_path,
     coach_disclaimer,
+    estimate_tokens,
     generated_text_fields,
     input_payload,
     load_chunk,
     load_manifest,
-    reserve_tokens_for,
 )
 from diary.domain.contracts.invariants import (
     InputFacts,
@@ -150,17 +171,39 @@ from diary.domain.contracts.invariants import (
     numbers,
     proper_names,
 )
+from diary.domain.llm.errors import LLMProviderUnavailableError
 from diary.domain.llm.models import LLMRequest, LLMResponse, LLMUsage
 from diary.domain.llm.providers import LLMProvider, create_llm_provider
 from diary.domain.llm.service import resolve_phase2_profile
 from diary.domain.pipelines.base import PipelineInvariantError
-from diary.domain.pipelines.coach.pipeline import PROFILE_NAME as COACH_PROFILE_NAME
+from diary.domain.pipelines.coach.pipeline import (
+    PROFILE_NAME as COACH_PROFILE_NAME,
+)
+from diary.domain.pipelines.coach.pipeline import (
+    PROMPT_PATH as COACH_PROMPT_PATH,
+)
 from diary.domain.pipelines.coach.service import coach_note
-from diary.domain.pipelines.stt_fix.pipeline import PROFILE_NAME as STT_PROFILE_NAME
+from diary.domain.pipelines.stt_fix.pipeline import (
+    PROFILE_NAME as STT_PROFILE_NAME,
+)
+from diary.domain.pipelines.stt_fix.pipeline import (
+    PROMPT_PATH as STT_PROMPT_PATH,
+)
 from diary.domain.pipelines.stt_fix.service import correct_stt
 from diary.domain.pipelines.sum_daily.day_input import collect_day_entries
-from diary.domain.pipelines.sum_daily.pipeline import PROFILE_NAME as SUM_PROFILE_NAME
+from diary.domain.pipelines.sum_daily.pipeline import (
+    PROFILE_NAME as SUM_PROFILE_NAME,
+)
+from diary.domain.pipelines.sum_daily.pipeline import (
+    PROMPT_PATH as SUM_PROMPT_PATH,
+)
 from diary.domain.pipelines.sum_daily.service import sum_daily
+from diary.domain.pipelines.sum_weekly.pipeline import (
+    PROFILE_NAME as WEEK_PROFILE_NAME,
+)
+from diary.domain.pipelines.sum_weekly.pipeline import (
+    PROMPT_PATH as WEEK_PROMPT_PATH,
+)
 from diary.domain.pipelines.sum_weekly.service import sum_weekly
 
 #: Tracked, secret-free configuration used by the CI mode (no endpoint is ever
@@ -171,14 +214,33 @@ CI_MODELS_CONFIG = PROJECT_ROOT / "configs" / "models.example.yaml"
 #: Raw source tables whose rows must be identical after a run.
 RAW_TABLES: tuple[str, ...] = ("messages", "audio_files", "transcriptions")
 
-#: Phase-2 profile each golden category runs under (taken from the layer
-#: packages so a rename cannot drift silently).
+#: Phase-2 profile each golden category runs under, taken from the layer
+#: packages so that a rename cannot drift silently **and** so that the harness
+#: measures the profile the layer really uses. Finding F6 was exactly this kind
+#: of drift: ``week`` pointed at the day profile, so the hybrid routing of T13b
+#: and the CPU tag ``diary-sum-cpu`` had no regression coverage at all (T19).
 PROFILE_NAME_BY_CATEGORY: dict[str, str] = {
     "stt_error": STT_PROFILE_NAME,
     "day": SUM_PROFILE_NAME,
-    "week": SUM_PROFILE_NAME,
+    "week": WEEK_PROFILE_NAME,
     "wellbeing": COACH_PROFILE_NAME,
 }
+
+#: Versioned prompt template of each category, again taken from the layer
+#: packages. The harness estimates the prompt overhead from these files at run
+#: time (T20) instead of trusting a hand-maintained constant that a prompt can
+#: outgrow unnoticed.
+PROMPT_PATH_BY_CATEGORY: dict[str, Path] = {
+    "stt_error": STT_PROMPT_PATH,
+    "day": SUM_PROMPT_PATH,
+    "week": WEEK_PROMPT_PATH,
+    "wellbeing": COACH_PROMPT_PATH,
+}
+
+#: Check the runner itself adds when a chunk misses its latency budget. It is
+#: not a content check: T18 keeps the two counts apart, because a cold model load
+#: and a broken invariant are different events that used to share one number.
+LATENCY_CHECK = "latency_budget"
 
 #: Pipeline type recorded on the processing run of each category.
 PIPELINE_TYPE_BY_CATEGORY: dict[str, PipelineType] = {
@@ -322,6 +384,8 @@ class ChunkOutcome:
     chunk_id: str
     category: str
     kind: str
+    profile_name: str = ""
+    skipped_reason: str = ""
     latency_s: float = 0.0
     latency_budget_s: float | None = None
     violations: list[Violation] = field(default_factory=list)
@@ -330,9 +394,34 @@ class ChunkOutcome:
     usage: LLMUsage | None = None
 
     @property
+    def skipped(self) -> bool:
+        """Whether the layer was switched off, so nothing was measured."""
+        return bool(self.skipped_reason)
+
+    @property
     def passed(self) -> bool:
         """Whether the chunk passed every check (latency included)."""
         return not self.violations
+
+    @property
+    def content_violations(self) -> list[Violation]:
+        """Violations about the content or the plumbing, not the clock.
+
+        Everything but the latency budget: contract shape, blacklists, grounding,
+        context budget, raw-row immutability. T18 counts these apart from latency
+        so that a cold model load can no longer be read as a broken invariant.
+        """
+        return [item for item in self.violations if item.check != LATENCY_CHECK]
+
+    @property
+    def latency_violations(self) -> list[Violation]:
+        """Violations of this chunk's latency budget (none when it has no budget)."""
+        return [item for item in self.violations if item.check == LATENCY_CHECK]
+
+    @property
+    def latency_within_budget(self) -> bool:
+        """Whether the chunk stayed inside its route's latency budget."""
+        return not self.latency_violations
 
     @property
     def failed_checks(self) -> list[str]:
@@ -686,8 +775,15 @@ def content_word_diagnostics(ctx: CheckContext) -> list[str]:
 
 
 def check_budget(chunk: GoldenChunk) -> list[Violation]:
-    """The declared context budget: input estimate plus reserve within ``num_ctx``."""
-    reserve = reserve_tokens_for(chunk.category)
+    """The context budget: prompt (read from its file) + input + generation cap.
+
+    The reserve is the layer's versioned prompt — estimated from the template the
+    layer itself loads, never from a hand-maintained constant (T20) — plus the
+    generation cap of the profile the category runs under. Exceeding ``num_ctx``
+    fails the chunk: the check exists to bound the whole call, not just the
+    payload.
+    """
+    reserve = prompt_tokens_est_for(chunk.category) + PROFILE_MAX_TOKENS[chunk.category]
     if chunk.budget.chunk_tokens_est + reserve > chunk.budget.num_ctx:
         return [
             Violation(
@@ -696,6 +792,30 @@ def check_budget(chunk: GoldenChunk) -> list[Violation]:
             )
         ]
     return []
+
+
+@lru_cache(maxsize=1)
+def _prompt_tokens_est() -> dict[str, int]:
+    """Estimated tokens of each category's prompt template, read from its file.
+
+    The estimate uses the eval-contract coefficient
+    (:data:`~diary.domain.contracts.golden.CHARS_PER_TOKEN_EST`), the same one
+    the chunk input is estimated with, so both halves of the envelope are
+    commensurable. Reading the file is what makes an understated reserve
+    impossible: a prompt can only grow the reserve.
+    """
+    return {
+        category: estimate_tokens(len(path.read_text(encoding="utf-8")))
+        for category, path in PROMPT_PATH_BY_CATEGORY.items()
+    }
+
+
+def prompt_tokens_est_for(category: str) -> int:
+    """Estimated overhead of the prompt of ``category``, from its template file."""
+    try:
+        return _prompt_tokens_est()[category]
+    except KeyError as exc:
+        raise HarnessError(f"no prompt template is mapped to category {category!r}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -866,7 +986,13 @@ def _run_layer(
             result=upstream,
             processing_run_id=run_id,
         )
-        coach_note(session, week_id=upstream.week_id, provider=provider, processing_run_id=run_id)
+        coach_note(
+            session,
+            week_id=upstream.week_id,
+            provider=provider,
+            profile=profile,
+            processing_run_id=run_id,
+        )
     else:
         raise HarnessError(f"chunk {chunk.id} has no runner for category {chunk.category!r}")
 
@@ -907,15 +1033,24 @@ def evaluate_chunk(
             f"chunk {chunk.id} declares invariant kind {chunk.invariants.kind!r}, "
             "which no checker implements"
         )
-    resolved_profile = (
-        profile
-        if profile is not None
-        else resolve_phase2_profile(models_config, PROFILE_NAME_BY_CATEGORY[chunk.category])
-    )
+    try:
+        resolved_profile = (
+            profile
+            if profile is not None
+            else resolve_phase2_profile(models_config, PROFILE_NAME_BY_CATEGORY[chunk.category])
+        )
+    except LLMProviderUnavailableError:
+        # The layer is switched off in this configuration, which the product
+        # reads as a skip and not as an error (§9.8: an absent phase-2 profile
+        # means «the layer is off»). The harness says the same instead of
+        # aborting the run with a traceback, and the skip is visible in the
+        # report and in the summary counts (T19 DoD 4).
+        return _skipped_outcome(chunk)
     outcome = ChunkOutcome(
         chunk_id=chunk.id,
         category=chunk.category,
         kind=chunk.invariants.kind,
+        profile_name=PROFILE_NAME_BY_CATEGORY[chunk.category],
         latency_budget_s=_latency_budget_for(chunk),
     )
     outcome.violations.extend(check_budget(chunk))
@@ -981,11 +1116,43 @@ def evaluate_chunk(
     return outcome
 
 
+def _skipped_outcome(chunk: GoldenChunk) -> ChunkOutcome:
+    """The outcome of a chunk whose layer is switched off in this configuration.
+
+    An absent phase-2 profile is not an error in this project: the product skips
+    the layer honestly (``SkippedStep(profile_off)``, §9.8), and the harness must
+    not turn the same configuration into a traceback. The chunk is reported as
+    skipped, carries no violations and is excluded from both counts — the skip
+    itself is named in the report.
+    """
+    profile = PROFILE_NAME_BY_CATEGORY[chunk.category]
+    return ChunkOutcome(
+        chunk_id=chunk.id,
+        category=chunk.category,
+        kind=chunk.invariants.kind,
+        profile_name=profile,
+        latency_budget_s=_latency_budget_for(chunk),
+        skipped_reason="profile_off",
+    )
+
+
 @lru_cache(maxsize=1)
 def _latency_budgets() -> dict[str, float]:
-    """Latency budget per category, as declared by the manifest."""
+    """Latency budget per category, as declared by the manifest (T21).
+
+    A budget belongs to the **inference route** of a category rather than to the
+    run as a whole: the STT and day layers run on the GPU tags, while the weekly
+    rollup runs on the CPU twin ``diary-sum-cpu``, where a GPU-calibrated budget
+    is unreachable. A category without a declared budget (the coaching note,
+    launched explicitly and rarely) stays at ``None`` and is reported as ``n/a``
+    instead of being compared with a foreign number.
+    """
     budget = golden_manifest().latency_budget_s
-    return {"stt_error": float(budget.stt_fix), "day": float(budget.daily)}
+    return {
+        "stt_error": float(budget.stt_fix),
+        "day": float(budget.daily),
+        "week": float(budget.weekly),
+    }
 
 
 def _latency_budget_for(chunk: GoldenChunk) -> float | None:
@@ -1021,7 +1188,11 @@ def _apply_latency_budget(outcome: ChunkOutcome) -> None:
     budget = outcome.latency_budget_s
     if budget is not None and outcome.latency_s > budget:
         outcome.violations.append(
-            Violation("latency_budget", f"{outcome.latency_s:.2f}s > {budget:.0f}s")
+            Violation(
+                LATENCY_CHECK,
+                f"{outcome.latency_s:.2f}s > {budget:.0f}s "
+                f"(profile {outcome.profile_name}, category {outcome.category})",
+            )
         )
 
 
@@ -1031,16 +1202,21 @@ def evaluate_all(
     provider_factory: Callable[[GoldenChunk], LLMProvider],
     models_config: ModelsConfig,
 ) -> list[ChunkOutcome]:
-    """Evaluate the selected chunks, one isolated database per chunk."""
-    return [
-        evaluate_chunk(
-            chunk,
-            provider=provider_factory(chunk),
-            models_config=models_config,
-            profile=resolve_phase2_profile(models_config, PROFILE_NAME_BY_CATEGORY[chunk.category]),
-        )
-        for chunk in chunks
-    ]
+    """Evaluate the selected chunks, one isolated database per chunk.
+
+    A live provider is built from the chunk's profile, so ``profile_off`` can
+    surface here as well as inside :func:`evaluate_chunk`; both places turn it
+    into a skipped chunk instead of aborting the run (T19 DoD 4, §9.8).
+    """
+    outcomes: list[ChunkOutcome] = []
+    for chunk in chunks:
+        try:
+            provider = provider_factory(chunk)
+        except LLMProviderUnavailableError:
+            outcomes.append(_skipped_outcome(chunk))
+            continue
+        outcomes.append(evaluate_chunk(chunk, provider=provider, models_config=models_config))
+    return outcomes
 
 
 # ---------------------------------------------------------------------------
@@ -1151,64 +1327,165 @@ def live_provider_factory(models_config: ModelsConfig) -> Callable[[GoldenChunk]
 
 @dataclass(frozen=True)
 class Summary:
-    """Aggregate result of a harness run (metrics only, never content)."""
+    """Aggregate result of a harness run (metrics only, never content).
+
+    T18 keeps the two natures of a failure apart instead of adding them into one
+    number: ``invariants_passed`` is what the manifest threshold talks about,
+    ``latency_within_budget`` counts the chunks that stayed inside their route's
+    budget (out of ``latency_measured``), and ``fully_passed`` is their
+    intersection. The report never blends them, because a gate refusal and a cold
+    model load are different events.
+    """
 
     total: int
-    passed: int
+    skipped: int
+    skipped_categories: frozenset[str]
     invariants_passed: int
+    latency_measured: int
+    latency_within_budget: int
+    fully_passed: int
     max_latency_by_category: dict[str, float]
     latency_budgets: dict[str, float | None]
     diagnostics_total: int
 
+    @property
+    def measured(self) -> int:
+        """Chunks that were actually run: the selected ones minus the skips."""
+        return self.total - self.skipped
+
 
 def summarize(outcomes: Sequence[ChunkOutcome]) -> Summary:
-    """Aggregate outcomes into the numbers the definition of done talks about."""
+    """Aggregate outcomes into the numbers the definition of done talks about.
+
+    Skipped chunks (a layer switched off in this configuration) stay out of every
+    count: nothing was measured for them, so counting them as clean would inflate
+    the score (T19 DoD 4) — and a category with no measured chunk reports nothing
+    rather than a flattering ``0.00s``.
+    """
     max_latency: dict[str, float] = {}
     budgets: dict[str, float | None] = {}
+    skipped_categories: set[str] = set()
     for outcome in outcomes:
+        if outcome.skipped:
+            skipped_categories.add(outcome.category)
+            continue
         max_latency[outcome.category] = max(
             max_latency.get(outcome.category, 0.0), outcome.latency_s
         )
         budgets.setdefault(outcome.category, outcome.latency_budget_s)
-    invariants_passed = sum(
-        1
-        for outcome in outcomes
-        if not [item for item in outcome.violations if item.check != "latency_budget"]
-    )
+    measured = [outcome for outcome in outcomes if not outcome.skipped]
+    timed = [outcome for outcome in measured if outcome.latency_budget_s is not None]
     return Summary(
         total=len(outcomes),
-        passed=sum(1 for outcome in outcomes if outcome.passed),
-        invariants_passed=invariants_passed,
+        skipped=len(outcomes) - len(measured),
+        skipped_categories=frozenset(skipped_categories - set(max_latency)),
+        invariants_passed=sum(1 for outcome in measured if not outcome.content_violations),
+        latency_measured=len(timed),
+        latency_within_budget=sum(1 for outcome in timed if outcome.latency_within_budget),
+        fully_passed=sum(1 for outcome in measured if outcome.passed),
         max_latency_by_category=max_latency,
         latency_budgets=budgets,
         diagnostics_total=sum(len(outcome.diagnostics) for outcome in outcomes),
     )
 
 
+def _result_label(outcome: ChunkOutcome) -> str:
+    """``PASS``, ``SKIP`` or which nature of failure hit the chunk (T18).
+
+    Naming the nature in the row is what lets a cold start be told from a content
+    violation without reading the detail of a check; a skipped chunk says that
+    its layer is switched off rather than pretending it passed.
+    """
+    if outcome.skipped:
+        return f"SKIP:{outcome.skipped_reason}"
+    natures: list[str] = []
+    if outcome.content_violations:
+        natures.append("content")
+    if outcome.latency_violations:
+        natures.append("latency")
+    return "PASS" if not natures else "FAIL:" + "+".join(natures)
+
+
+def _measured_usage_lines(outcomes: Sequence[ChunkOutcome]) -> list[str]:
+    """One line naming the largest measured prompt of each category (live only).
+
+    The endpoint's own count is the counter that can judge the character-based
+    estimate, so the live report shows the maxima next to the generation cap of
+    each profile. CI mode receives no usage and the line is absent. The values
+    are metrics only — never content (AGENTS.md §7-8).
+    """
+    maxima: dict[str, int] = {}
+    for outcome in outcomes:
+        if outcome.usage is None:
+            continue
+        maxima[outcome.category] = max(maxima.get(outcome.category, 0), outcome.usage.input_tokens)
+    if not maxima:
+        return []
+    parts = ", ".join(
+        f"{category} {maxima[category]} (cap {PROFILE_MAX_TOKENS[category]})"
+        for category in sorted(maxima)
+    )
+    return [f"measured input tokens (endpoint), max per category: {parts}"]
+
+
 def format_report(outcomes: Sequence[ChunkOutcome], manifest: GoldenManifest) -> str:
     """The human report: chunk ids, metrics and failed check names only.
 
     No generated text, no input text and no diary content appears here (AGENTS.md
-    §7-8): only ids, categories, latency, pass/fail and check names.
+    §7-8): only ids, categories, the profile each chunk ran under, latency,
+    pass/fail, check names and — when the endpoint reports usage — the measured
+    token maxima. Invariants and latency are reported as two separate counts
+    (T18) — the threshold applies to the invariant count alone.
     """
     lines: list[str] = []
-    header = f"{'chunk':<34}{'category':<12}{'latency':>9}  {'result':<6} failed checks"
+    header = (
+        f"{'chunk':<34}{'category':<12}{'profile':<14}{'latency':>9}  {'result':<18} failed checks"
+    )
     lines.append(header)
     lines.append("-" * len(header))
     for outcome in outcomes:
         failed = ", ".join(outcome.failed_checks) if outcome.failed_checks else "-"
+        # A skipped chunk has no measurement: `0.00s` would read as «fast».
+        latency = "n/a" if outcome.skipped else f"{outcome.latency_s:.2f}s"
         lines.append(
-            f"{outcome.chunk_id:<34}{outcome.category:<12}"
-            f"{outcome.latency_s:>8.2f}s  {'PASS' if outcome.passed else 'FAIL':<6} {failed}"
+            f"{outcome.chunk_id:<34}{outcome.category:<12}{outcome.profile_name:<14}"
+            f"{latency:>9}  {_result_label(outcome):<18} {failed}"
         )
     summary = summarize(outcomes)
     lines.append("")
-    lines.append(
-        f"chunks: {summary.passed}/{summary.total} passed "
-        f"(invariants only: {summary.invariants_passed}/{summary.total}); "
-        f"threshold {manifest.threshold.pass_count}/{manifest.threshold.total}"
+    threshold = f"{manifest.threshold.pass_count}/{manifest.threshold.total}"
+    if summary.total == manifest.threshold.total and not summary.skipped:
+        verdict = "MET" if summary.invariants_passed >= manifest.threshold.pass_count else "MISSED"
+        scope = f"threshold {threshold}: {verdict}"
+    else:
+        # A subset run cannot meet the threshold of the whole set, and a skipped
+        # chunk was not measured at all — both are said instead of implied.
+        measured = f"{summary.measured}/{manifest.threshold.total}"
+        scope = f"threshold {threshold}, {measured} chunks measured"
+        if summary.skipped:
+            scope = f"{scope}, {summary.skipped} skipped (profile off)"
+    lines.append(f"invariants: {summary.invariants_passed}/{summary.measured} passed ({scope})")
+    # The budgets named here are the manifest's declaration, not the run's scope:
+    # they stay true even when a category was skipped and nothing was measured.
+    scopes = ", ".join(
+        f"{category} < {budget:.0f}s" for category, budget in sorted(_latency_budgets().items())
     )
-    for category in sorted(summary.max_latency_by_category):
+    if summary.latency_measured:
+        lines.append(
+            f"latency: {summary.latency_within_budget}/{summary.latency_measured} within budget "
+            f"({scopes})"
+        )
+    else:
+        lines.append(f"latency: not measured ({scopes})")
+    if summary.skipped:
+        names = ", ".join(outcome.chunk_id for outcome in outcomes if outcome.skipped)
+        lines.append(f"skipped (profile off): {summary.skipped} chunk(s) — {names}")
+    for category in sorted(set(summary.max_latency_by_category) | summary.skipped_categories):
+        if category in summary.skipped_categories:
+            # Every chunk of this category was skipped: there is no measurement to
+            # report, and `max 0.00s` would read as «measured and fast».
+            lines.append(f"latency {category}: n/a (skipped, layer off)")
+            continue
         budget = summary.latency_budgets.get(category)
         verified = "n/a" if budget is None else f"< {budget:.0f}s"
         lines.append(
@@ -1218,6 +1495,7 @@ def format_report(outcomes: Sequence[ChunkOutcome], manifest: GoldenManifest) ->
     lines.append(
         f"diagnostics (informational, not a failure): {summary.diagnostics_total} token(s)"
     )
+    lines.extend(_measured_usage_lines(outcomes))
     return "\n".join(lines)
 
 
@@ -1259,7 +1537,10 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="require every selected chunk to pass, not just the manifest threshold",
+        help=(
+            "require every selected chunk to be measured and to pass, not just the "
+            "manifest threshold; a skipped chunk (layer switched off) fails a strict run"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -1282,12 +1563,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"mode: {mode}; chunks: {len(chunks)}; config: {config_path or '<default>'}")
     outcomes = evaluate_all(chunks, provider_factory=factory, models_config=models_config)
     print(format_report(outcomes, manifest))
-    required = len(chunks) if (args.strict or args.chunk) else manifest.threshold.pass_count
     summary = summarize(outcomes)
-    if summary.passed < required:
-        print(f"FAILED: {summary.passed}/{len(chunks)} passed, {required} required")
+    required = len(chunks) if (args.strict or args.chunk) else manifest.threshold.pass_count
+    failures: list[str] = []
+    if summary.measured == 0:
+        # Fail-closed: a run that measured nothing verified nothing, whatever the
+        # reason for the skips.
+        skipped = summary.skipped
+        failures.append(
+            f"nothing was measured: all {skipped} selected chunk(s) are skipped (profile off)"
+        )
+    elif summary.invariants_passed < required:
+        detail = f"{summary.invariants_passed}/{summary.measured} measured"
+        if summary.skipped:
+            detail = f"{detail}, {summary.skipped} skipped (profile off)"
+        failures.append(f"invariants {detail}, {required} required")
+    if summary.latency_within_budget < summary.latency_measured:
+        over = summary.latency_measured - summary.latency_within_budget
+        failures.append(f"latency {over} chunk(s) over budget")
+    if failures:
+        print("FAILED: " + "; ".join(failures))
         return 1
-    print(f"OK: {summary.passed}/{len(chunks)} passed")
+    skipped = f"; skipped {summary.skipped} (profile off)" if summary.skipped else ""
+    print(
+        f"OK: invariants {summary.invariants_passed}/{summary.measured} "
+        f"(required {required}); "
+        f"latency {summary.latency_within_budget}/{summary.latency_measured} within budget{skipped}"
+    )
     return 0
 
 

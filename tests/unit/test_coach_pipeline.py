@@ -47,10 +47,11 @@ from typing import Any, Protocol
 
 import pytest
 
+from diary.core.models_config import OpenAICompatibleProfile
 from diary.core.settings import PROJECT_ROOT
 from diary.db.models import Artifact, ArtifactLayer, JobType, PipelineType
 from diary.domain.contracts import COACH_DISCLAIMER, CoachNote, WeeklySummary
-from diary.domain.contracts.golden import ADVICE_EVALUATION_LEXEMES
+from diary.domain.contracts.golden import ADVICE_EVALUATION_LEXEMES, estimate_tokens
 from diary.domain.contracts.invariants import (
     check_generated_text,
     input_facts,
@@ -60,6 +61,7 @@ from diary.domain.llm.errors import LLMStructuredOutputError
 from diary.domain.llm.models import LLMRequest, LLMResponse
 from diary.domain.pipelines import naming
 from diary.domain.pipelines import registry as pipeline_registry
+from diary.domain.pipelines.base import PipelinePermanentError
 from diary.domain.pipelines.coach import service as coach_service
 from diary.domain.pipelines.coach.coach_input import (
     CoachInput,
@@ -67,6 +69,7 @@ from diary.domain.pipelines.coach.coach_input import (
     ensure_input_matches_week,
 )
 from diary.domain.pipelines.coach.pipeline import (
+    NUM_CTX,
     PROMPT_PATH,
     PROMPT_VERSION,
     SUMMARY_HEADER,
@@ -114,6 +117,23 @@ def _artifact(
 def _coach_input(*, week_id: str = WEEK_ID) -> CoachInput:
     summary = _summary(week_id)
     return CoachInput(summary=summary, artifact=_artifact(summary=summary))
+
+
+def _profile(max_tokens: int = 2048) -> OpenAICompatibleProfile:
+    """A ``diary_coach`` profile for the budget gate (no endpoint is contacted).
+
+    2048 is the shipped cap (T20); a larger one is how a test builds a request
+    that cannot fit the window.
+    """
+    return OpenAICompatibleProfile(
+        provider="openai_compatible",
+        base_url="http://127.0.0.1:1/v1",
+        model="diary-coach",
+        api_key_env="COACH_TEST_KEY",
+        timeout_s=10.0,
+        temperature=0.4,
+        max_tokens=max_tokens,
+    )
 
 
 def _note_payload(**overrides: object) -> dict[str, object]:
@@ -190,11 +210,13 @@ def _run(
     *,
     week_id: str = WEEK_ID,
     coach_input: CoachInput | None = None,
+    profile: OpenAICompatibleProfile | None = None,
 ) -> coach_service.CoachNoteOutcome:
     return coach_service.coach_note(
         None,  # type: ignore[arg-type]  # the store double ignores the session
         week_id=week_id,
         provider=provider,
+        profile=profile,
         coach_input=coach_input if coach_input is not None else _coach_input(week_id=week_id),
     )
 
@@ -670,3 +692,98 @@ def test_prompt_and_layer_files_live_under_the_t07_locations() -> None:
     assert PROMPT_PATH.parent.name == "coach_note"
     assert PROMPT_PATH.name == "v3.md"
     assert CoachNotePipeline.output_ext == ".md"
+
+
+# ---------------------------------------------------------------------------
+# context budget (T20): the request must fit before it is sent
+# ---------------------------------------------------------------------------
+
+
+def test_the_request_budget_is_num_ctx_minus_the_generation_cap() -> None:
+    """The layer borrows the weekly layer's rule: content + cap ≤ window."""
+    pipeline = CoachNotePipeline()
+    request = pipeline.build_request(summary=_summary())
+    assert pipeline.input_budget_tokens(_profile(2048)) == NUM_CTX - 2048
+    assert pipeline.request_fits(request, profile=_profile(2048))
+    # A cap that eats the whole window leaves no room for the prompt at all.
+    assert not pipeline.request_fits(request, profile=_profile(NUM_CTX))
+
+
+def test_the_shipped_cap_keeps_the_prompt_and_the_week_inside_the_window() -> None:
+    """T20 arithmetic on the real template: the envelope has to close.
+
+    The old blanket cap of 4096 did not fit together with the v3 prompt (the
+    coach prompt is 4113 estimated tokens alone), so the check used to pass only
+    because the prompt constant in the eval contract was understated.
+    """
+    content = CoachNotePipeline().build_request(summary=_summary()).messages[0].content
+    content_est = estimate_tokens(len(content))
+    assert content_est + 2048 <= NUM_CTX
+    assert content_est + 4096 > NUM_CTX
+
+
+def test_an_oversized_request_is_refused_before_the_provider_is_called(store) -> None:
+    """Fail loudly and store nothing — the request is never sent truncated."""
+    provider = _FakeProvider(_json_response(_note_payload()))
+
+    with pytest.raises(PipelinePermanentError):
+        _run(store, provider, profile=_profile(4096))
+
+    assert provider.requests == []
+    assert store.calls == []
+
+
+def test_a_fitting_request_passes_the_gate_and_stores_the_note(store) -> None:
+    provider = _FakeProvider(_json_response(_note_payload()))
+
+    outcome = _run(store, provider, profile=_profile())
+
+    assert isinstance(outcome.note, CoachNote)
+    assert len(provider.requests) == 1
+    assert [call["layer"] for call in store.calls] == [ArtifactLayer.coach_note]
+
+
+def test_a_caller_without_a_profile_skips_the_gate(store) -> None:
+    """The documented seam: the check needs the cap, which lives in the profile.
+
+    Both production entry points pass it (the two tests below); a caller that
+    injects a bare provider gets no check, and that is stated rather than
+    implied.
+    """
+    provider = _FakeProvider(_json_response(_note_payload()))
+
+    _run(store, provider, profile=None)
+
+    assert len(provider.requests) == 1
+
+
+def test_run_coach_note_arms_the_gate(store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The convenience entry point resolves the profile and passes it down."""
+    profile = _profile()
+    provider = _FakeProvider(_json_response(_note_payload()))
+    captured: dict[str, Any] = {}
+
+    def _fake_coach_note(session: object, **kwargs: Any) -> str:
+        captured.update(kwargs)
+        return "stored"
+
+    monkeypatch.setattr(coach_service, "resolve_phase2_profile", lambda config, name: profile)
+    monkeypatch.setattr(coach_service, "create_llm_provider", lambda resolved: provider)
+    monkeypatch.setattr(coach_service, "coach_note", _fake_coach_note)
+
+    coach_service.run_coach_note(
+        None,  # type: ignore[arg-type]  # patched away above
+        week_id=WEEK_ID,
+        models_config=object(),  # type: ignore[arg-type]  # the resolver is patched
+    )
+
+    assert captured["profile"] is profile
+
+
+def test_the_orchestrator_hands_the_profile_to_the_layer() -> None:
+    """The explicit-launch path of T09 arms the gate too (T20)."""
+    source = (PROJECT_ROOT / "src" / "diary" / "domain" / "pipelines" / "pipeline.py").read_text(
+        encoding="utf-8"
+    )
+    call = source.split("outcome = coach_note(", 1)[1].split(")", 1)[0]
+    assert "profile=active_coach_profile" in call
