@@ -18,7 +18,11 @@
 ### Состав профилей
 
 - **Четыре обязательных (MVP):** `transcription` (`faster_whisper`), `normalization`, `summarization`, `wellbeing_analysis` (`openai_compatible`). Их отсутствие — ошибка загрузки.
-- **Три опциональных (фаза 2, T02):** `diary_stt`, `diary_sum`, `diary_coach` — локальный Ollama (`provider: openai_compatible`, `base_url: http://127.0.0.1:11434/v1`, теги `diary-stt`/`diary-sum`/`diary-coach`, `reasoning_effort: none`). **Отсутствие профиля = слой отключён, а не ошибка** (`../docs/tasklist-phase2.md` §9.8): валидатор (`ModelsConfig`, `extra="forbid"`) принимает конфиг и без них, потому что рабочий `configs/models.yaml` не коммитится и существует у пользователя раньше T02.
+- **Четыре опциональных (фаза 2, T02/T13b):** `diary_stt`, `diary_sum`, `diary_week`, `diary_coach` — локальный Ollama (`provider: openai_compatible`, `base_url: http://127.0.0.1:11434/v1`, теги `diary-stt`/`diary-sum`/`diary-coach`; у `diary_week` — CPU-близнец `diary-sum-cpu`), `reasoning_effort: none`. **Отсутствие профиля = слой отключён, а не ошибка** (`../docs/tasklist-phase2.md` §9.8): валидатор (`ModelsConfig`, `extra="forbid"`) принимает конфиг и без них, потому что рабочий `configs/models.yaml` не коммитится и существует у пользователя раньше T02.
+
+### Гибридная маршрутизация устройств (T13b)
+
+`configs/models.example.yaml` следует правилу «интерактив — на GPU, фон — на CPU»: `diary_stt`/`diary_sum`/`diary_coach` указывают на GPU-теги, а `diary_week` — на CPU-близнец `diary-sum-cpu` с `timeout_s: 600` (CPU-неделя занимает до ~127 с, дефолтные 120 с её обрезали бы). Основание — замер `../docs/device-choice.md`: недельный слой освобождает VRAM, а его латентность никого не блокирует в UI. Недельный слой выбирает профиль **по имени** (`PIPELINE_PROFILE_NAME` в `../src/diary/domain/pipelines/naming.py`), поэтому отдельный профиль обязателен: в конфиге без `diary_week` недельный слой честно выключен, а не падает.
 
 ### Профили фазы 2: на что смотреть
 

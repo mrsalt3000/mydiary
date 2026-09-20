@@ -48,12 +48,15 @@ SECRET_VALUES = {
     "WELLBEING_API_KEY": "sk-wellbeing-fake-3333",
 }
 
-#: Phase-2 optional profile fields (T02): field → aligned artifact values.
-#: ``temperature`` must equal ``PARAMETER temperature`` of the paired Modelfile
-#: and ``model`` must equal the Ollama tag: ``resolve_completion_params`` always
-#: sends the profile temperature, so a divergence would be a silent substitution.
-#: ``reasoning_effort`` is the T02b (ADR-009) switch that turns the reasoning
-#: channel off for the phase-2 layers.
+#: Phase-2 optional profile fields (T02, extended by T13b): field → aligned
+#: artifact values. ``temperature`` must equal ``PARAMETER temperature`` of the
+#: paired Modelfile and ``model`` must equal the Ollama tag:
+#: ``resolve_completion_params`` always sends the profile temperature, so a
+#: divergence would be a silent substitution. ``reasoning_effort`` is the T02b
+#: (ADR-009) switch that turns the reasoning channel off for the phase-2 layers.
+#: ``diary_week`` (T13b) is the weekly layer's own profile; its tag is the CPU
+#: twin of the day tag, which is what the hybrid rule (day on GPU, week on CPU)
+#: is made of.
 PHASE2_PROFILES: dict[str, dict[str, object]] = {
     "diary_stt": {
         "model": "diary-stt",
@@ -65,6 +68,13 @@ PHASE2_PROFILES: dict[str, dict[str, object]] = {
     "diary_sum": {
         "model": "diary-sum",
         "modelfile": "Modelfile.sum",
+        "temperature": 0.25,
+        "max_tokens": 4096,
+        "reasoning_effort": "none",
+    },
+    "diary_week": {
+        "model": "diary-sum-cpu",
+        "modelfile": "Modelfile.sum-cpu",
         "temperature": 0.25,
         "max_tokens": 4096,
         "reasoning_effort": "none",
@@ -526,7 +536,7 @@ def _modelfile_parameters(name: str) -> dict[str, str]:
     return params
 
 
-def test_example_provides_the_three_phase2_profiles(example_config: ModelsConfig) -> None:
+def test_example_provides_the_four_phase2_profiles(example_config: ModelsConfig) -> None:
     pairs = example_config.phase2_profiles()
     assert [name for name, _ in pairs] == list(PHASE2_FIELDS)
     for name, profile in pairs:
@@ -543,7 +553,12 @@ def test_example_provides_the_three_phase2_profiles(example_config: ModelsConfig
 
 
 def test_config_without_phase2_profiles_is_valid(tmp_path: Path) -> None:
-    """(a) Backward compatibility: the pre-T02 config still loads."""
+    """(a) Backward compatibility: the pre-T02 config still loads.
+
+    Since T13b a config without ``diary_week`` also leaves the weekly layer
+    switched off — absent profile, not an error (checked here and in
+    ``tests/unit/test_sum_weekly_pipeline.py``).
+    """
     profiles = _example_profiles()
     for field in PHASE2_FIELDS:
         profiles.pop(field, None)
@@ -551,9 +566,23 @@ def test_config_without_phase2_profiles_is_valid(tmp_path: Path) -> None:
     assert config.phase2_profiles() == []
     assert config.diary_stt is None
     assert config.diary_sum is None
+    assert config.diary_week is None
     assert config.diary_coach is None
     # The four MVP profiles are untouched by the new optional fields.
     assert [task for task, _ in config.profiles_by_task()] == list(TaskType)
+
+
+def test_week_profile_alone_does_not_bring_the_other_layers_back(tmp_path: Path) -> None:
+    """T13b: the example's MVP profiles plus ``diary_week`` only — a valid state."""
+    profiles = _example_profiles()
+    for other in PHASE2_FIELDS:
+        if other != "diary_week":
+            profiles.pop(other, None)
+    config = _config_from_profiles(tmp_path, profiles)
+    assert [name for name, _ in config.phase2_profiles()] == ["diary_week"]
+    assert config.diary_stt is None
+    assert config.diary_sum is None
+    assert config.diary_coach is None
 
 
 @pytest.mark.parametrize("field", PHASE2_FIELDS)
@@ -591,13 +620,14 @@ def test_unknown_key_next_to_phase2_profiles_still_rejected(tmp_path: Path) -> N
 
 
 def test_phase2_yaml_temperature_matches_modelfile() -> None:
-    """(d) Modelfile ⇄ ``configs/models.example.yaml`` agreement (T02).
+    """(d) Modelfile ⇄ ``configs/models.example.yaml`` agreement (T02/T13b).
 
     The profile temperature is what actually goes on the wire
     (``resolve_completion_params``), so a divergence between the YAML and the
     Modelfile ``PARAMETER temperature`` is a silent substitution — this test
     fails on any mismatch, in either direction, and on drift of the decided
-    numbers themselves.
+    numbers themselves. Since T13b the weekly profile is checked against its own
+    Modelfile: ``diary_week`` ⇄ ``ollama/Modelfile.sum-cpu``.
     """
     profiles = _example_profiles()
     for field, expected in PHASE2_PROFILES.items():
@@ -610,7 +640,35 @@ def test_phase2_yaml_temperature_matches_modelfile() -> None:
         )
         assert float(params["temperature"]) == pytest.approx(expected["temperature"])
         assert float(profile["temperature"]) == pytest.approx(expected["temperature"])
-        assert profile["model"] == field.replace("_", "-")
+        assert profile["model"] == expected["model"]
+
+
+def test_week_profile_is_the_cpu_twin_of_the_day_profile() -> None:
+    """T13b hybrid: day stays on the GPU tag, week runs on the CPU twin.
+
+    The whole point of the separate profile is the device split, so the tags
+    themselves are asserted here: ``diary-sum`` (GPU) for the interactive day
+    layer, ``diary-sum-cpu`` (``num_gpu 0``) for the background weekly rollup.
+    """
+    profiles = _example_profiles()
+    day = profiles["diary_sum"]
+    week = profiles["diary_week"]
+
+    assert day["model"] == "diary-sum"
+    assert week["model"] == "diary-sum-cpu"
+    assert not str(day["model"]).endswith("-cpu")
+
+    cpu_params = _modelfile_parameters("Modelfile.sum-cpu")
+    gpu_params = _modelfile_parameters("Modelfile.sum")
+    assert cpu_params["num_gpu"] == "0"
+    assert "num_gpu" not in gpu_params
+
+    # Same prompt/temperature family and the same generation cap: the device is
+    # the only difference, plus the transport headroom a CPU call needs.
+    assert week["temperature"] == day["temperature"]
+    assert week["max_tokens"] == day["max_tokens"]
+    assert float(week["timeout_s"]) > float(day["timeout_s"])
+    assert float(week["timeout_s"]) >= 180.0
 
 
 def test_phase2_profile_temperature_reaches_the_payload(

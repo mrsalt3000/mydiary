@@ -29,7 +29,9 @@ validated result is stored inline by ``diary.db.results.save_layer_result``
 (ADR-008). Only the three maps the registry validates against are extended for
 each of them: its artifact layer, its rendered-file extension and its job type;
 its LLM profile is selected by the configuration field name
-(``PIPELINE_PROFILE_NAME``), not by a ``TaskType``.
+(``PIPELINE_PROFILE_NAME``), not by a ``TaskType``. Task T13b gives the weekly
+layer its own profile (``diary_week``) so the device split "day on the GPU, week
+on the CPU" is expressed by the configuration.
 """
 
 from __future__ import annotations
@@ -87,9 +89,9 @@ PIPELINE_LAYER: dict[PipelineType, ArtifactLayer] = {
 #: Only the export-driven MVP pipelines appear here: their LLM profile is
 #: selected by :class:`~diary.core.models_config.TaskType`. The phase-2 layers
 #: are configured by *profile name* instead (``PIPELINE_PROFILE_NAME``), because
-#: their profiles (``diary_stt``/``diary_sum``/``diary_coach``) are optional
-#: additions to ``configs/models.yaml`` and the four MVP task types are not
-#: extended by the phase-2 backlog (task T02/T04).
+#: their profiles (``diary_stt``/``diary_sum``/``diary_week``/``diary_coach``)
+#: are optional additions to ``configs/models.yaml`` and the four MVP task types
+#: are not extended by the phase-2 backlog (task T02/T04).
 PIPELINE_TASK_TYPE: dict[PipelineType, TaskType] = {
     PipelineType.normalize: TaskType.normalization,
     PipelineType.summarize: TaskType.summarization,
@@ -105,9 +107,12 @@ PIPELINE_TASK_TYPE: dict[PipelineType, TaskType] = {
 PIPELINE_PROFILE_NAME: dict[PipelineType, str] = {
     PipelineType.stt_corrected: "diary_stt",
     PipelineType.daily_summary: "diary_sum",
-    # Phase-2 layer (task T06): the week merge runs under the same summarization
-    # profile as the day layer (``diary-sum``, temperature 0.25).
-    PipelineType.weekly_summary: "diary_sum",
+    # Phase-2 layer (task T06): the week merge has its own profile since T13b —
+    # the day layer stays interactive on the GPU (``diary-sum``), while the
+    # weekly rollup is a background operation and runs on the CPU twin
+    # (``diary-sum-cpu``). Day and week share the prompt/temperature of the sum
+    # tag family (0.25); only the device and the transport timeout differ.
+    PipelineType.weekly_summary: "diary_week",
     # Phase-2 layer (task T07, layer 5): its own coaching profile (temperature
     # 0.4). It is not the layer-4 wellbeing task type.
     PipelineType.coach_note: "diary_coach",

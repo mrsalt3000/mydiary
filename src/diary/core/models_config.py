@@ -161,11 +161,12 @@ class ModelsConfig(BaseModel):
     """Validated per-task model profiles.
 
     The four MVP task profiles are required. The phase-2 layer profiles
-    (:attr:`diary_stt`, :attr:`diary_sum`, :attr:`diary_coach`, task T02) are
-    **optional**: ``None`` means the layer is switched off, which is a valid
-    state and not an error (``docs/tasklist-phase2.md`` §9.8). The real working
-    ``configs/models.yaml`` is user-owned and uncommitted, so a required new
-    field would break the start of the already-accepted application.
+    (:attr:`diary_stt`, :attr:`diary_sum`, :attr:`diary_week`,
+    :attr:`diary_coach`; tasks T02 and T13b) are **optional**: ``None`` means
+    the layer is switched off, which is a valid state and not an error
+    (``docs/tasklist-phase2.md`` §9.8). The real working ``configs/models.yaml``
+    is user-owned and uncommitted, so a required new field would break the start
+    of the already-accepted application.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -178,8 +179,14 @@ class ModelsConfig(BaseModel):
     # --- профили слоёв фазы 2 (T02), все опциональные -----------------------
     #: STT-правка (слой 2 фазы 2); тег Ollama ``diary-stt``.
     diary_stt: OpenAICompatibleProfile | None = None
-    #: Сводка дня/недели (слой 3 фазы 2); тег Ollama ``diary-sum``.
+    #: Сводка дня (слой 3 фазы 2); тег Ollama ``diary-sum``.
     diary_sum: OpenAICompatibleProfile | None = None
+    #: Сводка **недели** (слой 3 фазы 2, задача T13b). Отдельный профиль нужен,
+    #: потому что день и неделя — один и тот же слой с одним профилем
+    #: ``diary_sum``, и решение «день интерактивен и живёт на GPU, неделя
+    #: фоновая и живёт на CPU» иначе не выражается конфигом. Отсутствие профиля
+    #: = недельный слой выключен (как и у остальных профилей фазы 2).
+    diary_week: OpenAICompatibleProfile | None = None
     #: Заметка слоя 5 (wellbeing); тег Ollama ``diary-coach``.
     diary_coach: OpenAICompatibleProfile | None = None
 
@@ -204,6 +211,7 @@ class ModelsConfig(BaseModel):
         candidates: tuple[tuple[str, OpenAICompatibleProfile | None], ...] = (
             ("diary_stt", self.diary_stt),
             ("diary_sum", self.diary_sum),
+            ("diary_week", self.diary_week),
             ("diary_coach", self.diary_coach),
         )
         return [(name, profile) for name, profile in candidates if profile is not None]

@@ -29,9 +29,10 @@
 # - Четыре задачи MVP настраиваются независимо; провайдер/модель могут отличаться.
 # - transcription в MVP — только локальный faster_whisper;
 #   normalization/summarization/wellbeing_analysis — только openai_compatible.
-# - Три профиля слоёв фазы 2 (T02) — `diary_stt`, `diary_sum`, `diary_coach` —
-#   ОПЦИОНАЛЬНЫ: отсутствие профиля означает «слой отключён», а не ошибку
-#   (docs/tasklist-phase2.md §9.8). Валидатор принимает конфиг и без них.
+# - Четыре профиля слоёв фазы 2 (T02, T13b) — `diary_stt`, `diary_sum`,
+#   `diary_week`, `diary_coach` — ОПЦИОНАЛЬНЫ: отсутствие профиля означает
+#   «слой отключён», а не ошибку (docs/tasklist-phase2.md §9.8). Валидатор
+#   принимает конфиг и без них.
 #
 # Как использовать: скопируйте файл в configs/models.yaml (в Git не
 # коммитится) и задайте значения. Путь к рабочему файлу можно переопределить
@@ -123,6 +124,22 @@ profiles:
     external: false
 
   diary_sum:
+    provider: openai_compatible
+    base_url: http://127.0.0.1:11434/v1
+    model: diary-sum-cpu
+    api_key_env: OLLAMA_API_KEY
+    timeout_s: 600
+    temperature: 0.25                      # == PARAMETER temperature в ollama/Modelfile.sum-cpu
+    max_tokens: 4096
+    reasoning_effort: none                 # канал размышлений выключен (T02b, ADR-009)
+    external: false
+
+  # Недельная сводка — отдельный профиль с T13b (`diary_week`), иначе недельный
+  # слой остаётся выключенным: день и неделя больше не делят один профиль.
+  # В ЭТОМ (целиком CPU) конфиге устройство у дня и недели одно и то же, поэтому
+  # здесь стоит тот же тег `diary-sum-cpu`; различие появляется в гибридном
+  # `configs/models.example.yaml`, где день остаётся на GPU-теге.
+  diary_week:
     provider: openai_compatible
     base_url: http://127.0.0.1:11434/v1
     model: diary-sum-cpu

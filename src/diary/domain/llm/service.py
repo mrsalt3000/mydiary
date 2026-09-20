@@ -5,8 +5,8 @@
   wellbeing analysis run through an LLM provider; transcription uses the local
   STT provider (Task 09) and is rejected here with a clear error.
 * :func:`resolve_phase2_profile` maps a phase-2 profile *name*
-  (``diary_stt``/``diary_sum``/``diary_coach``) to its optional profile; an
-  absent profile means the layer is switched off (task T02/T04).
+  (``diary_stt``/``diary_sum``/``diary_week``/``diary_coach``) to its optional
+  profile; an absent profile means the layer is switched off (task T02/T04).
 * :func:`success_provenance` / :func:`failure_provenance` build a
   :class:`~diary.domain.llm.models.LLMCallProvenance` for one completion
   attempt. Provenance carries metadata only — never diary content, prompts or
@@ -85,7 +85,8 @@ def resolve_phase2_profile(
 
     The phase-2 layers (``stt_corrected``, ``daily_summary``, ``weekly_summary``,
     ``coach_note``) are configured by *profile name* — ``diary_stt``,
-    ``diary_sum``, ``diary_coach`` — rather than by a :class:`TaskType`: their
+    ``diary_sum``, ``diary_week``, ``diary_coach`` — rather than by a
+    :class:`TaskType`: their
     profiles are optional additions to ``configs/models.yaml`` (T02), and the
     four MVP task types are not extended by the phase-2 backlog.
 

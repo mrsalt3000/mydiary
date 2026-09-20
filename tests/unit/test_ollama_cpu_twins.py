@@ -186,6 +186,25 @@ def test_cpu_example_uses_cpu_tags(name: str) -> None:
     assert cpu["model"] in CPU_TAGS
 
 
+def test_cpu_example_also_carries_the_week_profile() -> None:
+    """T13b: the CPU example configures the weekly layer as well.
+
+    The weekly layer reads its **own** profile field (``diary_week``, T13b);
+    absent, the layer is switched off. A CPU-only config that mirrors the GPU
+    example must therefore carry it too, on the CPU tag — which is exactly the
+    device the hybrid example already picked for the weekly rollup.
+    """
+    cpu = load_example(CPU_EXAMPLE)["profiles"]
+    gpu = load_example(GPU_EXAMPLE)["profiles"]
+    assert "diary_week" in cpu, f"diary_week missing from {CPU_EXAMPLE.name}"
+    assert cpu["diary_week"]["model"] == "diary-sum-cpu"
+    assert cpu["diary_week"]["model"] in CPU_TAGS
+    # Both examples agree on the weekly device: CPU. They differ only for the
+    # interactive layers, where the hybrid keeps the GPU tag.
+    assert cpu["diary_week"] == gpu["diary_week"]
+    assert cpu["diary_sum"]["model"] != gpu["diary_sum"]["model"]
+
+
 @pytest.mark.parametrize("name", PHASE2_PROFILES)
 def test_cpu_example_differs_only_in_documented_keys(name: str) -> None:
     """``model`` and ``timeout_s`` (documented); everything else identical."""

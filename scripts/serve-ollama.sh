@@ -11,8 +11,19 @@
 # ollama/Modelfile (T01) и парные ollama/Modelfile.stt|sum|coach (T02) — у всех
 # трёх тегов профилей фазы 2 общий num_ctx. Серверные переменные ниже влияют на
 # скорость и расход VRAM, но не на размер контекста.
-# OLLAMA_MAX_LOADED_MODELS=1 и OLLAMA_NUM_PARALLEL=1 — GPU-серийность:
-# STT и LLM не работают одновременно (docs/tasklist-phase2.md §9.10).
+# OLLAMA_NUM_PARALLEL=1 — GPU-серийность: два запроса к GPU-тегу не считаются
+# одновременно (docs/tasklist-phase2.md §9.10). OLLAMA_MAX_LOADED_MODELS=2, а не
+# 1, — следствие гибридного правила T13b: интерактивные слои работают на
+# GPU-тегах (diary-stt / diary-sum / diary-coach), а недельная сводка — на
+# CPU-близнеце diary-sum-cpu (docs/device-choice.md §11). При лимите 1 загрузка
+# любого тега вытесняет резидентный тег другого устройства, и каждая смена
+# «день ↔ неделя» платит ~4.5 с загрузки заново (+ репак весов). Лимит 2
+# оставляет в памяти пару «один GPU-тег + CPU-тег», что и требует гибрид;
+# VRAM при этом не переполняется, потому что CPU-тег объявлен `num_gpu 0`.
+# Оговорка: лимит 2 разрешает (не навязывает) и пару GPU-тегов; при нехватке
+# VRAM сервер снижает число слоёв на GPU у второго тега, а сериализацию
+# «LLM ↔ STT» по-прежнему обеспечивает явная выгрузка перед ASR-джобой
+# (`unload`, §9.10), а не сам лимит.
 #
 # Использование:
 #   scripts/serve-ollama.sh install [<tag>]    # скачать релиз (по умолчанию v0.34.2) в ~/.local
@@ -78,7 +89,7 @@ RELEASE_ASSET="ollama-linux-amd64.tar.zst"
 export OLLAMA_HOST
 export OLLAMA_MODELS
 export OLLAMA_NO_CLOUD=1
-export OLLAMA_MAX_LOADED_MODELS=1
+export OLLAMA_MAX_LOADED_MODELS=2  # гибрид T13b: GPU-тег + CPU-тег недели рядом
 export OLLAMA_NUM_PARALLEL=1
 export OLLAMA_FLASH_ATTENTION=1
 export OLLAMA_KV_CACHE_TYPE=q8_0

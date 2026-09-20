@@ -61,15 +61,20 @@ PROMPT_VERSION = "v2"
 #: Prompt template location: ``prompts/sum_weekly/v2.md``.
 PROMPT_PATH = PROJECT_ROOT / "prompts" / "sum_weekly" / f"{PROMPT_VERSION}.md"
 #: Phase-2 profile field of ``configs/models.yaml`` this layer runs under.
-PROFILE_NAME = "diary_sum"
+#: Its own field since T13b (was ``diary_sum``): the hybrid rule keeps the
+#: interactive day layer on the GPU tag (``diary-sum``) and runs this weekly
+#: rollup on the CPU twin (``diary-sum-cpu``) — ``docs/device-choice.md`` §11.
+#: An absent profile means the layer is switched off (never an error).
+PROFILE_NAME = "diary_week"
 #: Line that introduces the week's daily summaries inside a rollup request.
 SUMMARIES_HEADER = "Дневные сводки недели (JSON, daily_summary[] в порядке дней недели):"
 #: Line that introduces the partial rollups inside a merge request.
 MERGE_HEADER = "Частичные сводки недели (JSON, в порядке дней недели):"
 
-#: Context window of the ``diary-sum`` tag, in tokens. ``num_ctx`` is a
-#: property of the created model (``ollama/Modelfile.sum``), not a profile
-#: field: the OpenAI-compatible API does not accept it (ADR-007 §9).
+#: Context window of the sum tag family, in tokens (identical for ``diary-sum``
+#: and its CPU twin ``diary-sum-cpu`` this layer runs on). ``num_ctx`` is a
+#: property of the created model (``ollama/Modelfile.sum|sum-cpu``), not a
+#: profile field: the OpenAI-compatible API does not accept it (ADR-007 §9).
 NUM_CTX = 8192
 
 #: Static, non-sensitive error summaries (AGENTS.md §8).

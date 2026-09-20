@@ -5,7 +5,7 @@
 build the request(s), call the provider, validate the completion into
 :class:`~diary.domain.contracts.WeeklySummary` and append the result to the
 phase-2 store under the ``week_id`` anchor (task T08). :func:`run_sum_weekly` is
-the convenience entry point that resolves the optional ``diary_sum`` profile and
+the convenience entry point that resolves the optional ``diary_week`` profile and
 the provider from the configuration — the shape task T09's orchestrator needs
 for a ``weekly_summary`` job.
 
@@ -152,9 +152,9 @@ def run_sum_weekly(
     processing_run_id: uuid.UUID | None = None,
     created_at: datetime | None = None,
 ) -> SumWeeklyOutcome:
-    """Resolve the ``diary_sum`` profile/provider and summarize one ISO week.
+    """Resolve the ``diary_week`` profile/provider and summarize one ISO week.
 
-    An absent ``diary_sum`` profile means the layer is switched off and raises
+    An absent ``diary_week`` profile means the layer is switched off and raises
     :class:`~diary.domain.llm.errors.LLMProviderUnavailableError` (never
     retryable) before any request is sent. ``provider`` overrides the factory —
     tests inject a fake, and T09 may pass its own instance.

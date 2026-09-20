@@ -37,11 +37,12 @@ from typing import Any, Protocol
 
 import pytest
 
-from diary.core.models_config import OpenAICompatibleProfile
+from diary.core.models_config import ModelsConfig, OpenAICompatibleProfile, load_models_config
+from diary.core.settings import PROJECT_ROOT
 from diary.db.models import ArtifactLayer, PipelineType
 from diary.domain.contracts import DailySummary, WeeklySummary
 from diary.domain.contracts.golden import estimate_tokens
-from diary.domain.llm.errors import LLMStructuredOutputError
+from diary.domain.llm.errors import LLMProviderUnavailableError, LLMStructuredOutputError
 from diary.domain.llm.models import LLMRequest, LLMResponse
 from diary.domain.pipelines import naming
 from diary.domain.pipelines import registry as pipeline_registry
@@ -250,7 +251,7 @@ def test_layer_is_registered_in_the_second_family_registry() -> None:
     assert isinstance(registered, SumWeeklyPipeline)
     assert registered.layer is ArtifactLayer.weekly_summary
     assert registered.pipeline_type is PipelineType.weekly_summary
-    assert registered.profile_name == "diary_sum"
+    assert registered.profile_name == "diary_week"
     assert "weekly_summary" in pipeline_registry.known_pipeline_types()
     # The export-driven lookup must not return a per-week layer.
     assert pipeline_registry.get_pipeline(PipelineType.weekly_summary) is None
@@ -273,13 +274,80 @@ def test_registry_rejects_a_misdeclared_profile_name() -> None:
 
 
 def test_naming_maps_know_the_weekly_summary_layer() -> None:
-    """The layer is mapped by profile name, not by a TaskType (T02/T04 rule)."""
-    assert naming.PIPELINE_PROFILE_NAME[PipelineType.weekly_summary] == "diary_sum"
+    """The layer is mapped by profile name, not by a TaskType (T02/T04 rule).
+
+    Since T13b the weekly layer has its **own** profile (``diary_week``) instead
+    of sharing the day's ``diary_sum``: that is what makes "day on the GPU, week
+    on the CPU" expressible in the configuration (``docs/device-choice.md`` §11).
+    """
+    assert naming.PIPELINE_PROFILE_NAME[PipelineType.weekly_summary] == "diary_week"
+    # The two sum layers no longer share a profile; the day layer keeps its own.
+    assert naming.PIPELINE_PROFILE_NAME[PipelineType.daily_summary] == "diary_sum"
     assert PipelineType.weekly_summary not in naming.PIPELINE_TASK_TYPE
     assert naming.layer_output_extension(ArtifactLayer.weekly_summary) == ".md"
     # The layer renders no file, so it has no per-layer artifact directory.
     with pytest.raises(ValueError):
         naming.layer_dirname(ArtifactLayer.weekly_summary)
+
+
+# ---------------------------------------------------------------------------
+# profile resolution (T13b: day on the GPU, week on the CPU)
+# ---------------------------------------------------------------------------
+
+
+def _example_config() -> ModelsConfig:
+    """The tracked hybrid example configuration (no endpoint is contacted)."""
+    return load_models_config(PROJECT_ROOT / "configs" / "models.example.yaml")
+
+
+def test_run_sum_weekly_resolves_the_week_profile_not_the_day_one(
+    store: _RecordingStore,
+) -> None:
+    """The layer takes ``diary_week`` (the CPU twin), never ``diary_sum``."""
+    config = _example_config()
+    provider = _FakeProvider(_rollup_response())
+
+    outcome = sum_weekly_service.run_sum_weekly(
+        None,  # type: ignore[arg-type]  # the store double ignores the session
+        week_id=WEEK_ID,
+        models_config=config,
+        provider=provider,
+        local_tz="Europe/Moscow",
+        summaries=_summaries(),
+    )
+
+    assert outcome.summary.rollup == ROLLUP
+    assert config.diary_week is not None and config.diary_week.model == "diary-sum-cpu"
+    assert config.diary_sum is not None and config.diary_sum.model == "diary-sum"
+
+
+def test_run_sum_weekly_is_switched_off_without_the_week_profile(
+    store: _RecordingStore,
+) -> None:
+    """(b) Backward compatibility: a pre-T13b config leaves the layer off.
+
+    An absent ``diary_week`` must be "the layer is switched off" — a
+    non-retryable configuration error raised before any request, not a crash
+    and not a silent fallback to ``diary_sum`` (which would quietly return the
+    weekly rollup to the GPU).
+    """
+    config = _example_config().model_copy(update={"diary_week": None})
+    provider = _FakeProvider(_rollup_response())
+
+    with pytest.raises(LLMProviderUnavailableError) as exc:
+        sum_weekly_service.run_sum_weekly(
+            None,  # type: ignore[arg-type]
+            week_id=WEEK_ID,
+            models_config=config,
+            provider=provider,
+            local_tz="Europe/Moscow",
+            summaries=_summaries(),
+        )
+
+    assert "diary_week" in str(exc.value)
+    assert "switched off" in str(exc.value)
+    assert provider.requests == []
+    assert store.calls == []
 
 
 # ---------------------------------------------------------------------------

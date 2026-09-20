@@ -42,8 +42,13 @@ Scope and deliberate simplifications (documented, not forgotten)
 * **The slot serialises STT against STT.** It cannot stop a *different* thread
   from calling the LLM while :func:`run` is in progress; keeping LLM traffic away
   from the STT window is the caller's (orchestrator T09) responsibility, backed
-  by the runtime configuration ``OLLAMA_MAX_LOADED_MODELS=1`` /
-  ``OLLAMA_NUM_PARALLEL=1`` (``docs/tasklist-phase2.md`` §9.10).
+  by the runtime configuration ``OLLAMA_NUM_PARALLEL=1`` (no two requests are
+  computed at once) and the explicit unload before ASR
+  (``docs/tasklist-phase2.md`` §9.10). Since T13b the hybrid runtime sets
+  ``OLLAMA_MAX_LOADED_MODELS=2``: that cap governs how many tags stay resident
+  (one GPU tag plus the CPU weekly tag), not whether LLM traffic overlaps the STT
+  window — and the CPU tag (``num_gpu 0``) occupies no VRAM at all
+  (``docs/device-choice.md`` §11).
 * **Wiring**: :func:`run` is the entry point the phase-2 orchestrator (T09) and
   the manual STT path are meant to share; the phase-1 ``run_transcription``
   service is intentionally left untouched by T03 (it constructs a provider per
