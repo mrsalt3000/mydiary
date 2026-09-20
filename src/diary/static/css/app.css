@@ -277,6 +277,9 @@ body {
 .voice-recording {
   color: var(--color-error);
   font-size: 0.9rem;
+  /* T14: the duration ticks every half second — tabular figures keep the
+     label from reflowing on each update. */
+  font-variant-numeric: tabular-nums;
 }
 
 .voice-status {

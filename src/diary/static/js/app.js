@@ -144,9 +144,10 @@
   var voiceStatus = document.getElementById("voice-status");
   var voiceError = document.getElementById("voice-error");
   var recordingLabel = document.getElementById("voice-recording");
+  var recordingElapsed = document.getElementById("voice-elapsed");
 
   if (!voiceBox || !recordButton || !stopButton || !fileInput ||
-      !voiceStatus || !voiceError || !recordingLabel) {
+      !voiceStatus || !voiceError || !recordingLabel || !recordingElapsed) {
     return;
   }
 
@@ -179,6 +180,71 @@
   function hideVoiceError() {
     voiceError.textContent = "";
     voiceError.hidden = true;
+  }
+
+  /* Recording duration indicator (T14).
+   *
+   * Invariants (keep them when editing this block):
+   *  - At most one interval handle exists, ever. It is held in
+   *    ``recordingTickerId``, created only by showRecordingLabel() (which
+   *    clears any previous one first) and released by clearRecordingTicker().
+   *    Every recording exit path goes through hideRecordingLabel().
+   *  - The displayed value is recomputed from performance.now() on every
+   *    tick, never accumulated from tick counts, so a throttled interval in
+   *    a background tab cannot make the timer lag behind.
+   *  - ``recordingLabel.hidden = true`` is only ever set by
+   *    hideRecordingLabel(), which also stops the ticker and empties the
+   *    text: a hidden indicator can never keep a timer or show a stale value.
+   */
+  var RECORDING_TICK_MS = 500;
+  var recordingStartedAt = 0;
+  var recordingTickerId = null;
+
+  function padTwoDigits(value) {
+    return value < 10 ? "0" + value : String(value);
+  }
+
+  /* "м:сс", and "ч:мм:сс" once the recording passes an hour. Never NaN,
+     never negative, never empty. */
+  function formatDuration(milliseconds) {
+    var elapsed = Number(milliseconds);
+    if (!isFinite(elapsed) || elapsed < 0) {
+      elapsed = 0;
+    }
+    var totalSeconds = Math.floor(elapsed / 1000);
+    var seconds = totalSeconds % 60;
+    var minutes = Math.floor(totalSeconds / 60) % 60;
+    var hours = Math.floor(totalSeconds / 3600);
+    if (hours > 0) {
+      return hours + ":" + padTwoDigits(minutes) + ":" + padTwoDigits(seconds);
+    }
+    return minutes + ":" + padTwoDigits(seconds);
+  }
+
+  function renderRecordingTime() {
+    recordingElapsed.textContent =
+      formatDuration(window.performance.now() - recordingStartedAt);
+  }
+
+  function clearRecordingTicker() {
+    if (recordingTickerId !== null) {
+      window.clearInterval(recordingTickerId);
+      recordingTickerId = null;
+    }
+  }
+
+  function hideRecordingLabel() {
+    clearRecordingTicker();
+    recordingElapsed.textContent = "";
+    recordingLabel.hidden = true;
+  }
+
+  function showRecordingLabel() {
+    clearRecordingTicker(); // never inherit a previous cycle's interval
+    recordingStartedAt = window.performance.now();
+    recordingElapsed.textContent = formatDuration(0);
+    recordingLabel.hidden = false;
+    recordingTickerId = window.setInterval(renderRecordingTime, RECORDING_TICK_MS);
   }
 
   function setVoiceControlsDisabled(disabled) {
@@ -373,7 +439,7 @@
           stopTracks(finishedStream);
           recordButton.hidden = false;
           stopButton.hidden = true;
-          recordingLabel.hidden = true;
+          hideRecordingLabel();
           if (!chunks.length) {
             showVoiceError("Запись пуста. Попробуйте ещё раз.");
             chunks = [];
@@ -386,18 +452,27 @@
             : "recording.webm";
           uploadAudio(blob, fileName);
         });
+        // A recorder failure must not leave the duration ticking; the stop
+        // event that follows it finishes the UI state.
+        recorder.addEventListener("error", function () {
+          hideRecordingLabel();
+        });
         recorder.start();
         recordButton.hidden = true;
         stopButton.hidden = false;
-        recordingLabel.hidden = false;
+        showRecordingLabel();
       })
       .catch(function () {
+        hideRecordingLabel();
         showVoiceError("Микрофон недоступен или доступ запрещён. Можно загрузить файл.");
       });
   });
 
   stopButton.addEventListener("click", function () {
     if (recorder && recorder.state !== "inactive") {
+      // The user's own stop is an exit path of its own: the duration is not
+      // left depending on the recorder's "stop" event alone.
+      hideRecordingLabel();
       recorder.stop();
     }
   });
@@ -411,6 +486,11 @@
     // server never uses it (storage is under a server-generated UUID).
     uploadAudio(file, file.name);
     fileInput.value = "";
+  });
+
+  // Leaving the page (including the bfcache) must not strand the ticker.
+  window.addEventListener("pagehide", function () {
+    hideRecordingLabel();
   });
 })();
 

@@ -298,6 +298,38 @@ def test_client_assets_follow_privacy_and_escaping_rules() -> None:
     assert "слишком длинная" in script
 
 
+def test_recording_timer_keeps_the_indicator_accessible() -> None:
+    """T14: the recording indicator may show a live duration, but the
+    ``role="status"`` region must stay a one-time announcement.
+
+    This guards the static contract only. Whether repeated record/stop cycles
+    strand an interval — and whether the value actually ticks — are runtime
+    properties, verified by driving the page in a browser, not by reading the
+    source.
+    """
+    template = (REPO_ROOT / "src/diary/templates/chat.html").read_text(encoding="utf-8")
+    indicator = re.search(r'<span id="voice-recording".*?</span>', template, re.DOTALL)
+    assert indicator is not None, "the recording indicator must stay in the template"
+    markup = indicator.group(0)
+    assert 'role="status"' in markup
+    assert "Идёт запись…" in markup
+    elapsed = re.search(r'<span id="voice-elapsed"[^>]*>', markup)
+    assert elapsed is not None, "the ticking duration must live in its own element"
+    # role="status" is an implicit polite live region: a value left in the
+    # accessibility tree would be announced on every tick.
+    assert 'aria-hidden="true"' in elapsed.group(0)
+
+    script = (REPO_ROOT / "src/diary/static/js/app.js").read_text(encoding="utf-8")
+    assert "window.performance.now()" in script
+    assert "window.clearInterval" in script
+    assert "pagehide" in script
+
+    css = (REPO_ROOT / "src/diary/static/css/app.css").read_text(encoding="utf-8")
+    rule = re.search(r"\.voice-recording\s*\{[^}]*\}", css)
+    assert rule is not None
+    assert "font-variant-numeric: tabular-nums" in rule.group(0)
+
+
 def test_app_serves_local_static_assets(api_client: TestClient) -> None:
     for url_path in (
         "/static/css/app.css",

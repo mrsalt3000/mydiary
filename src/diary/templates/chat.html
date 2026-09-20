@@ -45,8 +45,13 @@
         <label for="voice-file" class="voice-button voice-button--file">Загрузить файл</label>
         <input id="voice-file" class="visually-hidden" type="file"
                accept="{{ audio_accept }}">
+        {# Recording indicator (Task 07) with the live duration (T14): the
+           ticking value lives in an aria-hidden child so the role="status"
+           region still announces "Идёт запись…" once and stays silent
+           afterwards. #}
         <span id="voice-recording" class="voice-recording" role="status" hidden>
           Идёт запись…
+          <span id="voice-elapsed" aria-hidden="true"></span>
         </span>
       </div>
       <p id="voice-status" class="voice-status" role="status" hidden></p>
