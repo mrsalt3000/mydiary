@@ -19,14 +19,12 @@
      action. #}
 {% extends "base.html" %}
 {% block title %}Wellbeing-рефлексия — Local Diary{% endblock %}
+{% block page_title %}Wellbeing-рефлексия{% endblock %}
+{% block page_subtitle %}
+  <span class="breadcrumbs__subtitle">{{ export.filename }}</span>
+{% endblock %}
 {% block content %}
 <main class="exports-page">
-  <p class="page-nav">
-    <a href="/exports">← К выгрузкам</a>
-    <a href="/privacy">Приватность</a>
-  </p>
-  <h1 class="page-title">Wellbeing-рефлексия</h1>
-
   <p class="exports-page__note">
     Выгрузка <span class="export-list__name">{{ export.filename }}</span>
     (неделя {{ export.monday.strftime('%d.%m.%Y') }} —

@@ -15,15 +15,12 @@
 {% extends "base.html" %}
 {% from "_diary_action.html" import diary_action %}
 {% block title %}Выгрузки — Local Diary{% endblock %}
+{% block page_title %}Недельные выгрузки{% endblock %}
+{% block page_subtitle %}
+  <span class="breadcrumbs__subtitle">Оригиналы недель, ревизии и производные слои</span>
+{% endblock %}
 {% block content %}
 <main class="exports-page">
-  <nav class="page-nav">
-    <a href="/">← Дневник</a>
-    <a href="/processing">Обработка</a>
-    <a href="/privacy">Приватность</a>
-  </nav>
-  <h1 class="page-title">Недельные выгрузки</h1>
-
   <section class="export-week-form-block" aria-label="Выгрузить неделю">
     <form class="export-week-form" method="post">
       <label for="export-week-sunday">Неделя для выгрузки — дата воскресенья

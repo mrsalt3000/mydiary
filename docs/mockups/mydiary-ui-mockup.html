@@ -1,0 +1,329 @@
+<!doctype html>
+<!--
+  Reference UI mockup for the redesign (tasks T16a/T16b/T16c).
+
+  Copied verbatim into the repository on 2026-09-20 from the external file
+  given by the user (downloads/mydiary-ui-mockup.html on the Windows host), so
+  the acceptance compares the implementation against this artefact instead of
+  against anyone's memory of it. Only this provenance comment was added.
+
+  It is a clickable skeleton with ~25 design tokens, two themes driven by
+  ``data-theme``, a toast and the responsive rules (context panel hidden at
+  <=1080px, sidebar hidden at <=700px). It contains no application logic and is
+  never served by the application: the shell lives in
+  ``src/diary/templates/base.html``, the tokens in
+  ``src/diary/static/css/app.css``.
+
+  Implemented stage: T16a — tokens, manual theme (system default), three-column
+  shell and sidebar.
+-->
+<html lang="ru" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MyDiary — UI Mockup</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f7f8;
+      --surface: #ffffff;
+      --surface-muted: #f1f1f4;
+      --surface-hover: #ececf1;
+      --text: #1b1b22;
+      --text-muted: #70707c;
+      --border: #e2e2e8;
+      --border-strong: #cfcfd8;
+      --accent: #6257d9;
+      --accent-hover: #5247c5;
+      --accent-soft: #eeecff;
+      --success: #1d8a5c;
+      --success-soft: #e8f7ef;
+      --warning: #ae6a12;
+      --warning-soft: #fff4e2;
+      --danger: #bd3a4b;
+      --danger-soft: #fff0f2;
+      --shadow: 0 12px 30px rgba(20, 20, 35, .06);
+      --radius-sm: 8px;
+      --radius-md: 12px;
+      --radius-lg: 18px;
+      --sidebar-w: 244px;
+      --context-w: 332px;
+    }
+
+    [data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #111116;
+      --surface: #19191f;
+      --surface-muted: #222229;
+      --surface-hover: #2a2a33;
+      --text: #f2f2f6;
+      --text-muted: #a4a4b0;
+      --border: #303039;
+      --border-strong: #464653;
+      --accent: #9b93ff;
+      --accent-hover: #b3adff;
+      --accent-soft: #292648;
+      --success: #62d39d;
+      --success-soft: #173729;
+      --warning: #ffc470;
+      --warning-soft: #3e2d17;
+      --danger: #ff8997;
+      --danger-soft: #442128;
+      --shadow: 0 14px 36px rgba(0, 0, 0, .25);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      transition: background .2s ease, color .2s ease;
+    }
+    button, input, textarea { font: inherit; }
+    button { cursor: pointer; }
+    svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+
+    .app-shell { display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--context-w); min-height: 100vh; }
+    .sidebar, .context-panel { background: var(--surface); }
+    .sidebar { border-right: 1px solid var(--border); padding: 20px 12px; display: flex; flex-direction: column; gap: 24px; }
+    .brand { display: flex; align-items: center; gap: 10px; padding: 0 10px; font-size: 16px; font-weight: 720; letter-spacing: -.02em; }
+    .brand-mark { width: 28px; height: 28px; display: grid; place-items: center; color: white; background: var(--accent); border-radius: 9px; }
+    .brand-mark svg { width: 16px; height: 16px; }
+    .nav { display: grid; gap: 4px; }
+    .nav-label { padding: 0 10px 6px; color: var(--text-muted); font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
+    .nav-item { width: 100%; display: flex; align-items: center; gap: 11px; border: 0; border-radius: var(--radius-sm); padding: 10px; color: var(--text-muted); background: transparent; text-align: left; }
+    .nav-item:hover { color: var(--text); background: var(--surface-hover); }
+    .nav-item.active { color: var(--accent); background: var(--accent-soft); font-weight: 650; }
+    .nav-item .count { margin-left: auto; color: var(--text-muted); font-size: 12px; }
+    .sidebar-bottom { margin-top: auto; display: grid; gap: 12px; }
+    .local-badge { display: flex; gap: 9px; align-items: flex-start; margin: 0 4px; padding: 11px; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--text-muted); font-size: 12px; }
+    .local-badge svg { flex: none; width: 17px; color: var(--success); }
+    .theme-toggle { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 9px 10px; border: 0; border-radius: var(--radius-sm); color: var(--text-muted); background: transparent; }
+    .theme-toggle:hover { background: var(--surface-hover); color: var(--text); }
+
+    .main { min-width: 0; display: flex; flex-direction: column; }
+    .topbar { height: 74px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 30px; border-bottom: 1px solid var(--border); }
+    .breadcrumbs { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+    .breadcrumbs h1 { margin: 0; font-size: 18px; letter-spacing: -.025em; }
+    .breadcrumbs span { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .topbar-actions { display: flex; align-items: center; gap: 8px; }
+    .icon-button, .button { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); transition: .15s ease; }
+    .icon-button { width: 36px; height: 36px; display: grid; place-items: center; }
+    .icon-button:hover, .button:hover { border-color: var(--border-strong); background: var(--surface-hover); }
+    .button { min-height: 36px; display: inline-flex; gap: 8px; align-items: center; justify-content: center; padding: 0 12px; font-weight: 600; }
+    .button.primary { color: white; background: var(--accent); border-color: var(--accent); }
+    .button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+    .button.ghost { background: transparent; }
+
+    .journal { width: min(760px, 100%); margin: 0 auto; padding: 30px 28px 136px; }
+    .day-header { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin: 4px 0 28px; }
+    .day-header h2 { margin: 0; font-size: 26px; letter-spacing: -.04em; }
+    .day-header p { margin: 3px 0 0; color: var(--text-muted); }
+    .entry-list { display: grid; gap: 14px; }
+    .entry { padding: 18px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: 0 1px 0 rgba(0,0,0,.01); }
+    .entry-meta { display: flex; align-items: center; gap: 9px; margin-bottom: 10px; color: var(--text-muted); font-size: 12px; }
+    .entry-meta time { margin-left: auto; }
+    .type-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+    .type-dot.voice { background: var(--success); }
+    .entry p { margin: 0; font-size: 14px; line-height: 1.66; white-space: pre-line; }
+    .entry-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 15px; padding-top: 13px; border-top: 1px solid var(--border); }
+    .version { color: var(--text-muted); font-size: 12px; }
+    .small-action { display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--accent); padding: 3px 0; font-size: 12px; font-weight: 650; }
+    .small-action:hover { text-decoration: underline; }
+    .small-action svg { width: 14px; height: 14px; }
+    .audio-card { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; }
+    .play { width: 34px; height: 34px; display: grid; place-items: center; border: 0; border-radius: 50%; color: white; background: var(--success); }
+    .play svg { width: 15px; fill: currentColor; stroke: none; }
+    .waveform { height: 30px; display: flex; align-items: center; gap: 3px; overflow: hidden; }
+    .waveform i { width: 3px; border-radius: 99px; background: var(--success); opacity: .72; }
+    .audio-duration { color: var(--text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+    .transcript { margin-top: 15px !important; padding: 12px; border-radius: var(--radius-sm); background: var(--surface-muted); color: var(--text-muted); font-size: 13px !important; }
+
+    .composer-wrap { position: fixed; z-index: 2; bottom: 0; left: var(--sidebar-w); right: var(--context-w); padding: 16px 28px 22px; background: linear-gradient(transparent, var(--bg) 30%); }
+    .composer { width: min(760px, 100%); margin: 0 auto; padding: 9px; display: flex; align-items: end; gap: 8px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 14px; box-shadow: var(--shadow); }
+    .composer textarea { width: 100%; min-height: 38px; max-height: 140px; resize: none; border: 0; outline: 0; padding: 9px 4px; color: var(--text); background: transparent; }
+    .composer textarea::placeholder { color: var(--text-muted); }
+    .composer .icon-button { flex: none; width: 36px; height: 36px; border: 0; color: var(--text-muted); background: transparent; }
+    .composer .icon-button:hover { color: var(--text); background: var(--surface-hover); }
+    .composer .send { flex: none; width: 36px; height: 36px; display: grid; place-items: center; border: 0; border-radius: 9px; color: white; background: var(--accent); }
+    .composer .send:disabled { opacity: .42; cursor: default; }
+
+    .context-panel { border-left: 1px solid var(--border); padding: 24px 18px; overflow: auto; }
+    .context-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
+    .context-head h2 { margin: 0; font-size: 15px; letter-spacing: -.015em; }
+    .context-head button { border: 0; color: var(--text-muted); background: transparent; }
+    .process-card { padding: 15px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); }
+    .process-title { margin: 0 0 3px; font-size: 13px; font-weight: 700; }
+    .process-subtitle { margin: 0 0 15px; color: var(--text-muted); font-size: 12px; }
+    .pipeline { display: grid; gap: 0; }
+    .pipeline-step { position: relative; display: grid; grid-template-columns: 26px 1fr; column-gap: 10px; min-height: 60px; }
+    .pipeline-step:not(:last-child)::before { content: ""; position: absolute; top: 27px; left: 12px; width: 1px; height: calc(100% - 27px); background: var(--border-strong); }
+    .step-icon { position: relative; z-index: 1; width: 25px; height: 25px; display: grid; place-items: center; border: 1px solid var(--border-strong); border-radius: 50%; color: var(--text-muted); background: var(--surface); }
+    .step-icon.done { color: var(--success); border-color: var(--success); background: var(--success-soft); }
+    .step-icon.pending { color: var(--warning); border-color: var(--warning); background: var(--warning-soft); }
+    .step-icon svg { width: 13px; height: 13px; }
+    .step-content { padding: 2px 0 12px; }
+    .step-title { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 650; }
+    .step-detail { margin-top: 3px; color: var(--text-muted); font-size: 11px; }
+    .chip { display: inline-flex; align-items: center; width: fit-content; margin-top: 6px; padding: 2px 6px; border-radius: 99px; color: var(--text-muted); background: var(--surface-muted); font-size: 10px; font-weight: 600; }
+    .context-actions { display: grid; gap: 8px; margin-top: 14px; }
+    .context-actions .button { justify-content: flex-start; padding-left: 10px; font-size: 12px; }
+    .privacy-note { margin-top: 18px; padding: 13px; border-radius: var(--radius-md); background: var(--accent-soft); color: var(--text-muted); font-size: 12px; }
+    .privacy-note strong { display: block; margin-bottom: 3px; color: var(--text); font-size: 12px; }
+
+    .toast { position: fixed; z-index: 10; top: 18px; left: 50%; transform: translateX(-50%) translateY(-18px); opacity: 0; pointer-events: none; padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); background: var(--surface); box-shadow: var(--shadow); transition: .2s ease; }
+    .toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+
+    @media (max-width: 1080px) { .app-shell { grid-template-columns: var(--sidebar-w) minmax(0, 1fr); } .context-panel { display: none; } .composer-wrap { right: 0; } }
+    @media (max-width: 700px) { :root { --sidebar-w: 0px; } .sidebar { display: none; } .topbar { height: 62px; padding: 0 16px; } .breadcrumbs span { display: none; } .journal { padding: 22px 16px 120px; } .day-header h2 { font-size: 22px; } .composer-wrap { padding: 10px 12px 14px; } .entry { padding: 15px; } .hide-mobile { display: none; } }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Основная навигация">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15.5A2.5 2.5 0 0 0 17.5 16H4z"/><path d="M4 5.5V21h13.5A2.5 2.5 0 0 1 20 18.5"/></svg></span>
+        MyDiary
+      </div>
+
+      <nav class="nav">
+        <span class="nav-label">Дневник</span>
+        <button class="nav-item active"><svg viewBox="0 0 24 24"><path d="M3 12h18M12 3v18"/></svg>Сегодня</button>
+        <button class="nav-item"><svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M7 15v-3m5 3V8m5 7v-5"/></svg>Хронология</button>
+        <button class="nav-item"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>Недельные выгрузки<span class="count">12</span></button>
+        <span class="nav-label" style="margin-top:14px">Система</span>
+        <button class="nav-item"><svg viewBox="0 0 24 24"><path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48 2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48 2.83-2.83"/><circle cx="12" cy="12" r="4"/></svg>Обработка<span class="count">1</span></button>
+        <button class="nav-item"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Приватность</button>
+        <button class="nav-item"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.1 2.1-.06-.06A1.7 1.7 0 0 0 15.76 18a1.7 1.7 0 0 0-1.06 1.56v.09h-3v-.09A1.7 1.7 0 0 0 10.64 18a1.7 1.7 0 0 0-1.88.34l-.06.06-2.1-2.1.06-.06A1.7 1.7 0 0 0 7 14.36a1.7 1.7 0 0 0-1.56-1.06h-.09v-3h.09A1.7 1.7 0 0 0 7 9.24a1.7 1.7 0 0 0-.34-1.88L6.6 7.3l2.1-2.1.06.06A1.7 1.7 0 0 0 10.64 5a1.7 1.7 0 0 0 1.06-1.56v-.09h3v.09A1.7 1.7 0 0 0 15.76 5a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.1 2.1-.06.06A1.7 1.7 0 0 0 19.4 8.64a1.7 1.7 0 0 0 1.56 1.06h.09v3h-.09A1.7 1.7 0 0 0 19.4 15Z"/></svg>Настройки</button>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <div class="local-badge"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg><span><strong style="color:var(--text)">Local-first</strong><br>Данные остаются на вашем устройстве</span></div>
+        <button class="theme-toggle" id="themeToggle"><span style="display:flex;align-items:center;gap:11px"><svg viewBox="0 0 24 24" id="themeIcon"><path d="M12 3a6.7 6.7 0 1 0 9 9A9 9 0 1 1 12 3Z"/></svg>Тема</span><span id="themeName">Светлая</span></button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="breadcrumbs"><h1>Сегодня</h1><span>Личный дневник</span></div>
+        <div class="topbar-actions">
+          <button class="icon-button hide-mobile" title="Поиск"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m20 20-4.2-4.2"/></svg></button>
+          <button class="button ghost hide-mobile" id="exportButton"><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>Экспорт недели</button>
+        </div>
+      </header>
+
+      <section class="journal" aria-label="Записи за сегодня">
+        <div class="day-header">
+          <div><h2>Воскресенье, 20 сентября</h2><p>3 записи · 1 голосовое сообщение</p></div>
+          <button class="icon-button" title="Выбрать дату"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg></button>
+        </div>
+
+        <div class="entry-list">
+          <article class="entry">
+            <div class="entry-meta"><span class="type-dot"></span><span>Текстовая запись</span><time>09:14</time></div>
+            <p>Спокойное воскресенье. Утром разобрал накопившиеся заметки по проекту и наконец сформулировал, что хочется упростить в пайплайне. Хорошее ощущение ясности после недели.</p>
+            <div class="entry-footer"><span class="version">Оригинал · локально</span><button class="small-action"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg>Изменить</button></div>
+          </article>
+
+          <article class="entry">
+            <div class="entry-meta"><span class="type-dot voice"></span><span>Голосовое сообщение</span><time>12:37</time></div>
+            <div class="audio-card">
+              <button class="play" title="Воспроизвести"><svg viewBox="0 0 24 24"><path d="m9 6 9 6-9 6Z"/></svg></button>
+              <div class="waveform" aria-label="Длительность голосового сообщения">
+                <i style="height:30%"></i><i style="height:58%"></i><i style="height:86%"></i><i style="height:45%"></i><i style="height:70%"></i><i style="height:96%"></i><i style="height:62%"></i><i style="height:32%"></i><i style="height:76%"></i><i style="height:52%"></i><i style="height:90%"></i><i style="height:40%"></i><i style="height:68%"></i><i style="height:94%"></i><i style="height:52%"></i><i style="height:30%"></i><i style="height:74%"></i><i style="height:48%"></i><i style="height:82%"></i><i style="height:38%"></i>
+              </div>
+              <span class="audio-duration">01:24</span>
+            </div>
+            <p class="transcript">Расшифровка ещё не запускалась. Аудиофайл хранится только локально.</p>
+            <div class="entry-footer"><span class="version">audio/2026-09-20/001.webm</span><button class="small-action" id="transcribeButton"><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>Расшифровать</button></div>
+          </article>
+
+          <article class="entry">
+            <div class="entry-meta"><span class="type-dot"></span><span>Текстовая запись</span><time>18:42</time></div>
+            <p>Сделал прогулку перед ужином. Хочу оставить в следующей неделе больше пространства без задач — это заметно помогает не превращать план в бесконечный список.</p>
+            <div class="entry-footer"><span class="version">Оригинал · локально</span><button class="small-action"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg>Изменить</button></div>
+          </article>
+        </div>
+      </section>
+
+      <div class="composer-wrap">
+        <form class="composer" id="entryForm">
+          <button type="button" class="icon-button" title="Прикрепить файл"><svg viewBox="0 0 24 24"><path d="m21.4 11.6-8.8 8.8a6 6 0 0 1-8.5-8.5l8.1-8.1a4 4 0 0 1 5.7 5.7l-8.1 8.1a2 2 0 1 1-2.8-2.8l7.4-7.4"/></svg></button>
+          <textarea id="entryInput" rows="1" placeholder="Запишите мысль…" aria-label="Новая запись"></textarea>
+          <button type="button" class="icon-button" id="recordButton" title="Записать голосовое сообщение"><svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v4m-4 0h8"/></svg></button>
+          <button class="send" id="sendButton" type="submit" disabled title="Сохранить запись"><svg viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg></button>
+        </form>
+      </div>
+    </main>
+
+    <aside class="context-panel" aria-label="Контекст обработки">
+      <div class="context-head"><h2>Обработка записи</h2><button title="Закрыть"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+      <section class="process-card">
+        <p class="process-title">Голосовое · 12:37</p>
+        <p class="process-subtitle">Происхождение и статусы конвейера</p>
+        <div class="pipeline">
+          <div class="pipeline-step"><span class="step-icon done"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></span><div class="step-content"><div class="step-title">Оригинал</div><div class="step-detail">audio/2026-09-20/001.webm</div><span class="chip">локальное хранилище</span></div></div>
+          <div class="pipeline-step"><span class="step-icon pending"><svg viewBox="0 0 24 24"><path d="M12 8v4l2.5 2.5"/><circle cx="12" cy="12" r="9"/></svg></span><div class="step-content"><div class="step-title">Транскрипция</div><div class="step-detail">Ожидает ручного запуска</div><span class="chip">Whisper · local</span></div></div>
+          <div class="pipeline-step"><span class="step-icon"><svg viewBox="0 0 24 24"><path d="M12 8v4l2.5 2.5"/><circle cx="12" cy="12" r="9"/></svg></span><div class="step-content"><div class="step-title">Нормализация</div><div class="step-detail">Недоступна до транскрипции</div><span class="chip">llama3.2 · local</span></div></div>
+          <div class="pipeline-step"><span class="step-icon"><svg viewBox="0 0 24 24"><path d="M12 8v4l2.5 2.5"/><circle cx="12" cy="12" r="9"/></svg></span><div class="step-content"><div class="step-title">Саммари и wellbeing</div><div class="step-detail">Недоступны до нормализации</div><span class="chip">настроено отдельно</span></div></div>
+        </div>
+        <div class="context-actions"><button class="button" id="provenanceButton"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 2"/></svg>Показать происхождение</button><button class="button"><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>Экспортировать запись</button></div>
+      </section>
+      <div class="privacy-note"><strong>Деликатная рефлексия</strong>Wellbeing-слой не ставит диагнозов и не заменяет профессиональную помощь.</div>
+    </aside>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    const root = document.documentElement;
+    const toggle = document.getElementById('themeToggle');
+    const themeName = document.getElementById('themeName');
+    const input = document.getElementById('entryInput');
+    const send = document.getElementById('sendButton');
+    const toast = document.getElementById('toast');
+    let toastTimer;
+
+    function notify(message) {
+      toast.textContent = message;
+      toast.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove('show'), 2600);
+    }
+
+    function updateComposer() {
+      input.style.height = 'auto';
+      input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+      send.disabled = !input.value.trim();
+    }
+
+    toggle.addEventListener('click', () => {
+      const dark = root.dataset.theme !== 'dark';
+      root.dataset.theme = dark ? 'dark' : 'light';
+      themeName.textContent = dark ? 'Тёмная' : 'Светлая';
+      localStorage.setItem('mydiary-theme', root.dataset.theme);
+    });
+
+    input.addEventListener('input', updateComposer);
+    document.getElementById('entryForm').addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (!input.value.trim()) return;
+      notify('Макет: запись подготовлена к сохранению через POST /api/v1/entries.');
+      input.value = '';
+      updateComposer();
+    });
+    document.getElementById('recordButton').addEventListener('click', () => notify('Макет: здесь запускается запись голоса и загрузка аудио.'));
+    document.getElementById('transcribeButton').addEventListener('click', () => notify('Макет: задача транскрипции добавлена в durable-очередь.'));
+    document.getElementById('exportButton').addEventListener('click', () => notify('Макет: создаётся недельная TXT-выгрузка.'));
+    document.getElementById('provenanceButton').addEventListener('click', () => notify('Макет: откроется детальная цепочка происхождения данных.'));
+
+    const storedTheme = localStorage.getItem('mydiary-theme');
+    if (storedTheme) {
+      root.dataset.theme = storedTheme;
+      themeName.textContent = storedTheme === 'dark' ? 'Тёмная' : 'Светлая';
+    }
+  </script>
+</body>
+</html>

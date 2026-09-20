@@ -1,19 +1,136 @@
 <!DOCTYPE html>
-{# Base layout (Task 06). Everything is served from local static files: no
-   CDNs and no external requests — the diary page never talks to the internet
-   (docs/privacy-and-safety.md §3). Jinja2 autoescape is on for .html files. #}
+{# Base layout (Task 06) with the T16a shell: sidebar (--sidebar-w) · page ·
+   context panel (--context-w). Everything is served from local static files:
+   no CDNs and no external requests — the diary page never talks to the
+   internet (docs/privacy-and-safety.md §3). Jinja2 autoescape is on for .html
+   files.
+
+   The layout, the token names and the breakpoints follow the UI reference
+   mockup kept at ``docs/mockups/mydiary-ui-mockup.html`` (task T16a); that
+   file is the artefact the acceptance compares against.
+
+   Navigation carries no dead entries: every link below points at a route that
+   exists. Mockup items without a page yet ("Хронология", "Настройки") are not
+   rendered at all, the counters come from the database (the ``nav`` context
+   computed in ``api/routes/pages.py``) and the mockup's search button is
+   omitted because there is no search endpoint. ``nav_current`` (a plain
+   string) picks the highlighted item and is passed by every page — including
+   the database-free privacy page, which passes no ``nav`` and therefore
+   shows no counters.
+
+   The context panel is rendered only when a page sets ``context_panel = true``
+   *and* fills the ``context`` block (Jinja cannot tell "empty block" from
+   "block not overridden" without rendering it twice, so the page declares its
+   intent). No page does today — the processing chain is task T16c — so the
+   shell stays two-column instead of reserving an empty 332px column; the
+   third column, its width token and its breakpoints are in place.
+#}
 <html lang="ru">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>{% block title %}Local Diary{% endblock %}</title>
+  {# Theme (T16a) — inline and synchronous, so the stored choice is applied
+     before the first paint and a dark page never flashes light. Only the
+     theme name ever goes into localStorage: no diary content, no request.
+     With no stored choice nothing is written, and the CSS
+     ``prefers-color-scheme`` block keeps the system setting in charge (that
+     is also the no-JS behaviour). The visible state label and the toggle
+     itself are wired in static/js/app.js. #}
+  <script>
+    (function () {
+      try {
+        var stored = window.localStorage.getItem("mydiary-theme");
+        if (stored === "dark" || stored === "light") {
+          document.documentElement.setAttribute("data-theme", stored);
+        }
+      } catch (error) {
+        /* Storage unavailable (e.g. blocked): keep the system setting. */
+      }
+    })();
+  </script>
   <link rel="stylesheet" href="/static/css/app.css">
   <script src="/static/vendor/htmx.min.js" defer></script>
   <script src="/static/js/app.js" defer></script>
 </head>
 <body>
-  {% block content %}{% endblock %}
+  <div class="app-shell{% if context_panel %} app-shell--with-context{% endif %}">
+    <aside class="sidebar" aria-label="Основная навигация">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15.5A2.5 2.5 0 0 0 17.5 16H4z"/><path d="M4 5.5V21h13.5A2.5 2.5 0 0 1 20 18.5"/></svg></span>
+        Local Diary
+      </div>
+
+      <nav class="nav" aria-label="Разделы">
+        <span class="nav-label">Дневник</span>
+        <a class="nav-item{% if nav_current == 'chat' %} nav-item--active{% endif %}"
+           href="/"{% if nav_current == 'chat' %} aria-current="page"{% endif %}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+          Дневник
+        </a>
+        <a class="nav-item{% if nav_current == 'exports' %} nav-item--active{% endif %}"
+           href="/exports"{% if nav_current == 'exports' %} aria-current="page"{% endif %}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+          Недельные выгрузки
+          {%- if nav %}
+          <span class="count"><span class="visually-hidden">всего: </span>{{ nav.exports_count }}</span>
+          {%- endif %}
+        </a>
+
+        <span class="nav-label">Система</span>
+        <a class="nav-item{% if nav_current == 'processing' %} nav-item--active{% endif %}"
+           href="/processing"{% if nav_current == 'processing' %} aria-current="page"{% endif %}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v4l2.5 2.5"/><circle cx="12" cy="12" r="9"/></svg>
+          Обработка
+          {%- if nav %}
+          <span class="count"><span class="visually-hidden">задач в работе: </span>{{ nav.active_jobs }}</span>
+          {%- endif %}
+        </a>
+        <a class="nav-item{% if nav_current == 'privacy' %} nav-item--active{% endif %}"
+           href="/privacy"{% if nav_current == 'privacy' %} aria-current="page"{% endif %}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+          Приватность
+        </a>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <p class="local-badge">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+          <span><strong>Local-first</strong>Данные остаются на вашем устройстве</span>
+        </p>
+        <button type="button" class="theme-toggle" data-action="toggle-theme">
+          <span class="theme-toggle__label">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6.7 6.7 0 1 0 9 9A9 9 0 1 1 12 3Z"/></svg>
+            Тема
+          </span>
+          <span class="theme-toggle__state" data-role="theme-name" aria-live="polite">Светлая</span>
+        </button>
+      </div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <div class="breadcrumbs">
+          <h1>{% block page_title %}{% endblock %}</h1>
+          {% block page_subtitle %}{% endblock %}
+        </div>
+        <button type="button" class="theme-toggle" data-action="toggle-theme">
+          <span class="theme-toggle__label">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6.7 6.7 0 1 0 9 9A9 9 0 1 1 12 3Z"/></svg>
+            Тема
+          </span>
+          <span class="theme-toggle__state" data-role="theme-name" aria-live="polite">Светлая</span>
+        </button>
+      </header>
+      {% block content %}{% endblock %}
+    </div>
+    {% if context_panel %}
+    <aside class="context-panel" aria-label="Контекст записи">
+      {% block context %}{% endblock %}
+    </aside>
+    {% endif %}
+  </div>
   {% block scripts %}{% endblock %}
 </body>
 </html>

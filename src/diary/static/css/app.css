@@ -1,8 +1,32 @@
-/* Local Diary — minimal local stylesheet (Task 06).
+/* Local Diary — minimal local stylesheet (Task 06, redesign T16a).
 
    No external fonts, icons or network resources: the diary page must not make
-   any request to the internet (docs/privacy-and-safety.md). The palette uses
-   CSS variables so the page stays readable in light and dark mode.
+   any request to the internet (docs/privacy-and-safety.md). The system font
+   stack is used as-is (the mockup additionally prefers "Inter", which is not
+   bundled — no web font is ever fetched).
+
+   Design tokens
+   =============
+   The palette, radii, column widths and the card shadow come from the UI
+   reference mockup kept at ``docs/mockups/mydiary-ui-mockup.html`` (task
+   T16a). That set is the *only* token system: the previous ``--color-*``
+   names were migrated into these names, not aliased next to them, so there
+   are never two competing sets.
+
+   Theme
+   =====
+   ``data-theme`` on <html> is written by the inline script in ``base.html``
+   *before the first paint*, so a dark page never flashes light:
+   - no attribute / nothing stored in localStorage → the system setting wins
+     (the ``prefers-color-scheme`` block below, which also keeps the no-JS
+     case working exactly as before);
+   - ``data-theme="dark"`` / ``data-theme="light"`` → the user's explicit
+     choice, remembered in localStorage.
+
+   The two dark blocks below carry the *same* declarations on purpose (CSS has
+   no way to share one block between a media query and an attribute selector);
+   ``tests/integration/test_ui_shell.py`` compares them, so they cannot drift
+   apart.
 
    Names prefixed with htmx-* belong to the htmx behaviour contract:
    - elements with .htmx-indicator are hidden until their request is in flight;
@@ -10,28 +34,101 @@
 */
 
 :root {
-  --color-bg: #f7f5f0;
-  --color-surface: #ffffff;
-  --color-text: #1f2430;
-  --color-text-muted: #5b6472;
-  --color-accent: #3b5bdb;
-  --color-accent-contrast: #ffffff;
-  --color-border: #d8d5cc;
-  --color-error: #b3261e;
-  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.06);
+  color-scheme: light;
+
+  /* surfaces and text */
+  --bg: #f7f7f8;
+  --surface: #ffffff;
+  --surface-muted: #f1f1f4;
+  --surface-hover: #ececf1;
+  --text: #1b1b22;
+  --text-muted: #70707c;
+
+  /* borders */
+  --border: #e2e2e8;
+  --border-strong: #cfcfd8;
+
+  /* accent */
+  --accent: #6257d9;
+  --accent-hover: #5247c5;
+  --accent-soft: #eeecff;
+  /* Text/icon colour on an --accent fill. The mockup hardcodes white; the
+     dark theme below uses dark ink instead, because white on its light
+     accent (#9b93ff) would drop to ~2.6:1 contrast — worse than the palette
+     it replaces. */
+  --accent-contrast: #ffffff;
+
+  /* semantic states */
+  --success: #1d8a5c;
+  --success-soft: #e8f7ef;
+  --warning: #ae6a12;
+  --warning-soft: #fff4e2;
+  --danger: #bd3a4b;
+  --danger-soft: #fff0f2;
+  /* Text/icon colour on a --danger fill (the "stop recording" button): the
+     dark danger tone is light, so white would drop to ~2.3:1 there. */
+  --danger-contrast: #ffffff;
+
+  /* elevation, radii, layout columns */
+  --shadow: 0 12px 30px rgba(20, 20, 35, 0.06);
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --sidebar-w: 244px;
+  --context-w: 332px;
 }
 
+/* System preference (no explicit user choice, and the no-JS fallback). */
 @media (prefers-color-scheme: dark) {
-  :root {
-    --color-bg: #16181d;
-    --color-surface: #1f222a;
-    --color-text: #e8eaf0;
-    --color-text-muted: #a6adbb;
-    --color-accent: #7c9aff;
-    --color-accent-contrast: #0f1220;
-    --color-border: #343846;
-    --color-error: #ff8a80;
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #111116;
+    --surface: #19191f;
+    --surface-muted: #222229;
+    --surface-hover: #2a2a33;
+    --text: #f2f2f6;
+    --text-muted: #a4a4b0;
+    --border: #303039;
+    --border-strong: #464653;
+    --accent: #9b93ff;
+    --accent-hover: #b3adff;
+    --accent-soft: #292648;
+    --accent-contrast: #14131c;
+    --success: #62d39d;
+    --success-soft: #173729;
+    --warning: #ffc470;
+    --warning-soft: #3e2d17;
+    --danger: #ff8997;
+    --danger-soft: #442128;
+    --danger-contrast: #14131c;
+    --shadow: 0 14px 36px rgba(0, 0, 0, 0.25);
   }
+}
+
+/* Explicit user choice (kept in sync with the block above — see the guard in
+   tests/integration/test_ui_shell.py). */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111116;
+  --surface: #19191f;
+  --surface-muted: #222229;
+  --surface-hover: #2a2a33;
+  --text: #f2f2f6;
+  --text-muted: #a4a4b0;
+  --border: #303039;
+  --border-strong: #464653;
+  --accent: #9b93ff;
+  --accent-hover: #b3adff;
+  --accent-soft: #292648;
+  --accent-contrast: #14131c;
+  --success: #62d39d;
+  --success-soft: #173729;
+  --warning: #ffc470;
+  --warning-soft: #3e2d17;
+  --danger: #ff8997;
+  --danger-soft: #442128;
+  --danger-contrast: #14131c;
+  --shadow: 0 14px 36px rgba(0, 0, 0, 0.25);
 }
 
 * {
@@ -45,22 +142,317 @@ body {
 }
 
 body {
-  background: var(--color-bg);
-  color: var(--color-text);
+  background: var(--bg);
+  color: var(--text);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
     Arial, sans-serif;
   line-height: 1.5;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+/* --------------------------- application shell (T16a) ------------------- */
+
+/* Three columns: sidebar (--sidebar-w) · page · context panel (--context-w).
+   The mockup always reserves the third column; here it is rendered only by a
+   page that actually has context to show (the panel itself is task T16c), so
+   the shell carries a modifier instead of leaving a 332px hole on every page.
+   Widths and breakpoints follow docs/mockups/mydiary-ui-mockup.html. */
+
+.app-shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.app-shell--with-context {
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--context-w);
+}
+
+.sidebar,
+.context-panel {
+  background: var(--surface);
+}
+
+.sidebar {
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  padding: 1.25rem 0.75rem;
+}
+
+/* Inline, hand-written icons only (no icon font, no external request). */
+.nav-item svg,
+.theme-toggle svg,
+.local-badge svg {
+  fill: none;
+  height: 18px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+  width: 18px;
+}
+
+.brand {
+  align-items: center;
+  display: flex;
+  font-size: 1rem;
+  font-weight: 720;
+  gap: 0.6rem;
+  letter-spacing: -0.02em;
+  padding: 0 0.6rem;
+}
+
+.brand-mark {
+  align-items: center;
+  background: var(--accent);
+  border-radius: 9px;
+  color: var(--accent-contrast);
+  display: grid;
+  flex: none;
+  height: 28px;
+  place-items: center;
+  width: 28px;
+}
+
+.brand-mark svg {
+  height: 16px;
+  width: 16px;
+}
+
+.nav {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.nav-label {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  padding: 0 0.6rem 0.35rem;
+  text-transform: uppercase;
+}
+
+.nav-label:not(:first-child) {
+  margin-top: 0.85rem;
+}
+
+.nav-item {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  display: flex;
+  font: inherit;
+  gap: 0.7rem;
+  padding: 0.6rem;
+  text-align: left;
+  text-decoration: none;
+  width: 100%;
+}
+
+.nav-item:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.nav-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.nav-item--active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 650;
+}
+
+.nav-item .count {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-left: auto;
+}
+
+.nav-item--active .count {
+  color: inherit;
+}
+
+.sidebar-bottom {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: auto;
+}
+
+.local-badge {
+  align-items: flex-start;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  display: flex;
+  font-size: 0.75rem;
+  gap: 0.55rem;
+  margin: 0 0.25rem;
+  padding: 0.7rem;
+}
+
+.local-badge svg {
+  color: var(--success);
+  flex: none;
+  height: 17px;
+}
+
+.local-badge strong {
+  color: var(--text);
+  display: block;
+}
+
+.theme-toggle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  font: inherit;
+  justify-content: space-between;
+  padding: 0.55rem 0.6rem;
+  width: 100%;
+}
+
+.theme-toggle:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.theme-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.theme-toggle__label {
+  align-items: center;
+  display: flex;
+  gap: 0.7rem;
+}
+
+.theme-toggle__state {
+  font-size: 0.8rem;
+}
+
+/* The mobile topbar copy of the toggle: the mockup hides the whole sidebar
+   at <=700px, which would make the theme switch unreachable. Keeping a
+   second, identically wired control in the topbar is the access-equivalent
+   of the mockup layout. */
+.topbar .theme-toggle {
+  display: none;
+  width: auto;
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.topbar {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 1rem;
+  height: 74px;
+  justify-content: space-between;
+  padding: 0 1.9rem;
+}
+
+.breadcrumbs {
+  align-items: baseline;
+  display: flex;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.breadcrumbs h1 {
+  font-size: 1.125rem;
+  letter-spacing: -0.025em;
+  margin: 0;
+}
+
+.breadcrumbs__subtitle {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-panel {
+  border-left: 1px solid var(--border);
+  overflow: auto;
+  padding: 1.5rem 1.1rem;
+}
+
+.context-panel__head {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 1.4rem;
+}
+
+.context-panel__head h2 {
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+@media (max-width: 1080px) {
+  .app-shell,
+  .app-shell--with-context {
+    grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  }
+
+  .context-panel {
+    display: none;
+  }
+}
+
+@media (max-width: 700px) {
+  :root {
+    --sidebar-w: 0px;
+  }
+
+  .sidebar {
+    display: none;
+  }
+
+  .topbar {
+    height: 62px;
+    padding: 0 1rem;
+  }
+
+  .breadcrumbs__subtitle {
+    display: none;
+  }
+
+  .topbar .theme-toggle {
+    display: flex;
+  }
+
+  .hide-mobile {
+    display: none;
+  }
 }
 
 .chat-page {
   max-width: 46rem;
   margin: 0 auto;
   padding: 1.25rem 1rem 3rem;
-}
-
-.page-title {
-  font-size: 1.5rem;
-  margin: 0 0 1rem;
 }
 
 /* ------------------------------- history -------------------------------- */
@@ -76,9 +468,9 @@ body {
 
 .older-button {
   background: transparent;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--border);
   border-radius: 999px;
-  color: var(--color-text);
+  color: var(--text);
   cursor: pointer;
   font: inherit;
   padding: 0.35rem 0.9rem;
@@ -86,12 +478,12 @@ body {
 
 .older-button:hover,
 .older-button:focus-visible {
-  border-color: var(--color-accent);
-  color: var(--color-accent);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .history-start {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 0.85rem;
   margin: 0.25rem 0;
 }
@@ -119,24 +511,24 @@ body {
 }
 
 .message-list__empty {
-  color: var(--color-text-muted);
-  border: 1px dashed var(--color-border);
-  border-radius: 0.5rem;
+  color: var(--text-muted);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
   padding: 1.5rem;
   text-align: center;
 }
 
 .message {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 0.6rem;
-  box-shadow: var(--shadow-card);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
   padding: 0.6rem 0.85rem;
 }
 
 .message__meta {
   align-items: center;
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   display: flex;
   flex-wrap: wrap;
   font-size: 0.8rem;
@@ -145,7 +537,7 @@ body {
 }
 
 .message__badge {
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--border);
   border-radius: 999px;
   font-size: 0.7rem;
   padding: 0.05rem 0.5rem;
@@ -162,11 +554,11 @@ body {
 }
 
 .message__audio audio:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--color-accent) 50%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
 }
 
 .message__caption {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 0.8rem;
   margin: 0.35rem 0 0;
 }
@@ -174,13 +566,13 @@ body {
 /* ------------------------- transcription (Task 09) ---------------------- */
 
 .message__transcription {
-  border-top: 1px solid var(--color-border);
+  border-top: 1px solid var(--border);
   margin-top: 0.5rem;
   padding-top: 0.5rem;
 }
 
 .message__raw {
-  border-left: 3px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
+  border-left: 3px solid color-mix(in srgb, var(--accent) 45%, transparent);
   font-size: 0.95rem;
   margin: 0.35rem 0 0.4rem;
   overflow-wrap: anywhere;
@@ -189,16 +581,16 @@ body {
 }
 
 .message__note {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 0.8rem;
   margin: 0.3rem 0 0;
 }
 
 .transcribe-button {
   background: transparent;
-  border: 1px solid var(--color-border);
-  border-radius: 0.4rem;
-  color: var(--color-text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
   cursor: pointer;
   font: inherit;
   margin-top: 0.3rem;
@@ -207,8 +599,8 @@ body {
 
 .transcribe-button:hover:not(:disabled),
 .transcribe-button:focus-visible {
-  border-color: var(--color-accent);
-  color: var(--color-accent);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .transcribe-button:disabled {
@@ -228,9 +620,9 @@ body {
 
 .message-action {
   background: transparent;
-  border: 1px solid var(--color-border);
-  border-radius: 0.4rem;
-  color: var(--color-text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
   cursor: pointer;
   font: inherit;
   padding: 0.2rem 0.65rem;
@@ -238,8 +630,8 @@ body {
 
 .message-action:hover:not(:disabled),
 .message-action:focus-visible {
-  border-color: var(--color-accent);
-  color: var(--color-accent);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .message-action:disabled {
@@ -248,12 +640,12 @@ body {
 }
 
 .message-action--delete {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
 }
 
 .message-action--danger {
-  border-color: var(--color-error);
-  color: var(--color-error);
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 .message__confirm {
@@ -270,7 +662,7 @@ body {
 }
 
 .message__confirm-text {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 0.85rem;
   margin: 0;
   width: 100%;
@@ -279,10 +671,10 @@ body {
 /* ------------------------------ voice compose --------------------------- */
 
 .voice {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 0.6rem;
-  box-shadow: var(--shadow-card);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
   margin-bottom: 0.75rem;
   padding: 0.6rem 0.75rem;
 }
@@ -300,10 +692,10 @@ body {
 }
 
 .voice-button {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 0.4rem;
-  color: var(--color-text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
   cursor: pointer;
   display: inline-block;
   font: inherit;
@@ -313,8 +705,8 @@ body {
 
 .voice-button:hover:not(:disabled),
 .voice-button:focus-visible {
-  border-color: var(--color-accent);
-  color: var(--color-accent);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .voice-button:disabled {
@@ -323,19 +715,19 @@ body {
 }
 
 .voice-button--stop {
-  background: var(--color-error);
-  border-color: var(--color-error);
-  color: #ffffff;
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--danger-contrast);
 }
 
 .voice-button--stop:hover:not(:disabled),
 .voice-button--stop:focus-visible {
-  color: #ffffff;
+  color: var(--danger-contrast);
   filter: brightness(1.1);
 }
 
 .voice-recording {
-  color: var(--color-error);
+  color: var(--danger);
   font-size: 0.9rem;
   /* T14: the duration ticks every half second — tabular figures keep the
      label from reflowing on each update. */
@@ -343,7 +735,7 @@ body {
 }
 
 .voice-status {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 0.85rem;
   margin: 0.35rem 0 0;
 }
@@ -351,10 +743,10 @@ body {
 /* ------------------------------- compose -------------------------------- */
 
 .compose-form {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 0.6rem;
-  box-shadow: var(--shadow-card);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
@@ -362,10 +754,10 @@ body {
 }
 
 .compose-form textarea {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 0.4rem;
-  color: var(--color-text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
   font: inherit;
   padding: 0.5rem 0.6rem;
   resize: vertical;
@@ -373,8 +765,8 @@ body {
 }
 
 .compose-form textarea:focus-visible {
-  border-color: var(--color-accent);
-  outline: 2px solid color-mix(in srgb, var(--color-accent) 30%, transparent);
+  border-color: var(--accent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .compose-form__actions {
@@ -383,10 +775,10 @@ body {
 }
 
 .compose-form button {
-  background: var(--color-accent);
+  background: var(--accent);
   border: 1px solid transparent;
-  border-radius: 0.4rem;
-  color: var(--color-accent-contrast);
+  border-radius: var(--radius-sm);
+  color: var(--accent-contrast);
   cursor: pointer;
   font: inherit;
   padding: 0.4rem 1rem;
@@ -403,13 +795,13 @@ body {
 }
 
 .form-error {
-  color: var(--color-error);
+  color: var(--danger);
   font-size: 0.9rem;
   margin: 0;
 }
 
 .noscript-note {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 0.85rem;
   margin: 0.25rem 0 0;
 }
@@ -436,22 +828,8 @@ body {
   padding: 1.25rem 1rem 3rem;
 }
 
-.page-nav {
-  font-size: 0.9rem;
-  margin: 0 0 1rem;
-}
-
-.page-nav a {
-  color: var(--color-accent);
-  text-decoration: none;
-}
-
-.page-nav a:hover {
-  text-decoration: underline;
-}
-
 .exports-page__note {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 0.9rem;
 }
 
@@ -465,10 +843,10 @@ body {
 }
 
 .export-list__item {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 0.5rem;
-  box-shadow: var(--shadow-card);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem 1rem;
@@ -481,12 +859,12 @@ body {
 }
 
 .export-list__meta {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 0.85rem;
 }
 
 .export-list__item a {
-  color: var(--color-accent);
+  color: var(--accent);
   margin-left: auto;
   text-decoration: none;
 }
@@ -496,7 +874,7 @@ body {
 }
 
 .export-list__empty {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
 }
 
 /* Exports-page action links (download + compare), Task 13/16 boundary. */
@@ -514,10 +892,10 @@ body {
 /* Original ↔ normalized comparison page (Task 13). */
 
 .compare-block {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 0.5rem;
-  box-shadow: var(--shadow-card);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
   margin: 1rem 0;
   overflow: hidden;
 }
@@ -529,7 +907,7 @@ body {
 }
 
 .compare-block__meta {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 0.85rem;
   margin: 0;
@@ -537,7 +915,7 @@ body {
 }
 
 .compare-block__text {
-  border-top: 1px solid var(--color-border);
+  border-top: 1px solid var(--border);
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 0.85rem;
   line-height: 1.5;
@@ -548,19 +926,19 @@ body {
 }
 
 .compare-block__empty {
-  border-top: 1px solid var(--color-border);
-  color: var(--color-text-muted);
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
   margin: 0;
   padding: 0.9rem;
 }
 
 /* Wellbeing page (Task 15). */
 .wellbeing-escalation {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-left: 0.35rem solid var(--color-accent, #b3261e);
-  border-radius: 0.5rem;
-  box-shadow: var(--shadow-card);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 0.35rem solid var(--accent, #b3261e);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
   margin: 1rem 0;
   padding: 0.9rem 1.1rem;
 }
@@ -571,7 +949,7 @@ body {
 }
 
 .wellbeing-escalation__meta {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 0.85rem;
   margin: 0 0 0.6rem;
 }
@@ -581,26 +959,26 @@ body {
 }
 
 .wellbeing-escalation__note {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 0.9rem;
   margin-top: 0.6rem;
 }
 
 .wellbeing-run {
-  border-top: 1px solid var(--color-border);
+  border-top: 1px solid var(--border);
   padding: 0.9rem;
 }
 
 .wellbeing-run__note {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   margin: 0 0 0.6rem;
 }
 
 .wellbeing-run__open,
 .wellbeing-run__confirm button {
-  border: 1px solid var(--color-border);
-  border-radius: 0.4rem;
-  background: var(--color-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
   color: inherit;
   cursor: pointer;
   font: inherit;
@@ -632,10 +1010,10 @@ body {
 }
 
 .export-week-form-block {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 0.5rem;
-  box-shadow: var(--shadow-card);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
   margin: 0 0 1rem;
   padding: 0.7rem 0.9rem;
 }
@@ -655,19 +1033,19 @@ body {
 }
 
 .export-week-form input[type="date"] {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 0.4rem;
-  color: var(--color-text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
   font: inherit;
   padding: 0.3rem 0.5rem;
 }
 
 .export-week-form button {
-  background: var(--color-accent);
+  background: var(--accent);
   border: 1px solid transparent;
-  border-radius: 0.4rem;
-  color: var(--color-accent-contrast);
+  border-radius: var(--radius-sm);
+  color: var(--accent-contrast);
   cursor: pointer;
   font: inherit;
   padding: 0.35rem 0.9rem;
@@ -679,17 +1057,17 @@ body {
 }
 
 .exports-page__notice {
-  border-left: 0.3rem solid var(--color-border);
-  color: var(--color-text-muted);
+  border-left: 0.3rem solid var(--border);
+  color: var(--text-muted);
   margin: 0 0 1rem;
   padding: 0.4rem 0.7rem;
 }
 
 .export-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 0.6rem;
-  box-shadow: var(--shadow-card);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
   margin: 0 0 0.75rem;
   padding: 0.7rem 0.9rem;
 }
@@ -702,7 +1080,7 @@ body {
 }
 
 .export-card__meta {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 0.85rem;
 }
 
@@ -714,19 +1092,19 @@ body {
 }
 
 .derived-chip {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 999px;
   font-size: 0.8rem;
   padding: 0.1rem 0.6rem;
 }
 
 .derived-chip--present {
-  border-color: color-mix(in srgb, var(--color-accent) 55%, var(--color-border));
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
 }
 
 .derived-chip__bad {
-  color: var(--color-error);
+  color: var(--danger);
 }
 
 .export-card__actions {
@@ -737,7 +1115,7 @@ body {
 }
 
 .export-card__links {
-  border-top: 1px solid var(--color-border);
+  border-top: 1px solid var(--border);
   display: flex;
   flex-wrap: wrap;
   font-size: 0.85rem;
@@ -746,7 +1124,7 @@ body {
 }
 
 .export-card__links a {
-  color: var(--color-accent);
+  color: var(--accent);
   text-decoration: none;
 }
 
@@ -765,9 +1143,9 @@ body {
 
 .diary-action__open,
 .diary-action__buttons button {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 0.4rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   color: inherit;
   cursor: pointer;
   font: inherit;
@@ -778,8 +1156,8 @@ body {
 .diary-action__buttons button:hover:not(:disabled),
 .diary-action__open:focus-visible,
 .diary-action__buttons button:focus-visible {
-  border-color: var(--color-accent);
-  color: var(--color-accent);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .diary-action__open:disabled {
@@ -788,15 +1166,15 @@ body {
 }
 
 .diary-action__hint {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 0.8rem;
 }
 
 .diary-action__panel {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-left: 0.3rem solid color-mix(in srgb, var(--color-accent) 55%, transparent);
-  border-radius: 0.4rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 0.3rem solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: var(--radius-sm);
   margin-top: 0.45rem;
   padding: 0.55rem 0.75rem;
 }
@@ -807,10 +1185,10 @@ body {
 }
 
 .diary-action__warning {
-  background: color-mix(in srgb, var(--color-error) 8%, var(--color-surface));
-  border: 1px solid color-mix(in srgb, var(--color-error) 45%, var(--color-border));
-  border-radius: 0.4rem;
-  color: var(--color-text);
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  border-radius: var(--radius-sm);
+  color: var(--text);
   margin: 0.4rem 0;
   padding: 0.4rem 0.6rem;
 }
@@ -836,7 +1214,7 @@ body {
 }
 
 .diary-action__status {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 0.85rem;
   margin: 0.4rem 0 0;
 }
@@ -844,10 +1222,10 @@ body {
 /* -------------------------- export detail (Task 16) ------------------- */
 
 .lineage-block {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 0.5rem;
-  box-shadow: var(--shadow-card);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
   margin: 0.9rem 0;
   padding: 0.6rem 0.9rem;
 }
@@ -858,13 +1236,13 @@ body {
 }
 
 .lineage-block__note {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 0.85rem;
   margin: 0 0 0.5rem;
 }
 
 .lineage-row {
-  border-top: 1px solid var(--color-border);
+  border-top: 1px solid var(--border);
   padding: 0.45rem 0 0.15rem;
 }
 
@@ -873,7 +1251,7 @@ body {
 }
 
 .lineage-row__tag {
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--border);
   border-radius: 999px;
   font-size: 0.75rem;
   margin-left: 0.4rem;
@@ -882,13 +1260,13 @@ body {
 }
 
 .lineage-row__meta {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 0.85rem;
   margin: 0.15rem 0;
 }
 
 .lineage-row__meta--warn {
-  color: var(--color-error);
+  color: var(--danger);
 }
 
 .export-week__actions {
@@ -913,19 +1291,19 @@ body {
 
 .jobs-table th,
 .jobs-table td {
-  border-bottom: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--border);
   padding: 0.4rem 0.6rem;
   text-align: left;
   vertical-align: top;
 }
 
 .jobs-table th {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-weight: 600;
 }
 
 .job-status {
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--border);
   border-radius: 999px;
   display: inline-block;
   font-size: 0.75rem;
@@ -935,34 +1313,34 @@ body {
 
 .job-status--succeeded,
 .job-status--succeeded.job-status {
-  border-color: color-mix(in srgb, var(--color-accent) 60%, var(--color-border));
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
 }
 
 .job-status--failed,
 .job-status--cancelled {
-  border-color: color-mix(in srgb, var(--color-error) 55%, var(--color-border));
-  color: var(--color-error);
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  color: var(--danger);
 }
 
 .run-error {
-  color: var(--color-error);
+  color: var(--danger);
   font-size: 0.8rem;
   overflow-wrap: anywhere;
 }
 
 .jobs-panel__empty {
-  background: var(--color-surface);
-  border: 1px dashed var(--color-border);
-  border-radius: 0.5rem;
-  color: var(--color-text-muted);
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
   padding: 1.2rem;
   text-align: center;
 }
 
 .job-retry button {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 0.4rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   color: inherit;
   cursor: pointer;
   font: inherit;
@@ -971,8 +1349,8 @@ body {
 
 .job-retry button:hover:not(:disabled),
 .job-retry button:focus-visible {
-  border-color: var(--color-accent);
-  color: var(--color-accent);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .job-retry button:disabled {
@@ -988,14 +1366,14 @@ body {
 
 .runs-table th,
 .runs-table td {
-  border-bottom: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--border);
   padding: 0.4rem 0.6rem;
   text-align: left;
   vertical-align: top;
 }
 
 .runs-table th {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-weight: 600;
 }
 

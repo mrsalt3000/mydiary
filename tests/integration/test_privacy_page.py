@@ -187,7 +187,15 @@ def test_privacy_page_shows_local_only_without_external_marker(
 
 
 def test_privacy_navigation_is_linked_from_main_templates() -> None:
-    """The /privacy link is present in the navigation of the main pages."""
+    """The /privacy link is present in the navigation of every main page.
+
+    Since T16a the navigation exists once, in the shared shell (base.html),
+    and every main page renders inside that shell — so one check of the shell
+    plus "every page extends it" covers all of them.
+    """
+    shell = (TEMPLATES_DIR / "base.html").read_text(encoding="utf-8")
+    for href in ("/privacy", "/exports", "/processing"):
+        assert f'href="{href}"' in shell, href
     templates = [
         "chat.html",
         "exports.html",
@@ -199,10 +207,9 @@ def test_privacy_navigation_is_linked_from_main_templates() -> None:
     ]
     for name in templates:
         source = (TEMPLATES_DIR / name).read_text(encoding="utf-8")
-        assert 'href="/privacy"' in source, name
-    # The privacy page itself links back to the main pages.
-    privacy = (TEMPLATES_DIR / "privacy.html").read_text(encoding="utf-8")
-    assert 'href="/exports"' in privacy
+        assert '{% extends "base.html" %}' in source, name
+    # The privacy page itself links back through the same shared navigation.
+    assert 'href="/exports"' in shell
 
 
 def test_privacy_page_is_reachable_without_database() -> None:

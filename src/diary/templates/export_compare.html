@@ -11,14 +11,12 @@
    - no external resources are referenced (AGENTS.md §7-8). #}
 {% extends "base.html" %}
 {% block title %}Сравнение — Local Diary{% endblock %}
+{% block page_title %}Сравнение: оригинал и нормализация{% endblock %}
+{% block page_subtitle %}
+  <span class="breadcrumbs__subtitle">{{ export.filename }}</span>
+{% endblock %}
 {% block content %}
 <main class="exports-page">
-  <p class="page-nav">
-    <a href="/exports">← К выгрузкам</a>
-    <a href="/privacy">Приватность</a>
-  </p>
-  <h1 class="page-title">Сравнение: оригинал и нормализация</h1>
-
   <p class="exports-page__note">
     Выгрузка <span class="export-list__name">{{ export.filename }}</span>
     (неделя {{ export.monday.strftime('%d.%m.%Y') }} —

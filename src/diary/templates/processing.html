@@ -7,14 +7,12 @@
    summaries only. #}
 {% extends "base.html" %}
 {% block title %}Обработка — Local Diary{% endblock %}
+{% block page_title %}Обработка{% endblock %}
+{% block page_subtitle %}
+  <span class="breadcrumbs__subtitle">Задачи и их статусы</span>
+{% endblock %}
 {% block content %}
 <main class="processing-page">
-  <nav class="page-nav">
-    <a href="/">← Дневник</a>
-    <a href="/exports">К выгрузкам</a>
-    <a href="/privacy">Приватность</a>
-  </nav>
-  <h1 class="page-title">Обработка</h1>
   <p class="exports-page__note">
     Последние задачи (до {{ jobs|length }}) с их статусами. Страница
     обновляется автоматически. Для задач, завершившихся ошибкой или

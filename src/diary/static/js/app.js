@@ -1136,3 +1136,95 @@
     }
   });
 })();
+
+/* ------------------------------------------------------------------ *
+ * Theme switch (task T16a).
+ * ------------------------------------------------------------------ *
+ * The *theme* itself is applied before the first paint by the inline script
+ * in base.html (a stored choice is written to data-theme synchronously, so a
+ * dark page never flashes light). This module owns the parts that need the
+ * DOM:
+ *
+ *  - it shows the current state ("Светлая"/"Тёмная") in every toggle, and —
+ *    because the label lives in an aria-live region — announces the change
+ *    to screen readers;
+ *  - clicking a toggle writes the opposite theme to data-theme and remembers
+ *    it in localStorage (one key, the theme name only: no diary content);
+ *  - while the user has made no explicit choice nothing is stored and the
+ *    CSS prefers-color-scheme block keeps following the system setting, so
+ *    the label follows it too.
+ *
+ * There are two toggles (sidebar and, at narrow widths, the topbar); both
+ * carry data-action="toggle-theme" and share this handler, and only one of
+ * them is ever visible (see the shell CSS).
+ */
+(function () {
+  var root = document.documentElement;
+  var STORAGE_KEY = "mydiary-theme";
+  var DARK = "dark";
+  var LIGHT = "light";
+
+  var toggles = document.querySelectorAll('[data-action="toggle-theme"]');
+  var labels = document.querySelectorAll('[data-role="theme-name"]');
+  if (!toggles.length) {
+    return;
+  }
+
+  function systemTheme() {
+    return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? DARK
+      : LIGHT;
+  }
+
+  function storedTheme() {
+    try {
+      var value = window.localStorage.getItem(STORAGE_KEY);
+      return value === DARK || value === LIGHT ? value : null;
+    } catch (error) {
+      return null; // storage blocked: the system setting stays in charge
+    }
+  }
+
+  function currentTheme() {
+    var attribute = root.getAttribute("data-theme");
+    if (attribute === DARK || attribute === LIGHT) {
+      return attribute;
+    }
+    return systemTheme();
+  }
+
+  function renderLabels() {
+    var label = currentTheme() === DARK ? "Тёмная" : "Светлая";
+    for (var index = 0; index < labels.length; index += 1) {
+      labels[index].textContent = label;
+    }
+  }
+
+  function applyTheme(theme) {
+    root.setAttribute("data-theme", theme);
+    renderLabels();
+  }
+
+  for (var index = 0; index < toggles.length; index += 1) {
+    toggles[index].addEventListener("click", function () {
+      var next = currentTheme() === DARK ? LIGHT : DARK;
+      try {
+        window.localStorage.setItem(STORAGE_KEY, next);
+      } catch (error) {
+        /* Storage blocked: the choice still applies to this page. */
+      }
+      applyTheme(next);
+    });
+  }
+
+  renderLabels();
+
+  // No explicit choice yet: keep the label in step with the system setting.
+  if (storedTheme() === null && window.matchMedia) {
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", function () {
+      if (storedTheme() === null) {
+        renderLabels();
+      }
+    });
+  }
+})();

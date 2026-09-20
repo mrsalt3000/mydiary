@@ -302,6 +302,28 @@ def _message_view(record: Message, session: Session) -> dict[str, Any]:
     return view
 
 
+def _nav_context(session: Session) -> dict[str, Any]:
+    """Sidebar counters of the shared shell (task T16a).
+
+    Both numbers come from the database and are never invented:
+    ``exports_count`` is the number of weekly export revisions stored,
+    ``active_jobs`` the number of jobs still in flight (pending / running /
+    retrying) across every job type. Only row counts are read — no diary
+    content and no job payload.
+
+    Which item is highlighted travels separately as the ``nav_current``
+    template variable, so a page that deliberately stays database-free (the
+    privacy page) still highlights its own item; pages that pass no ``nav``
+    simply render no counters (``base.html`` guards every use).
+    """
+    job_repository = JobRepository(session)
+    active_jobs = sum(len(job_repository.list_active_of_type(job_type)) for job_type in JobType)
+    return {
+        "exports_count": len(WeeklyExportRepository(session).list_all_by_sequence()),
+        "active_jobs": active_jobs,
+    }
+
+
 @pages_router.get("/", response_class=HTMLResponse)
 def chat_page(
     request: Request,
@@ -323,6 +345,8 @@ def chat_page(
             "max_audio_size_mb": settings.max_audio_size_mb,
             # Client-side ``accept`` for the file-upload fallback.
             "audio_accept": ",".join(settings.allowed_audio_mime_types),
+            "nav_current": "chat",
+            "nav": _nav_context(session),
         },
     )
 
@@ -511,12 +535,15 @@ def privacy_page(request: Request) -> HTMLResponse:
     the processing is local or external, plus the key/validity state from
     :func:`profile_statuses`. No secret value is ever rendered; the page only
     states which environment variable a profile references.
+
+    The page renders without a database on purpose (Task 18): it does not
+    compute the sidebar counters, only the highlighted navigation item.
     """
     rows, config_missing = _privacy_rows()
     return templates.TemplateResponse(
         request,
         "privacy.html",
-        {"rows": rows, "config_missing": config_missing},
+        {"rows": rows, "config_missing": config_missing, "nav_current": "privacy"},
     )
 
 
@@ -823,6 +850,8 @@ def exports_page(
             "default_sunday": sunday_date_for(today_local).isoformat(),
             "wellbeing_enabled": settings.wellbeing_enabled,
             "external": _external_profile_info(),
+            "nav_current": "exports",
+            "nav": _nav_context(session),
         },
     )
 
@@ -863,6 +892,8 @@ def export_detail_page(
             "siblings": siblings,
             "wellbeing_enabled": settings.wellbeing_enabled,
             "external": _external_profile_info(),
+            "nav_current": "exports",
+            "nav": _nav_context(session),
         },
     )
 
@@ -879,7 +910,15 @@ def processing_page(
     explicit "retry" action (``POST /api/v1/jobs/{id}/retry``). Payloads and
     diary content are never shown.
     """
-    return templates.TemplateResponse(request, "processing.html", _processing_jobs_context(session))
+    return templates.TemplateResponse(
+        request,
+        "processing.html",
+        {
+            "nav_current": "processing",
+            **_processing_jobs_context(session),
+            "nav": _nav_context(session),
+        },
+    )
 
 
 @pages_router.get("/processing/fragments/jobs", response_class=HTMLResponse)
@@ -932,6 +971,8 @@ def export_normalize_compare_page(
             "original_text": original_path.read_text(encoding="utf-8"),
             "normalized_text": normalized_text,
             "normalized_filename": normalized_filename,
+            "nav_current": "exports",
+            "nav": _nav_context(session),
         },
     )
 
@@ -978,6 +1019,8 @@ def export_summary_page(
             "summary_text": summary_text,
             "summary_filename": summary_filename,
             "summary_download_url": summary_download_url,
+            "nav_current": "exports",
+            "nav": _nav_context(session),
         },
     )
 
@@ -1063,6 +1106,8 @@ def export_wellbeing_page(
             "report_filename": report_filename,
             "report_download_url": report_download_url,
             "report_created_display": report_created_display,
+            "nav_current": "exports",
+            "nav": _nav_context(session),
         },
     )
 

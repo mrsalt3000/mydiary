@@ -9,15 +9,12 @@
    models configuration renders an explicit "not configured" state. #}
 {% extends "base.html" %}
 {% block title %}Приватность — Local Diary{% endblock %}
+{% block page_title %}Приватность{% endblock %}
+{% block page_subtitle %}
+  <span class="breadcrumbs__subtitle">Что и куда отправляется при обработке</span>
+{% endblock %}
 {% block content %}
 <main class="privacy-page">
-  <nav class="page-nav">
-    <a href="/">← Дневник</a>
-    <a href="/exports">Выгрузки</a>
-    <a href="/processing">Обработка</a>
-  </nav>
-  <h1 class="page-title">Приватность</h1>
-
   <p class="exports-page__note">
     Приложение работает только на этом компьютере (localhost). Каждая задача
     настраивается независимо: обработка может выполняться локально или — при

@@ -1,14 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Дневник — Local Diary{% endblock %}
+{% block page_title %}Дневник{% endblock %}
+{% block page_subtitle %}
+  <span class="breadcrumbs__subtitle">Личный дневник</span>
+{% endblock %}
 {% block content %}
 <main class="chat-page">
-  <h1 class="page-title">Дневник</h1>
-  <p class="page-nav">
-    <a href="/exports">Недельные выгрузки</a>
-    <a href="/processing">Обработка</a>
-    <a href="/privacy">Приватность</a>
-  </p>
-
   <section class="history" aria-label="История записей">
     {% if has_more %}
     <div id="older-control">
