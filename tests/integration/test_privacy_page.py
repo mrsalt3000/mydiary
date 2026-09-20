@@ -191,11 +191,16 @@ def test_privacy_navigation_is_linked_from_main_templates() -> None:
 
     Since T16a the navigation exists once, in the shared shell (base.html),
     and every main page renders inside that shell — so one check of the shell
-    plus "every page extends it" covers all of them.
+    plus "every page extends it" covers all of them. Since T16b the list of
+    links itself lives in ``_nav_links.html``, which the shell includes twice
+    (the sidebar and the compact menu for narrow screens), so the hrefs are
+    checked there — still exactly one source of truth.
     """
     shell = (TEMPLATES_DIR / "base.html").read_text(encoding="utf-8")
+    assert shell.count('{% include "_nav_links.html" %}') == 2
+    links = (TEMPLATES_DIR / "_nav_links.html").read_text(encoding="utf-8")
     for href in ("/privacy", "/exports", "/processing"):
-        assert f'href="{href}"' in shell, href
+        assert f'href="{href}"' in links, href
     templates = [
         "chat.html",
         "exports.html",
@@ -209,7 +214,7 @@ def test_privacy_navigation_is_linked_from_main_templates() -> None:
         source = (TEMPLATES_DIR / name).read_text(encoding="utf-8")
         assert '{% extends "base.html" %}' in source, name
     # The privacy page itself links back through the same shared navigation.
-    assert 'href="/exports"' in shell
+    assert 'href="/exports"' in links
 
 
 def test_privacy_page_is_reachable_without_database() -> None:

@@ -407,6 +407,55 @@ def test_privacy_page_renders_without_the_database_and_without_counters() -> Non
     assert 'aria-current="page"' in sidebar
 
 
+def test_narrow_screen_navigation_keeps_every_section_reachable(
+    api_client: TestClient,
+) -> None:
+    """T16b finding from the T16a acceptance: at <=700px the sidebar is hidden,
+    which left the narrow layout with no way to change the page.
+
+    The compact menu is a native ``<details>`` disclosure in the topbar: it
+    needs no script, is operable from the keyboard (Enter/Space on the
+    ``<summary>``, Tab through the links) and is hidden *above* the
+    breakpoint, so it never duplicates the sidebar for wide layouts. It carries
+    the same links as the sidebar — one included list, so the two copies
+    cannot drift apart.
+    """
+    html = api_client.get("/").text
+    menu = re.search(r'<details class="compact-nav">.*?</details>', html, re.DOTALL)
+    assert menu is not None, "the shell must carry the compact navigation menu"
+    markup = menu.group(0)
+    # Native disclosure: no script, keyboard operable, named for assistive tech.
+    assert "<summary" in markup and "Разделы" in markup
+    assert 'class="compact-nav__menu"' in markup
+    assert 'aria-label="Разделы (компактное меню)"' in markup
+
+    hrefs = re.findall(r'href="([^"]+)"', markup)
+    assert hrefs == ["/", "/exports", "/processing", "/privacy"]
+    route_paths = {getattr(route, "path", None) for route in pages_router.routes}
+    for href in hrefs:
+        assert href in route_paths, href
+        assert api_client.get(href).status_code == 200, href
+
+    # Only one item is highlighted, exactly as in the sidebar.
+    assert markup.count("nav-item--active") == 1
+    assert 'aria-current="page"' in markup
+
+    css = _css()
+    phone = re.search(r"@media \(max-width: 700px\)\s*\{(.*?)\n\}", css, re.DOTALL)
+    assert phone is not None
+    phone_block = _strip_comments(phone.group(1))
+    assert re.search(r"\.sidebar\s*\{[^}]*display: none", phone_block)
+    assert re.search(r"\.compact-nav\s*\{[^}]*display: block", phone_block)
+    # Hidden above the breakpoint: the sidebar is the navigation there.
+    base_rule = re.search(r"\n\.compact-nav\s*\{(.*?)\n\}", css, re.DOTALL)
+    assert base_rule is not None
+    assert "display: none" in base_rule.group(1)
+
+    # No script is involved in the disclosure at all.
+    script = (STATIC_DIR / "js" / "app.js").read_text(encoding="utf-8")
+    assert "compact-nav" not in script
+
+
 def test_context_panel_column_is_structural_only() -> None:
     """No page has context content yet (the chain is task T16c), so the shell
     must not reserve an empty column; the panel and its token are in place.

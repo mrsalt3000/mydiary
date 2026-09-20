@@ -393,6 +393,76 @@ textarea {
   white-space: nowrap;
 }
 
+.topbar-actions {
+  align-items: center;
+  display: flex;
+  flex: none;
+  gap: 0.5rem;
+}
+
+/* Compact section menu (task T16b). The mockup hides the whole sidebar at
+   <=700px; this disclosure keeps every section reachable there. It is a
+   native <details>, so it needs no script and is operable with the keyboard;
+   above the breakpoint it is not displayed at all, so it never duplicates the
+   sidebar for wide layouts or for assistive technology. */
+.compact-nav {
+  display: none;
+  position: relative;
+}
+
+.compact-nav__summary {
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  gap: 0.4rem;
+  list-style: none;
+  padding: 0.4rem 0.6rem;
+}
+
+.compact-nav__summary::-webkit-details-marker {
+  display: none;
+}
+
+.compact-nav__summary:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.compact-nav__summary:focus-visible,
+.compact-nav[open] .compact-nav__summary {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.compact-nav__summary svg {
+  fill: none;
+  height: 18px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+  width: 18px;
+}
+
+.compact-nav__menu {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 0.2rem;
+  left: auto;
+  min-width: 15rem;
+  padding: 0.5rem;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.4rem);
+  z-index: 5;
+}
+
 .context-panel {
   border-left: 1px solid var(--border);
   overflow: auto;
@@ -431,6 +501,11 @@ textarea {
     display: none;
   }
 
+  /* The sidebar is gone: the compact topbar menu takes over (task T16b). */
+  .compact-nav {
+    display: block;
+  }
+
   .topbar {
     height: 62px;
     padding: 0 1rem;
@@ -447,12 +522,191 @@ textarea {
   .hide-mobile {
     display: none;
   }
+
+  .day-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .day-header__title {
+    font-size: 1.25rem;
+  }
+
+  .day-header__controls {
+    width: 100%;
+  }
+
+  .day-picker {
+    margin-left: auto;
+  }
+
+  .journal {
+    padding: 1rem 0.75rem 0;
+  }
+
+  .composer-wrap {
+    padding: 0.5rem 0.75rem 0.75rem;
+  }
 }
 
+/* ---------------------------- day feed (T16b) --------------------------- */
+
+/* The diary page is the day feed: the journal column grows and the composer
+   sits at its bottom (``position: sticky``), so a short day still shows the
+   composer at the bottom of the viewport and a long day can be scrolled
+   without the composer covering the entries. */
 .chat-page {
-  max-width: 46rem;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+}
+
+.journal {
   margin: 0 auto;
-  padding: 1.25rem 1rem 3rem;
+  max-width: 47.5rem;
+  padding: 1.5rem 1.1rem 0;
+  width: 100%;
+}
+
+.day-header {
+  align-items: flex-end;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  margin: 0.25rem 0 1.2rem;
+}
+
+.day-header__text {
+  min-width: 0;
+}
+
+.day-header__title {
+  font-size: 1.6rem;
+  letter-spacing: -0.04em;
+  margin: 0;
+}
+
+.day-header__relative {
+  background: var(--accent-soft);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0;
+  margin-right: 0.4rem;
+  padding: 0.1rem 0.5rem;
+  vertical-align: 0.15rem;
+}
+
+.day-header__counters {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin: 0.2rem 0 0;
+}
+
+.day-header__controls {
+  align-items: center;
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+.day-nav {
+  align-items: center;
+  display: flex;
+  gap: 0.3rem;
+}
+
+.day-nav__button {
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  display: flex;
+  height: 36px;
+  justify-content: center;
+  text-decoration: none;
+  width: 36px;
+}
+
+.day-nav__button svg {
+  fill: none;
+  height: 18px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+  width: 18px;
+}
+
+.day-nav__button:hover,
+.day-nav__button:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.day-nav__today {
+  color: var(--accent);
+  font-size: 0.8rem;
+  font-weight: 650;
+  padding: 0 0.35rem;
+  white-space: nowrap;
+}
+
+.day-picker {
+  align-items: center;
+  display: flex;
+  gap: 0.35rem;
+}
+
+.day-picker input[type="date"] {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: inherit;
+  padding: 0.35rem 0.4rem;
+}
+
+.day-picker__submit {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  padding: 0.35rem 0.7rem;
+}
+
+.day-picker__submit:hover,
+.day-picker__submit:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.day-notice {
+  background: var(--warning-soft);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 0.85rem;
+  margin: 0 0 1rem;
+  padding: 0.5rem 0.7rem;
+}
+
+/* The empty day: a dashed placeholder with a hint, never fake entries. */
+.message-list__empty {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  line-height: 1.6;
+  margin: 0;
+  padding: 1.5rem;
+  text-align: center;
 }
 
 /* ------------------------------- history -------------------------------- */
@@ -507,23 +761,18 @@ textarea {
 .message-list {
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: 0.875rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 
-.message-list__empty {
-  color: var(--text-muted);
-  border: 1px dashed var(--border);
-  border-radius: var(--radius-md);
-  padding: 1.5rem;
-  text-align: center;
-}
-
+/* One entry card (the mockup's ".entry"): same box in both themes. */
 .message {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow);
-  padding: 0.6rem 0.85rem;
+  padding: 1.1rem;
 }
 
 .message__meta {
@@ -531,21 +780,46 @@ textarea {
   color: var(--text-muted);
   display: flex;
   flex-wrap: wrap;
-  font-size: 0.8rem;
-  gap: 0.5rem;
-  margin-bottom: 0.3rem;
+  font-size: 0.78rem;
+  gap: 0.55rem;
+  margin-bottom: 0.6rem;
 }
 
-.message__badge {
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 0.7rem;
-  padding: 0.05rem 0.5rem;
+/* The time is the last item of the meta row, pushed to the right. */
+.message__meta time {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.message__kind {
+  color: var(--text-muted);
+}
+
+/* Kind marker: a dot (decorative — the label next to it says the same thing
+   in words, so the dot never carries meaning on its own). */
+.type-dot {
+  background: var(--accent);
+  border-radius: 50%;
+  display: inline-block;
+  flex: none;
+  height: 7px;
+  width: 7px;
+}
+
+.type-dot--voice {
+  background: var(--success);
 }
 
 .message__body {
+  font-size: 0.9rem;
+  line-height: 1.66;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.message__audio {
+  display: grid;
+  gap: 0.5rem;
 }
 
 .message__audio audio {
@@ -555,6 +829,72 @@ textarea {
 
 .message__audio audio:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+/* Playback row: a decorative waveform plus the duration read from the audio
+   metadata in the browser. The waveform is not a rendering of this recording
+   (the app stores no audio samples for the UI), so it carries no numbers and
+   is hidden from assistive technology — it is a shape, not information. */
+.audio-card {
+  align-items: center;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+
+.waveform {
+  align-items: center;
+  display: flex;
+  flex: 1;
+  gap: 3px;
+  height: 30px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.waveform i {
+  background: var(--success);
+  border-radius: 99px;
+  flex: none;
+  height: 60%;
+  opacity: 0.72;
+  width: 3px;
+}
+
+.waveform i:nth-child(1) { height: 30%; }
+.waveform i:nth-child(2) { height: 58%; }
+.waveform i:nth-child(3) { height: 86%; }
+.waveform i:nth-child(4) { height: 45%; }
+.waveform i:nth-child(5) { height: 70%; }
+.waveform i:nth-child(6) { height: 96%; }
+.waveform i:nth-child(7) { height: 62%; }
+.waveform i:nth-child(8) { height: 32%; }
+.waveform i:nth-child(9) { height: 76%; }
+.waveform i:nth-child(10) { height: 52%; }
+.waveform i:nth-child(11) { height: 90%; }
+.waveform i:nth-child(12) { height: 40%; }
+.waveform i:nth-child(13) { height: 68%; }
+.waveform i:nth-child(14) { height: 94%; }
+.waveform i:nth-child(15) { height: 52%; }
+.waveform i:nth-child(16) { height: 30%; }
+.waveform i:nth-child(17) { height: 74%; }
+.waveform i:nth-child(18) { height: 48%; }
+.waveform i:nth-child(19) { height: 82%; }
+.waveform i:nth-child(20) { height: 38%; }
+
+/* The duration is only ever filled in from the audio's own metadata; while it
+   is unknown the element stays hidden (app.js), so a made-up number can never
+   appear. */
+.audio-duration {
+  color: var(--text-muted);
+  flex: none;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  margin: 0;
+}
+
+.audio-duration[hidden] {
+  display: none;
 }
 
 .message__caption {
@@ -572,11 +912,13 @@ textarea {
 }
 
 .message__raw {
-  border-left: 3px solid color-mix(in srgb, var(--accent) 45%, transparent);
-  font-size: 0.95rem;
-  margin: 0.35rem 0 0.4rem;
+  background: var(--surface-muted);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin: 0.4rem 0 0.5rem;
   overflow-wrap: anywhere;
-  padding-left: 0.6rem;
+  padding: 0.75rem;
   white-space: pre-wrap;
 }
 
@@ -610,22 +952,43 @@ textarea {
 
 /* --------------------- message deletion (T15, ADR-011) ------------------ */
 
+/* Entry footer: where the entry comes from on the left, its actions on the
+   right. The actions block keeps ``width: 100%``-style behaviour for its
+   confirmation panel: once the panel is open it wraps onto a row of its own
+   inside the card instead of squeezing next to the "Удалить" button. */
+.entry-footer {
+  align-items: center;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.75rem;
+  margin-top: 0.9rem;
+  padding-top: 0.7rem;
+}
+
+.entry-footer__origin {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin: 0;
+}
+
 .message__actions {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
-  margin-top: 0.4rem;
+  margin-left: auto;
 }
 
 .message-action {
   background: transparent;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  color: var(--text);
+  color: var(--text-muted);
   cursor: pointer;
   font: inherit;
-  padding: 0.2rem 0.65rem;
+  font-size: 0.75rem;
+  padding: 0.2rem 0.6rem;
 }
 
 .message-action:hover:not(:disabled),
@@ -674,8 +1037,6 @@ textarea {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow);
-  margin-bottom: 0.75rem;
   padding: 0.6rem 0.75rem;
 }
 
@@ -742,24 +1103,53 @@ textarea {
 
 /* ------------------------------- compose -------------------------------- */
 
+/* Composer (task T16b). The mockup pins the composer to the bottom of the
+   middle column; here it is ``position: sticky`` inside that column, which
+   keeps it in reach without covering the feed (a fixed bar would need a
+   matching bottom padding on the journal and would hide entries on short
+   screens). */
+.composer-wrap {
+  background: linear-gradient(transparent, var(--bg) 35%);
+  bottom: 0;
+  margin-top: auto;
+  padding: 0.75rem 1.1rem 1.1rem;
+  position: sticky;
+  width: 100%;
+  z-index: 2;
+}
+
+.compose {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0 auto;
+  max-width: 47.5rem;
+}
+
+.compose__notice {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  margin: 0;
+}
+
 .compose-form {
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow);
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
-  padding: 0.75rem;
+  padding: 0.6rem 0.7rem 0.7rem;
 }
 
 .compose-form textarea {
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: transparent;
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
   color: var(--text);
   font: inherit;
-  padding: 0.5rem 0.6rem;
+  min-height: 2.4rem;
+  padding: 0.5rem 0.35rem;
   resize: vertical;
   width: 100%;
 }
@@ -767,6 +1157,16 @@ textarea {
 .compose-form textarea:focus-visible {
   border-color: var(--accent);
   outline: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.compose-form__note {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  margin: 0;
+}
+
+.compose-form__note a {
+  color: var(--accent);
 }
 
 .compose-form__actions {

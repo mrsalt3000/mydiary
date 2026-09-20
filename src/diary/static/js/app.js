@@ -1,16 +1,17 @@
 /*
- * Local Diary — chat page behaviour (Tasks 06/07/09).
+ * Local Diary — chat page behaviour (Tasks 06/07/09, T14/T15/T16b).
  *
  * Scope: the text compose form (Task 06), voice messages (Task 07):
  * recording through MediaRecorder when available, a file-upload fallback
  * through a hidden <input type=file>, upload to POST /api/v1/audio and
  * insertion of the created voice message into the chat list; the manual
  * transcription flow (Task 09): POST .../transcribe on button click, job
- * polling and raw-text rendering below the audio player; and deletion of a
+ * polling and raw-text rendering below the audio player; deletion of a
  * message (task T15, ADR-011): an inline confirmation step, then
- * DELETE /api/v1/messages/{id} and removal of the message from the list. The
- * "load older messages" paging stays declarative (htmx server-rendered
- * fragments).
+ * DELETE /api/v1/messages/{id} and removal of the message from the list; and
+ * the voice-message duration read from the audio's own metadata (task T16b).
+ * The "load older messages" paging stays declarative (htmx server-rendered
+ * fragments, now bounded by the day the server put on screen).
  *
  * Safety rules (must be preserved by any later edit):
  *  - Diary text and audio metadata are NEVER placed into the DOM as markup.
@@ -26,6 +27,9 @@
  *    audio file are erased), so it only ever runs behind the explicit
  *    confirmation step; a 404 means "already deleted" and is not shown as a
  *    failure.
+ *  - Numbers shown to the user come from the server or from the device. A
+ *    voice-message duration is only ever the value the browser read from the
+ *    audio metadata, and it is simply not shown when the browser has none.
  */
 "use strict";
 
@@ -42,6 +46,11 @@
   }
 
   var maxLength = Number(form.dataset.maxLength || 0);
+
+  /* The day the server put on screen. An entry can only be created "now", so
+     when another day is displayed a freshly saved entry must NOT be appended
+     to that day's feed: the page says where the entry went instead (below). */
+  var viewedDayIsToday = form.dataset.dayIsToday !== "false";
 
   function showError(message) {
     errorBox.textContent = message;
@@ -65,14 +74,131 @@
     return match[3] + "." + match[2] + "." + match[1] + " " + match[4] + ":" + match[5];
   }
 
-  function messageFooter(message) {
+  /* Time only ("%H:%M"): the card lives under a day header, exactly like the
+     server-rendered ones (see chat.html / _message.html). The full timestamp
+     stays in the <time datetime> attribute and in the delete button's
+     accessible name. */
+  function formatClockTime(iso) {
+    var match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(iso);
+    if (!match) {
+      return iso;
+    }
+    return match[4] + ":" + match[5];
+  }
+
+  /* Meta row of one card: kind dot + kind label + wall-clock time. Mirrors
+     _message.html so a freshly appended card looks like a server-rendered
+     one. Built with createElement/textContent only — no markup sinks. */
+  function messageMeta(message, isAudio) {
     var meta = document.createElement("header");
     meta.className = "message__meta";
+
+    var dot = document.createElement("span");
+    dot.className = isAudio ? "type-dot type-dot--voice" : "type-dot";
+    dot.setAttribute("aria-hidden", "true"); // the label below says it in words
+
+    var kind = document.createElement("span");
+    kind.className = "message__kind";
+    kind.textContent = isAudio ? "Голосовое сообщение" : "Текстовая запись";
+
     var time = document.createElement("time");
     time.dateTime = message.created_at;
-    time.textContent = formatTimestamp(message.created_at);
+    time.textContent = formatClockTime(message.created_at);
+
+    meta.appendChild(dot);
+    meta.appendChild(kind);
     meta.appendChild(time);
     return meta;
+  }
+
+  /* Footer of one card: origin caption on the left, actions on the right. */
+  function messageFooter(messageId, createdAtIso) {
+    var footer = document.createElement("footer");
+    footer.className = "entry-footer";
+
+    var origin = document.createElement("p");
+    origin.className = "entry-footer__origin";
+    origin.textContent = "Оригинал · локально";
+
+    footer.appendChild(origin);
+    footer.appendChild(buildMessageActions(messageId, createdAtIso));
+    return footer;
+  }
+
+  /* Decorative playback row of a voice message: a fixed bar pattern plus the
+     duration element that the metadata handler fills in (T16b). The waveform
+     is ``aria-hidden`` and carries no data of its own — the CSS gives the
+     bars their heights (see .waveform in app.css), the count mirrors the
+     static markup in _message.html. */
+  var WAVEFORM_BARS = 20;
+
+  function buildAudioCard() {
+    var card = document.createElement("div");
+    card.className = "audio-card";
+
+    var waveform = document.createElement("span");
+    waveform.className = "waveform";
+    waveform.setAttribute("aria-hidden", "true");
+    for (var index = 0; index < WAVEFORM_BARS; index += 1) {
+      waveform.appendChild(document.createElement("i"));
+    }
+
+    var duration = document.createElement("p");
+    duration.className = "audio-duration";
+    duration.setAttribute("data-role", "duration-wrap");
+    duration.hidden = true; // shown only once a real duration is known
+
+    var durationLabel = document.createElement("span");
+    durationLabel.className = "visually-hidden";
+    durationLabel.textContent = "Длительность записи:";
+
+    var durationValue = document.createElement("span");
+    durationValue.className = "audio-duration__value";
+    durationValue.setAttribute("data-role", "duration");
+
+    duration.appendChild(durationLabel);
+    duration.appendChild(durationValue);
+
+    card.appendChild(waveform);
+    card.appendChild(duration);
+    return card;
+  }
+
+  /* A save made while another day is on screen: say where the entry actually
+     went and offer the way there. Static text plus a link to "/" (today is
+     the page's default day); built with createElement/textContent only. */
+  function showSavedOnAnotherDay() {
+    var note = document.getElementById("compose-day-note");
+    if (!note) {
+      return;
+    }
+    while (note.firstChild) {
+      note.removeChild(note.firstChild);
+    }
+    var text = document.createElement("span");
+    text.textContent = "Запись сохранена в сегодняшнем дне. ";
+    var link = document.createElement("a");
+    link.href = "/"; // today's day — the page's own default
+    link.textContent = "Перейти к сегодняшнему дню";
+    note.appendChild(text);
+    note.appendChild(link);
+    note.hidden = false;
+  }
+
+  function clearSavedOnAnotherDayNote() {
+    var note = document.getElementById("compose-day-note");
+    if (!note) {
+      return;
+    }
+    note.hidden = true;
+  }
+
+  /* The day's counters are server-rendered from the database; when this file
+     adds or removes a card it tells the counters module about it, so the
+     numbers shown in the day header never go stale. Only the *kind* travels
+     in the event — never any diary content. */
+  function announceEntryChange(name, kind) {
+    document.dispatchEvent(new CustomEvent(name, { detail: { kind: kind } }));
   }
 
   /* Delete controls of one message (task T15, ADR-011): mirrors
@@ -139,15 +265,16 @@
     article.className = "message";
     article.id = "message-" + message.id;
 
-    var meta = messageFooter(message);
+    var meta = messageMeta(message, false);
     var body = document.createElement("div");
     body.className = "message__body";
     body.textContent = message.body; // diary text: textContent only, never markup
 
     article.appendChild(meta);
     article.appendChild(body);
-    article.appendChild(buildMessageActions(message.id, message.created_at));
+    article.appendChild(messageFooter(message.id, message.created_at));
     messageList.appendChild(article);
+    announceEntryChange("diary:entry-added", "text");
     article.scrollIntoView({ block: "nearest" });
   }
 
@@ -180,7 +307,14 @@
         if (response.status === 201) {
           return response.json().then(function (created) {
             textarea.value = "";
-            appendMessage(created);
+            clearSavedOnAnotherDayNote();
+            if (viewedDayIsToday) {
+              appendMessage(created);
+            } else {
+              // Another day is on screen: appending would be a lie about
+              // which day the entry belongs to.
+              showSavedOnAnotherDay();
+            }
           });
         }
         throw new Error("create-failed");
@@ -353,7 +487,12 @@
         if (response.status === 201) {
           return response.json().then(function (created) {
             hideVoiceStatus();
-            appendAudioMessage(created);
+            clearSavedOnAnotherDayNote();
+            if (viewedDayIsToday) {
+              appendAudioMessage(created);
+            } else {
+              showSavedOnAnotherDay(); // see the text-save path above
+            }
           });
         }
         // Static messages keyed on the status; the server payload is never
@@ -386,11 +525,7 @@
     article.className = "message message--audio";
     article.id = "message-" + payload.message_id;
 
-    var meta = messageFooter(payload);
-    var badge = document.createElement("span");
-    badge.className = "message__badge";
-    badge.textContent = "Голосовое";
-    meta.appendChild(badge);
+    var meta = messageMeta(payload, true);
 
     var box = document.createElement("div");
     box.className = "message__audio";
@@ -401,6 +536,9 @@
     // Server-generated playback URL derived from the response id only.
     player.src = "/api/v1/audio/" + payload.id + "/file";
     box.appendChild(player);
+    // Decorative waveform + the real-duration placeholder (T16b); the
+    // duration is filled in when the browser reports the audio metadata.
+    box.appendChild(buildAudioCard());
 
     // Transcription panel (Task 09): mirrors the server-side _message.html
     // structure so the transcribe flow below works on fresh uploads too.
@@ -446,8 +584,9 @@
     article.appendChild(meta);
     article.appendChild(box);
     article.appendChild(panel);
-    article.appendChild(buildMessageActions(payload.message_id, payload.created_at));
+    article.appendChild(messageFooter(payload.message_id, payload.created_at));
     messageList.appendChild(article);
+    announceEntryChange("diary:entry-added", "audio");
     article.scrollIntoView({ block: "nearest" });
   }
 
@@ -964,7 +1103,11 @@
 (function () {
   var GENERIC_ERROR = "Не удалось удалить запись. Попробуйте ещё раз.";
   var DELETING = "Удаление…";
-  var EMPTY_STATE_TEXT = "Пока нет записей. Напишите первую ниже.";
+  // Same wording as the server-rendered empty state of a day (chat.html /
+  // pages.py: _day_empty_text) so deleting the last entry of the day leaves
+  // the page in the state a reload would produce.
+  var EMPTY_STATE_TEXT =
+    "Пока нет записей за этот день. Напишите первую ниже или выберите другой день в шапке дня.";
 
   function deleteButtonFor(article) {
     return article.querySelector('[data-action="delete-message"]');
@@ -1062,6 +1205,7 @@
 
   function removeMessage(article) {
     var messageList = article.parentNode;
+    var voice = article.classList.contains("message--audio");
     // Remember a neighbour before the article (and the focused button) goes:
     // the keyboard user must not be dropped back to the top of the document.
     var neighbour = article.nextElementSibling || article.previousElementSibling;
@@ -1069,6 +1213,10 @@
     if (messageList && messageList.id === "message-list") {
       ensureEmptyState(messageList);
     }
+    // The day header counts real rows: keep them in step with the feed.
+    document.dispatchEvent(
+      new CustomEvent("diary:entry-removed", { detail: { kind: voice ? "audio" : "text" } })
+    );
     focusAfterRemoval(neighbour);
   }
 
@@ -1227,4 +1375,178 @@
       }
     });
   }
+})();
+
+/* ------------------------------------------------------------------ *
+ * Voice-message duration (task T16b).
+ * ------------------------------------------------------------------ *
+ * The card shows a duration only if the browser itself reports one: the value
+ * is read from the audio element's own metadata (``loadedmetadata`` →
+ * ``audio.duration``, seconds) — never from the server, never guessed. That
+ * keeps the number honest in both directions:
+ *
+ *  - a real recording gets its real length (also for attached files, whose
+ *    length the backend does not store);
+ *  - when the metadata cannot be read — the file is missing, playback is
+ *    refused, the browser streams without a total (``Infinity``) or reports
+ *    nothing usable — the wrapper stays hidden. No placeholder, no zero, no
+ *    "unknown" number: the value is simply absent, as the mockup's fidelity
+ *    rule requires.
+ *
+ * The waveform next to it is decoration and carries no data (it is
+ * ``aria-hidden`` in the markup); the metadata event is delegated from the
+ * document in the capture phase, because media events do not bubble — so it
+ * covers server-rendered cards, cards appended by this file and cards loaded
+ * later through htmx alike.
+ */
+(function () {
+  function isAudioElement(node) {
+    return Boolean(node) && node.tagName === "AUDIO";
+  }
+
+  /* "м:сс" below an hour, "ч:мм:сс" above it — never NaN, never negative. */
+  function formatDuration(seconds) {
+    var total = Math.floor(seconds);
+    var remainder = total % 60;
+    var minutes = Math.floor(total / 60) % 60;
+    var hours = Math.floor(total / 3600);
+    function pad(value) {
+      return value < 10 ? "0" + value : String(value);
+    }
+    if (hours > 0) {
+      return hours + ":" + pad(minutes) + ":" + pad(remainder);
+    }
+    return minutes + ":" + pad(remainder);
+  }
+
+  function usableDuration(seconds) {
+    return typeof seconds === "number" && isFinite(seconds) && seconds > 0;
+  }
+
+  function renderDuration(audio) {
+    var card = audio.closest ? audio.closest(".message") : null;
+    var wrapper = card ? card.querySelector('[data-role="duration-wrap"]') : null;
+    var value = wrapper ? wrapper.querySelector('[data-role="duration"]') : null;
+    if (!wrapper || !value) {
+      return;
+    }
+    var duration = audio.duration;
+    if (!usableDuration(duration)) {
+      value.textContent = "";
+      wrapper.hidden = true; // unknown duration is not shown at all
+      return;
+    }
+    value.textContent = formatDuration(duration);
+    wrapper.hidden = false;
+  }
+
+  /* Media events do not bubble: the capture phase on the document is what
+     makes this work for elements created later as well. */
+  document.addEventListener(
+    "loadedmetadata",
+    function (event) {
+      if (isAudioElement(event.target)) {
+        renderDuration(event.target);
+      }
+    },
+    true
+  );
+
+  document.addEventListener(
+    "error",
+    function (event) {
+      // A refused or missing file: whatever was shown must go away.
+      if (isAudioElement(event.target)) {
+        renderDuration(event.target);
+      }
+    },
+    true
+  );
+
+  /* A cached file can already have metadata by the time this module runs. */
+  function renderAll() {
+    var players = document.querySelectorAll(".message__audio audio");
+    for (var index = 0; index < players.length; index += 1) {
+      renderDuration(players[index]);
+    }
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", renderAll);
+  } else {
+    renderAll();
+  }
+})();
+
+/* ------------------------------------------------------------------ *
+ * Day counters (task T16b).
+ * ------------------------------------------------------------------ *
+ * The day header counts real rows: the server rendered the numbers it counted
+ * (``data-total`` / ``data-voice``) — never a guess. An entry saved or
+ * deleted *on this page* moves those numbers, so this module adjusts them by
+ * exactly one and re-renders the sentence with the matching Russian plural
+ * form. Without it the header would keep claiming a count the feed no longer
+ * shows.
+ *
+ * Events carry the kind only ("text"/"audio") — never diary content — and the
+ * wording mirrors ``_day_counters`` in api/routes/pages.py.
+ */
+(function () {
+  var counters = document.querySelector('[data-role="day-counters"]');
+  if (!counters) {
+    return;
+  }
+
+  var ENTRY_FORMS = ["запись", "записи", "записей"];
+  var VOICE_FORMS = ["голосовое сообщение", "голосовых сообщения", "голосовых сообщений"];
+
+  /* Russian needs three forms; 11-14 behave like "many" (same rule as the
+     server side). */
+  function plural(count, forms) {
+    var lastTwo = count % 100;
+    if (count % 10 === 1 && lastTwo !== 11) {
+      return forms[0];
+    }
+    if (count % 10 >= 2 && count % 10 <= 4 && (lastTwo < 12 || lastTwo > 14)) {
+      return forms[1];
+    }
+    return forms[2];
+  }
+
+  function label(total, voice) {
+    if (total === 0) {
+      return "Записей нет";
+    }
+    var text = total + " " + plural(total, ENTRY_FORMS);
+    if (voice > 0) {
+      text = text + " · из них " + voice + " " + plural(voice, VOICE_FORMS);
+    }
+    return text;
+  }
+
+  function currentCount(role) {
+    var value = Number(counters.getAttribute("data-" + role) || 0);
+    return isFinite(value) && value > 0 ? value : 0;
+  }
+
+  function adjust(totalDelta, voiceDelta) {
+    var total = Math.max(currentCount("total") + totalDelta, 0);
+    var voice = Math.max(currentCount("voice") + voiceDelta, 0);
+    if (voice > total) {
+      voice = total; // a voice entry is an entry: the pair stays consistent
+    }
+    counters.setAttribute("data-total", String(total));
+    counters.setAttribute("data-voice", String(voice));
+    counters.textContent = label(total, voice);
+  }
+
+  document.addEventListener("diary:entry-added", function (event) {
+    var kind = event.detail ? event.detail.kind : "";
+    adjust(1, kind === "audio" ? 1 : 0);
+  });
+
+  document.addEventListener("diary:entry-removed", function (event) {
+    var kind = event.detail ? event.detail.kind : "";
+    adjust(-1, kind === "audio" ? -1 : 0);
+  });
 })();

@@ -1,0 +1,41 @@
+{# Navigation links of the diary shell (tasks T16a/T16b).
+
+   Included twice by ``base.html``: by the sidebar and by the compact topbar
+   menu that keeps the sections reachable at <=700px, where the mockup hides
+   the sidebar entirely. One source of truth: every route that exists is
+   listed exactly once and the two copies cannot drift apart.
+
+   No dead entries (the mockup's "Хронология" / "Настройки" have no page and
+   are therefore not rendered): the counters come from the database
+   (``nav``, computed in ``api/routes/pages.py``) and are omitted altogether
+   on a page that deliberately stays database-free (the privacy page passes no
+   ``nav``). ``nav_current`` highlights the item of the page being rendered. #}
+<span class="nav-label">Дневник</span>
+<a class="nav-item{% if nav_current == 'chat' %} nav-item--active{% endif %}"
+   href="/"{% if nav_current == 'chat' %} aria-current="page"{% endif %}>
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+  Дневник
+</a>
+<a class="nav-item{% if nav_current == 'exports' %} nav-item--active{% endif %}"
+   href="/exports"{% if nav_current == 'exports' %} aria-current="page"{% endif %}>
+  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+  Недельные выгрузки
+  {%- if nav %}
+  <span class="count"><span class="visually-hidden">всего: </span>{{ nav.exports_count }}</span>
+  {%- endif %}
+</a>
+
+<span class="nav-label">Система</span>
+<a class="nav-item{% if nav_current == 'processing' %} nav-item--active{% endif %}"
+   href="/processing"{% if nav_current == 'processing' %} aria-current="page"{% endif %}>
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v4l2.5 2.5"/><circle cx="12" cy="12" r="9"/></svg>
+  Обработка
+  {%- if nav %}
+  <span class="count"><span class="visually-hidden">задач в работе: </span>{{ nav.active_jobs }}</span>
+  {%- endif %}
+</a>
+<a class="nav-item{% if nav_current == 'privacy' %} nav-item--active{% endif %}"
+   href="/privacy"{% if nav_current == 'privacy' %} aria-current="page"{% endif %}>
+  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+  Приватность
+</a>

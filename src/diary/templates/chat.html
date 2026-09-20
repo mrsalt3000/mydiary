@@ -1,76 +1,146 @@
 {% extends "base.html" %}
-{% block title %}Дневник — Local Diary{% endblock %}
+{# The day feed (task T16b): one local calendar day as the page's unit —
+   day header (title, counters, date picker, day-to-day navigation), the day's
+   entry cards and the composer.
+
+   Contract of the markup (checked in tests/integration/test_chat_pages.py):
+   - ``#message-list`` stays the htmx target of the "older" fragment and the
+     container app.js appends freshly saved entries to (unchanged since
+     Task 06), and ``#message-empty`` stays the empty state app.js re-creates
+     when the last entry of the day is deleted;
+   - every voice-message control keeps its id (``voice-*``), including the
+     T14 recording indicator whose ticking value is an ``aria-hidden`` child;
+   - nothing here invents data: the counters are counted rows, the date is the
+     requested (or today's) day, and a voice message's duration is *not*
+     rendered server-side at all — it is read from the audio metadata in the
+     browser (see static/js/app.js) and simply stays absent when unavailable. #}
+{% block title %}{{ day_title }} — Local Diary{% endblock %}
 {% block page_title %}Дневник{% endblock %}
 {% block page_subtitle %}
-  <span class="breadcrumbs__subtitle">Личный дневник</span>
+  <span class="breadcrumbs__subtitle">{{ day_relative or day_title }}</span>
 {% endblock %}
 {% block content %}
 <main class="chat-page">
-  <section class="history" aria-label="История записей">
-    {% if has_more %}
-    <div id="older-control">
-      {% include "_older_button.html" %}
-    </div>
+  <section class="journal" aria-label="Записи за {{ day_title | lower }}">
+    <header class="day-header">
+      <div class="day-header__text">
+        <h2 class="day-header__title">
+          {% if day_relative %}<span class="day-header__relative">{{ day_relative }}</span>{% endif %}
+          {{ day_title }}
+        </h2>
+        <p class="day-header__counters" data-role="day-counters"
+           data-total="{{ day_entries_total }}" data-voice="{{ day_voice_total }}">{{ day_counters }}</p>
+      </div>
+      <div class="day-header__controls">
+        <nav class="day-nav" aria-label="Навигация по дням">
+          <a class="day-nav__button" href="{{ prev_day_url }}" rel="prev"
+             aria-label="Предыдущий день: {{ prev_day_title }}">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 6-6 6 6 6"/></svg>
+          </a>
+          <a class="day-nav__button" href="{{ next_day_url }}" rel="next"
+             aria-label="Следующий день: {{ next_day_title }}">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+          </a>
+          {% if not day_is_today %}
+          <a class="day-nav__today" href="/">К сегодняшнему дню</a>
+          {% endif %}
+        </nav>
+        <form class="day-picker" method="get" action="/">
+          <label class="visually-hidden" for="day-picker">Выбрать дату</label>
+          <input type="date" id="day-picker" name="date" value="{{ day_iso }}">
+          <button type="submit" class="day-picker__submit">Показать</button>
+        </form>
+      </div>
+    </header>
+
+    {% if day_error %}
+    <p class="day-notice" role="alert">{{ day_error }}</p>
     {% endif %}
 
-    <div id="message-list" class="message-list">
-      {% if messages %}
-      {% for message in messages %}{% include "_message.html" %}{% endfor %}
-      {% else %}
-      <p id="message-empty" class="message-list__empty">
-        Пока нет записей. Напишите первую ниже.
-      </p>
+    <div class="history">
+      {% if has_more %}
+      <div id="older-control">
+        {% include "_older_button.html" %}
+      </div>
       {% endif %}
+
+      <div id="message-list" class="message-list">
+        {% if messages %}
+        {% for message in messages %}{% include "_message.html" %}{% endfor %}
+        {% else %}
+        <p id="message-empty" class="message-list__empty">{{ day_empty_text }}</p>
+        {% endif %}
+      </div>
     </div>
   </section>
 
-  <section class="compose" aria-label="Новая запись">
-    {# Voice messages (Task 07): recording through MediaRecorder and a file
-       upload fallback. Requires JavaScript (fetch upload), so the section
-       starts hidden and app.js reveals it only when it can work. The hidden
-       file input accepts exactly the server-side MIME allowlist. #}
-    <div class="voice" id="voice-compose" aria-label="Голосовое сообщение"
-         data-max-audio-mb="{{ max_audio_size_mb }}" hidden>
-      <p class="voice__title">Голосовое сообщение</p>
-      <div class="voice__controls">
-        <button id="voice-record" type="button" class="voice-button">
-          Записать голосовое
-        </button>
-        <button id="voice-stop" type="button" class="voice-button voice-button--stop" hidden>
-          Остановить запись
-        </button>
-        <label for="voice-file" class="voice-button voice-button--file">Загрузить файл</label>
-        <input id="voice-file" class="visually-hidden" type="file"
-               accept="{{ audio_accept }}">
-        {# Recording indicator (Task 07) with the live duration (T14): the
-           ticking value lives in an aria-hidden child so the role="status"
-           region still announces "Идёт запись…" once and stays silent
-           afterwards. #}
-        <span id="voice-recording" class="voice-recording" role="status" hidden>
-          Идёт запись…
-          <span id="voice-elapsed" aria-hidden="true"></span>
-        </span>
-      </div>
-      <p id="voice-status" class="voice-status" role="status" hidden></p>
-      <p id="voice-error" class="form-error" role="alert" hidden></p>
-    </div>
+  {# Composer. The mockup pins it to the bottom of the middle column; here it
+     is ``position: sticky`` inside the page column, which keeps it in reach
+     without covering the feed (a fixed bar would need a matching bottom
+     padding and would hide entries on short screens).
 
-    <form id="compose-form" class="compose-form" method="post" novalidate
-          data-max-length="{{ max_message_length }}">
-      <label class="visually-hidden" for="message-text">Текст записи</label>
-      <textarea id="message-text" name="body" rows="3" required
-                placeholder="Напишите запись…"></textarea>
-      <p id="form-error" class="form-error" role="alert" hidden></p>
-      <div class="compose-form__actions">
-        <button id="compose-submit" type="submit">Сохранить запись</button>
+     ``data-day-is-today`` is honest state from the server clock: an entry can
+     only be created "now", so a save made while another day is on screen must
+     not be appended to that day's feed — app.js then says where it went
+     instead (see the "compose-day-note" region below). #}
+  <div class="composer-wrap">
+    <section class="compose" aria-label="Новая запись">
+      {% if not day_is_today %}
+      <p class="compose__notice">{{ day_compose_notice }}</p>
+      {% endif %}
+
+      {# Voice messages (Task 07): recording through MediaRecorder and a file
+         upload fallback. Requires JavaScript (fetch upload), so the section
+         starts hidden and app.js reveals it only when it can work. The hidden
+         file input accepts exactly the server-side MIME allowlist. #}
+      <div class="voice" id="voice-compose" aria-label="Голосовое сообщение"
+           data-max-audio-mb="{{ max_audio_size_mb }}" hidden>
+        <p class="voice__title">Голосовое сообщение</p>
+        <div class="voice__controls">
+          <button id="voice-record" type="button" class="voice-button">
+            Записать голосовое
+          </button>
+          <button id="voice-stop" type="button" class="voice-button voice-button--stop" hidden>
+            Остановить запись
+          </button>
+          <label for="voice-file" class="voice-button voice-button--file">Загрузить файл</label>
+          <input id="voice-file" class="visually-hidden" type="file"
+                 accept="{{ audio_accept }}">
+          {# Recording indicator (Task 07) with the live duration (T14): the
+             ticking value lives in an aria-hidden child so the role="status"
+             region still announces "Идёт запись…" once and stays silent
+             afterwards. #}
+          <span id="voice-recording" class="voice-recording" role="status" hidden>
+            Идёт запись…
+            <span id="voice-elapsed" aria-hidden="true"></span>
+          </span>
+        </div>
+        <p id="voice-status" class="voice-status" role="status" hidden></p>
+        <p id="voice-error" class="form-error" role="alert" hidden></p>
       </div>
-      <noscript>
-        <p class="noscript-note">
-          Для добавления записей (текста и голоса) нужен включённый
-          JavaScript. Просмотр истории работает и без него.
-        </p>
-      </noscript>
-    </form>
-  </section>
+
+      <form id="compose-form" class="compose-form" method="post" novalidate
+            data-max-length="{{ max_message_length }}"
+            data-day-is-today="{{ 'true' if day_is_today else 'false' }}">
+        <label class="visually-hidden" for="message-text">Текст записи</label>
+        <textarea id="message-text" name="body" rows="1" required
+                  placeholder="Запишите мысль…"></textarea>
+        <p id="form-error" class="form-error" role="alert" hidden></p>
+        {# Filled in by app.js when a save happens while a *different* day is
+           on screen: it says where the entry actually went and offers the way
+           there. Static text, built with createElement/textContent only. #}
+        <p id="compose-day-note" class="compose-form__note" role="status" hidden></p>
+        <div class="compose-form__actions">
+          <button id="compose-submit" type="submit">Сохранить запись</button>
+        </div>
+        <noscript>
+          <p class="noscript-note">
+            Для добавления записей (текста и голоса) нужен включённый
+            JavaScript. Просмотр истории работает и без него.
+          </p>
+        </noscript>
+      </form>
+    </section>
+  </div>
 </main>
 {% endblock %}

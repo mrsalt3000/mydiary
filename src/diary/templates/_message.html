@@ -1,26 +1,55 @@
-{# One diary message (Tasks 06/07/09). Reused by the chat page (initial window)
-   and by the "older messages" fragment. ``message`` is a template-facing dict:
-   id / kind / created_at_iso / created_at_display / body, plus — for
+{# One diary entry card — the day feed's unit (tasks 06/07/09, T16b).
+
+   Reused by the day page (initial window) and by the "older" fragment.
+   ``message`` is a template-facing dict: id / kind / created_at_iso /
+   created_at_display / created_time_display / body, plus — for
    ``kind == 'audio'`` — audio_file_id / audio_url / audio_mime / the effective
    transcription status + label, the newest succeeded raw text, the transcribe
    button label and the active job id when a job is in flight.
 
-   Safety rules:
+   Honest numbers only (task T16b):
+   - the *duration* of a voice message is never rendered here. It is read in
+     the browser from the audio element's own metadata
+     (``loadedmetadata`` → ``audio.duration``, see static/js/app.js) and is
+     simply left out when the browser cannot provide it; no placeholder value
+     is ever shown, and nothing here pre-computes a duration from a stored
+     field the UI would have to trust;
+   - the waveform is decoration: it is ``aria-hidden``, has no data of its own
+     and is not derived from the audio content.
+
+   Safety rules (unchanged since Task 06/07):
    - user text (``body``) and raw transcription text are escaped by Jinja2
      autoescape — never markup;
    - ``audio_url`` is always a server-generated path
      (``/api/v1/audio/<uuid>/file``) built by the backend from a database row,
      never from any user-supplied value (no user-controlled ``src``);
    - transcribe actions never run in a page request: they POST to the API and
-     the job is polled by the client (Task 09). #}
+     the job is polled by the client (Task 09).
+   - deletion (T15, ADR-011) is included for text and voice messages alike. #}
 {% if message.kind == 'audio' %}
 <article class="message message--audio" id="message-{{ message.id }}">
   <header class="message__meta">
-    <time datetime="{{ message.created_at_iso }}">{{ message.created_at_display }}</time>
-    <span class="message__badge">Голосовое</span>
+    <span class="type-dot type-dot--voice" aria-hidden="true"></span>
+    <span class="message__kind">Голосовое сообщение</span>
+    <time datetime="{{ message.created_at_iso }}">{{ message.created_time_display }}</time>
   </header>
   <div class="message__audio">
+    {# The real player, with the browser's own controls: seeking, volume and
+       keyboard operation come for free and stay accessible. #}
     <audio controls preload="metadata" src="{{ message.audio_url }}"></audio>
+    <div class="audio-card">
+      {# Decoration only: 20 bars of a fixed pattern (see .waveform in
+         app.css). Not a waveform of this recording, hence aria-hidden and no
+         numbers of its own. #}
+      <span class="waveform" aria-hidden="true">{% for _bar in range(20) %}<i></i>{% endfor %}</span>
+      {# Duration read from the audio metadata on the client; the wrapper
+         stays hidden until a real value arrives, so an unknown duration is
+         simply not shown. #}
+      <p class="audio-duration" data-role="duration-wrap" hidden>
+        <span class="visually-hidden">Длительность записи:</span>
+        <span class="audio-duration__value" data-role="duration"></span>
+      </p>
+    </div>
   </div>
   <div class="message__transcription"
        id="transcription-{{ message.audio_file_id }}"
@@ -41,14 +70,22 @@
     </button>
     <p class="message__note" data-role="note" role="status" hidden></p>
   </div>
-  {% include "_message_actions.html" %}
+  <footer class="entry-footer">
+    <p class="entry-footer__origin">Оригинал · локально</p>
+    {% include "_message_actions.html" %}
+  </footer>
 </article>
 {% else %}
 <article class="message" id="message-{{ message.id }}">
   <header class="message__meta">
-    <time datetime="{{ message.created_at_iso }}">{{ message.created_at_display }}</time>
+    <span class="type-dot" aria-hidden="true"></span>
+    <span class="message__kind">Текстовая запись</span>
+    <time datetime="{{ message.created_at_iso }}">{{ message.created_time_display }}</time>
   </header>
   <div class="message__body">{{ message.body }}</div>
-  {% include "_message_actions.html" %}
+  <footer class="entry-footer">
+    <p class="entry-footer__origin">Оригинал · локально</p>
+    {% include "_message_actions.html" %}
+  </footer>
 </article>
 {% endif %}

@@ -154,7 +154,9 @@ def test_deleted_message_is_absent_from_the_chat_page(
 
     assert _delete(api_client, removed_id).status_code == 204
 
-    page = api_client.get("/")
+    # The page shows one local day (T16b), so the day of the seeded messages
+    # has to be named (LOCAL_DATE is 2026-09-10, the day both live in).
+    page = api_client.get("/", params={"date": LOCAL_DATE.isoformat()})
     assert page.status_code == 200
     html = page.text
     assert f"message-{kept_id}" in html

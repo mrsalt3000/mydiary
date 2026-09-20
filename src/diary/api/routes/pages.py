@@ -1,12 +1,14 @@
-"""Thin page routes for the server-rendered UI (Tasks 06/10/13/14/15/16).
+"""Thin page routes for the server-rendered UI (Tasks 06/10/13/14/15/16/16b).
 
 Mounted at the application root (no prefix; ``/api/v1`` stays the JSON API).
 
-- ``GET /``                              — the chat page: first history window,
-  the compose form and the "load older" control when older messages exist;
+- ``GET /``                              — one day of the diary (task T16b):
+  the day's entries (date-as-unit, counters, day navigation) with the compose
+  form and the "load older" control when that day holds more than one window;
 - ``GET /messages/fragments/older``      — HTML fragment of the next older
-  window (htmx ``afterbegin`` into ``#message-list``) plus an out-of-band
-  ``#older-control`` that carries the next cursor (or stops paging);
+  window *of the day the cursor belongs to* (htmx ``afterbegin`` into
+  ``#message-list``) plus an out-of-band ``#older-control`` that carries the
+  next cursor (or stops paging);
 - Task 16 exports/processing management UI:
   ``GET /exports`` (weekly exports management), ``GET /exports/{export_id}``
   (per-export lineage detail), ``GET /processing`` (recent jobs) and
@@ -15,8 +17,15 @@ Mounted at the application root (no prefix; ``/api/v1`` stays the JSON API).
 Rendering decisions
 ===================
 * Timestamps are converted to the application timezone
-  (``AppSettings.tzinfo``) and formatted as ``%d.%m.%Y %H:%M``; the ``<time
-  datetime>`` attribute keeps the full ISO-8601 value for the page's own use.
+  (``AppSettings.tzinfo``) and formatted as ``%d.%m.%Y %H:%M``; an entry card
+  additionally carries the wall-clock-only ``%H:%M`` (the day is the page's
+  unit, so the date lives in the day header). The ``<time datetime>``
+  attribute keeps the full ISO-8601 value for the page's own use.
+* The day itself is a *local calendar day* in the application timezone, using
+  the very same definition as the daily-summary layer
+  (:func:`diary.domain.pipelines.sum_daily.day_input.day_bounds`, ADR-007 §1),
+  so the page and the pipeline can never disagree about which day a message
+  belongs to. No timezone arithmetic is re-implemented here.
 * All user text is escaped by Jinja2 autoescape (default for ``.html``).
 * The keyset cursor format is owned by the messages API
   (``diary.api.routes.messages``); this module imports the codec instead of
@@ -29,7 +38,7 @@ Rendering decisions
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote, urlsplit
@@ -50,6 +59,7 @@ from diary.core.models_config import (
 )
 from diary.core.profile_status import ProfileStatus, profile_statuses
 from diary.core.settings import get_settings
+from diary.db.base import utc_now
 from diary.db.models import (
     Artifact,
     ArtifactLayer,
@@ -68,17 +78,19 @@ from diary.db.repositories import (
     ArtifactRepository,
     AudioFileRepository,
     JobRepository,
+    MessageRepository,
     ProcessingRunRepository,
     TranscriptionRepository,
     WeeklyExportRepository,
 )
-from diary.domain.chat.service import list_messages
+from diary.domain.chat.service import MessageCursor
 from diary.domain.exports.service import export_filename, list_exports
 from diary.domain.exports.weeks import sunday_date_for
 from diary.domain.pipelines.naming import (
     JOB_PIPELINE_TYPE,
     PIPELINE_JOB_TYPE,
 )
+from diary.domain.pipelines.sum_daily.day_input import day_bounds, local_date_of
 from diary.domain.pipelines.wellbeing.safety import (
     ESCALATION_LINES,
     ESCALATION_TITLE,
@@ -92,12 +104,58 @@ _PACKAGE_DIR = Path(__file__).resolve().parents[2]
 TEMPLATES_DIR = _PACKAGE_DIR / "templates"
 STATIC_DIR = _PACKAGE_DIR / "static"
 
-#: History window size: messages per page and per "older" fragment.
+#: Entries per day window (the initial page and each "older" fragment).
 PAGE_LIMIT = 50
 
 #: Wall-clock display format for message timestamps (application timezone).
 #: Numeric-only codes: the rendering does not depend on the process locale.
 TIMESTAMP_FORMAT = "%d.%m.%Y %H:%M"
+
+#: Wall-clock-only format for entry cards (task T16b): the day is the page's
+#: unit, so the card shows the time and the day header carries the date.
+TIME_FORMAT = "%H:%M"
+
+#: Weekday titles for the day header, indexed by ``date.weekday()``. Explicit
+#: tables instead of locale data: like the formats above, the rendering must
+#: not depend on the process locale (a Russian page on an English machine).
+WEEKDAY_TITLES: tuple[str, ...] = (
+    "Понедельник",
+    "Вторник",
+    "Среда",
+    "Четверг",
+    "Пятница",
+    "Суббота",
+    "Воскресенье",
+)
+
+#: Month names in the genitive case ("20 сентября").
+MONTH_TITLES: tuple[str, ...] = (
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+)
+
+#: Russian plural forms of "запись" / "голосовое сообщение" (one, few, many).
+ENTRY_FORMS: tuple[str, str, str] = ("запись", "записи", "записей")
+VOICE_FORMS: tuple[str, str, str] = (
+    "голосовое сообщение",
+    "голосовых сообщения",
+    "голосовых сообщений",
+)
+
+#: Shown when ``?date=`` cannot be read as an unambiguous local calendar day.
+#: The page then falls back to today: a malformed link must never be an error
+#: page (and never a 500).
+INVALID_DAY_NOTICE = "Дата в адресе не распознана — показан сегодняшний день."
 
 #: Human-readable transcription-state captions for audio messages.
 TRANSCRIPTION_LABELS: dict[TranscriptionStatus, str] = {
@@ -293,6 +351,9 @@ def _message_view(record: Message, session: Session) -> dict[str, Any]:
         "kind": record.kind.value,
         "created_at_iso": created_local.isoformat(),
         "created_at_display": created_local.strftime(TIMESTAMP_FORMAT),
+        # T16b: the card shows only the wall-clock time — the date is in the
+        # day header, which is what the page is about.
+        "created_time_display": created_local.strftime(TIME_FORMAT),
         "body": record.body_text,
     }
     if record.kind is MessageKind.audio:
@@ -328,16 +389,38 @@ def _nav_context(session: Session) -> dict[str, Any]:
 def chat_page(
     request: Request,
     session: Annotated[Session, Depends(get_session)],
+    date_raw: Annotated[str | None, Query(alias="date", max_length=32)] = None,
 ) -> HTMLResponse:
-    """Render the chat page with the first (most recent) history window."""
-    messages, next_cursor = list_messages(session, limit=PAGE_LIMIT)
-    older_cursor = _encode_cursor(next_cursor) if next_cursor is not None else None
+    """Render one local calendar day of the diary (task T16b).
+
+    The day is the page's unit: the header names it, the counters count it and
+    the feed holds its entries only. ``?date=`` selects the day
+    (``YYYY-MM-DD``, a local calendar date in the application timezone); with
+    no parameter — or with an unusable one — the page shows today plus a
+    notice, never a 500 (``INVALID_DAY_NOTICE``).
+
+    The day's entries come from :meth:`MessageRepository.list_active_between`
+    — the very same day window the weekly export and the daily-summary layer
+    use, computed by the *same* ``day_bounds`` helper (ADR-007 §1) — so page
+    and pipelines cannot disagree about what "one day" contains. Soft-deleted
+    messages are excluded by that repository method (task T15 policy).
+
+    Only the newest :data:`PAGE_LIMIT` entries of a very long day are rendered
+    initially; the "older" control then pages *inside that day*
+    (:func:`older_messages_fragment`), so nothing is silently dropped and the
+    feed never spills over into the neighbouring days.
+    """
     settings = get_settings()
+    today = local_date_of(utc_now(), settings.tzinfo)
+    day, day_notice = _requested_day(date_raw, today=today, tz=settings.tzinfo)
+    day_messages = _day_messages(session, day, settings.tzinfo)
+    window, next_cursor = _day_history_window(day_messages, limit=PAGE_LIMIT)
+    older_cursor = _encode_cursor(next_cursor) if next_cursor is not None else None
     return templates.TemplateResponse(
         request,
         "chat.html",
         {
-            "messages": [_message_view(message, session) for message in messages],
+            "messages": [_message_view(message, session) for message in window],
             "has_more": next_cursor is not None,
             # Pre-quoted for the hx-get URL; Jinja never sees raw "+" or "|".
             "older_cursor": quote(older_cursor, safe="") if older_cursor else None,
@@ -347,8 +430,193 @@ def chat_page(
             "audio_accept": ",".join(settings.allowed_audio_mime_types),
             "nav_current": "chat",
             "nav": _nav_context(session),
+            **_day_view(day, today=today, messages=day_messages, notice=day_notice),
         },
     )
+
+
+def _russian_plural(count: int, forms: tuple[str, str, str]) -> str:
+    """The Russian plural form of ``count``: one / few / many.
+
+    Russian needs three forms and the 11-14 teens behave like "many". The UI
+    counts real rows, so the sentence has to agree with the number.
+    """
+    if count % 10 == 1 and count % 100 != 11:
+        return forms[0]
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return forms[1]
+    return forms[2]
+
+
+def _day_title(day: date, today: date) -> str:
+    """Human-readable day title: "Воскресенье, 20 сентября" (plus the year when
+    the day is not in the current year, so the header is never ambiguous)."""
+    title = f"{WEEKDAY_TITLES[day.weekday()]}, {day.day} {MONTH_TITLES[day.month - 1]}"
+    if day.year != today.year:
+        title = f"{title} {day.year}"
+    return title
+
+
+def _day_counters(messages: list[Message]) -> str:
+    """The day's counters, counted, never invented.
+
+    "3 записи · из них 1 голосовое сообщение" — the totals of the whole day
+    (not of the rendered window), exactly as stored. An empty day says so
+    instead of showing zeros.
+    """
+    total = len(messages)
+    if total == 0:
+        return "Записей нет"
+    voice = sum(1 for message in messages if message.kind is MessageKind.audio)
+    counters = f"{total} {_russian_plural(total, ENTRY_FORMS)}"
+    if voice:
+        counters = f"{counters} · из них {voice} {_russian_plural(voice, VOICE_FORMS)}"
+    return counters
+
+
+def _day_messages(session: Session, day: date, tz: tzinfo) -> list[Message]:
+    """Every active message of the local calendar day ``day``, oldest first.
+
+    The window (``day_bounds``) is the shared definition of "that local day";
+    the query itself is the existing
+    :meth:`MessageRepository.list_active_between` — no day-shaped SQL is
+    written here. Soft-deleted messages are excluded by that method.
+    """
+    start, end = day_bounds(day, tz)
+    return MessageRepository(session).list_active_between(start=start, end=end)
+
+
+def _local_day_bounds(day: date, tz: tzinfo) -> tuple[datetime, datetime] | None:
+    """The UTC instants of local day ``day``, or ``None`` if it has none.
+
+    ``date.fromisoformat`` happily returns dates whose local day window cannot
+    be represented (``0001-01-01`` with a positive offset, ``9999-12-31`` —
+    the next local midnight overflows). Those are treated as "not a usable
+    date" so that a hand-written URL can never reach an unhandled overflow.
+    """
+    try:
+        return day_bounds(day, tz)
+    except (OverflowError, ValueError):
+        return None
+
+
+def _requested_day(raw: str | None, *, today: date, tz: tzinfo) -> tuple[date, str | None]:
+    """The day to render plus an optional notice about the request.
+
+    Returns ``(today, None)`` when no date was asked for, and
+    ``(today, INVALID_DAY_NOTICE)`` when ``?date=`` is unreadable or names a
+    day whose window cannot be computed. A named but merely *empty* day (a
+    future date, a date before the diary existed) is a perfectly normal day
+    and renders as such.
+    """
+    if raw is None or not raw.strip():
+        return today, None
+    try:
+        day = date.fromisoformat(raw.strip())
+    except ValueError:
+        return today, INVALID_DAY_NOTICE
+    if _local_day_bounds(day, tz) is None:
+        return today, INVALID_DAY_NOTICE
+    return day, None
+
+
+def _day_history_window(
+    day_messages: list[Message],
+    *,
+    limit: int,
+    older_than: MessageCursor | None = None,
+) -> tuple[list[Message], MessageCursor | None]:
+    """The ``limit`` newest messages of a day, plus the next-page cursor.
+
+    ``day_messages`` is one day in chronological order (as
+    :meth:`MessageRepository.list_active_between` returns it). With
+    ``older_than`` set only the messages strictly older than that keyset
+    position are considered, which is exactly the contract of the API paging
+    (:func:`diary.domain.chat.service.list_messages`) — except that the day
+    bounds the window here, so paging can never walk into the day before and
+    "load older" always terminates.
+
+    The returned cursor is the position of the oldest returned message when
+    the day still holds older ones, else ``None``.
+    """
+    older = day_messages
+    if older_than is not None:
+        older = [
+            message for message in day_messages if (message.created_at, message.id) < older_than
+        ]
+    window = older[-limit:]
+    next_cursor: MessageCursor | None = None
+    if len(older) > len(window):
+        oldest = window[0]
+        next_cursor = (oldest.created_at, oldest.id)
+    return window, next_cursor
+
+
+def _day_empty_text(*, is_today: bool, today_title: str) -> str:
+    """The empty state of a day without entries (task T16b).
+
+    Two sentences and no invented promise: the first says what is true about
+    this day, and on another day the second one states where a freshly written
+    entry will actually go (an entry can only be created "now").
+    """
+    text = "Пока нет записей за этот день."
+    if not is_today:
+        text = (
+            f"{text} Запись, созданная сейчас, попадёт в сегодняшний день ({today_title.lower()})."
+        )
+    return f"{text} Напишите первую ниже или выберите другой день в шапке дня."
+
+
+def _compose_notice(day_title: str, today_title: str) -> str:
+    """What the composer says while a day that is not today is on screen.
+
+    An entry can only be created "now", so the composer states where a new
+    entry will actually go instead of silently writing into another day than
+    the one being displayed.
+    """
+    return (
+        f"Показан день «{day_title.lower()}». "
+        f"Новая запись будет создана в сегодняшнем дне ({today_title.lower()})."
+    )
+
+
+def _day_view(
+    day: date,
+    *,
+    today: date,
+    messages: list[Message],
+    notice: str | None,
+) -> dict[str, Any]:
+    """Template fields of the day header (title, counters, day navigation).
+
+    The previous/next links are plain links to the neighbouring local days and
+    are *not* capped at today: claiming "there is nothing after today" would
+    be an unverified statement about the data (nothing stops an imported row
+    from carrying a later timestamp). A future day is simply an empty day, and
+    the empty state says so. ``day_is_today`` drives the composer hint and the
+    "back to today" link — both factual, both from the clock.
+    """
+    previous_day = day - timedelta(days=1)
+    next_day = day + timedelta(days=1)
+    is_today = day == today
+    relative = "Сегодня" if is_today else ("Вчера" if day == today - timedelta(days=1) else None)
+    today_title = _day_title(today, today)
+    return {
+        "day_iso": day.isoformat(),
+        "day_title": _day_title(day, today),
+        "day_relative": relative,
+        "day_is_today": is_today,
+        "day_error": notice,
+        "day_counters": _day_counters(messages),
+        "day_entries_total": len(messages),
+        "day_voice_total": sum(1 for message in messages if message.kind is MessageKind.audio),
+        "day_empty_text": _day_empty_text(is_today=is_today, today_title=today_title),
+        "day_compose_notice": _compose_notice(_day_title(day, today), today_title),
+        "prev_day_url": f"/?date={previous_day.isoformat()}",
+        "prev_day_title": _day_title(previous_day, today),
+        "next_day_url": f"/?date={next_day.isoformat()}",
+        "next_day_title": _day_title(next_day, today),
+    }
 
 
 def _export_view(record: WeeklyExport) -> dict[str, Any]:
@@ -1119,24 +1387,34 @@ def older_messages_fragment(
     cursor: Annotated[str, Query(max_length=256)],
     limit: Annotated[int, Query(ge=1, le=200)] = PAGE_LIMIT,
 ) -> HTMLResponse:
-    """Return the next older messages window as an HTML fragment.
+    """Return the next older entries window as an HTML fragment.
 
     The cursor points at the oldest message already shown; the response holds
     the messages strictly older than it in chronological order (they are
     prepended to ``#message-list``), followed by an out-of-band replacement of
     the ``#older-control`` element with the next cursor.
+
+    The window is bounded by the local calendar day the cursor belongs to
+    (task T16b): the feed shows one day, so paging stays inside that day and
+    stops at its beginning instead of walking into the day before. The cursor
+    itself carries the instant, so no extra request parameter is needed and
+    the endpoint keeps working for the JSON-API paging contract
+    (``GET /api/v1/messages``), which remains unbounded.
     """
     try:
         position = _decode_cursor(cursor)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    messages, next_cursor = list_messages(session, limit=limit, cursor=position)
+    settings = get_settings()
+    day = local_date_of(position[0], settings.tzinfo)
+    day_messages = _day_messages(session, day, settings.tzinfo)
+    window, next_cursor = _day_history_window(day_messages, limit=limit, older_than=position)
     older_cursor = _encode_cursor(next_cursor) if next_cursor is not None else None
     return templates.TemplateResponse(
         request,
         "_older_messages.html",
         {
-            "messages": [_message_view(message, session) for message in messages],
+            "messages": [_message_view(message, session) for message in window],
             "has_more": next_cursor is not None,
             "older_cursor": quote(older_cursor, safe="") if older_cursor else None,
         },

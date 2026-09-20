@@ -1,12 +1,18 @@
-"""Integration tests for the chat UI pages (Task 06).
+"""Integration tests for the diary day page (Task 06, day feed in T16b).
 
 Uses an isolated, migrated SQLite test database (fixtures from
-``tests/integration/conftest.py``) plus synthetic data only. Covers: the chat
-page render (form, empty state, created messages after a refresh), safe
-escaping of user HTML, timestamps rendered in the application timezone,
-progressive loading of older messages through the fragment endpoint (order,
+``tests/integration/conftest.py``) plus synthetic data only. Covers: the day
+page render (form, empty state of a day, created messages after a refresh),
+safe escaping of user HTML, timestamps rendered in the application timezone,
+the date-as-unit behaviour of T16b (which day the page shows, counters, the
+day picker, day navigation and the invalid-date fallback), progressive loading
+of older entries *within the current day* through the fragment endpoint (order,
 next-cursor management, history end) and the no-external-resources / safe-DOM
 rules of the client assets.
+
+Messages are seeded on a fixed day (2026-09-10) and the page is asked for that
+day with ``?date=`` — the page shows one local calendar day, so a test that
+wants a specific message on screen has to name the day it belongs to.
 """
 
 from __future__ import annotations
@@ -15,7 +21,7 @@ import re
 import urllib.parse
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -24,22 +30,37 @@ from sqlalchemy.orm import Session
 
 import diary.api.routes.pages as pages_module
 from diary.api.routes.messages import get_session
-from diary.core.settings import reload_settings
-from diary.db.models import MessageKind
-from diary.db.repositories import MessageRepository
+from diary.core.settings import get_settings, reload_settings
+from diary.db.models import Message, MessageKind
+from diary.db.repositories import AudioFileRepository, MessageRepository
 from diary.main import app
 
 #: Repository root: tests/integration/test_chat_pages.py -> parents[2].
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+#: The fixed local day the seeded messages belong to (the default application
+#: timezone is Europe/Moscow, so 2026-09-10T09:00Z is 12:00 local, same day).
+DAY = date(2026, 9, 10)
+
 OLDER_CURSOR_RE = re.compile(r'hx-get="/messages/fragments/older\?cursor=([^"]+)"')
 
 
+def _day_url(day: date) -> str:
+    return f"/?date={day.isoformat()}"
+
+
+def _app_today() -> date:
+    """Today as the application defines it (local calendar day, not UTC)."""
+    return datetime.now(get_settings().tzinfo).date()
+
+
 @pytest.fixture(autouse=True)
-def _isolate_app_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Start every test with default application settings."""
+def _isolate_app_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Start every test with default application settings and a private data root."""
     monkeypatch.delenv("APP_TIMEZONE", raising=False)
     monkeypatch.delenv("APP_MAX_MESSAGE_LENGTH", raising=False)
+    monkeypatch.delenv("APP_DATA_ROOT", raising=False)
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "diary-data"))
     reload_settings()
 
 
@@ -73,6 +94,21 @@ def _create(session: Session, body: str, created_at: datetime):
     return MessageRepository(session).create(
         kind=MessageKind.text, body_text=body, created_at=created_at
     )
+
+
+def _create_voice(session: Session, created_at: datetime) -> Message:
+    """A voice message with its audio-file row (no bytes are written)."""
+    message = MessageRepository(session).create(
+        kind=MessageKind.audio, body_text="", created_at=created_at
+    )
+    AudioFileRepository(session).create(
+        message_id=message.id,
+        original_mime="audio/webm",
+        storage_path="audio/2026/09/synthetic.webm",
+        size_bytes=1024,
+        sha256="0" * 64,
+    )
+    return message
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +156,7 @@ def test_chat_page_escapes_user_html(api_client: TestClient, session: Session) -
     _create(session, payload, _at(8))
     session.commit()
 
-    html = api_client.get("/").text
+    html = api_client.get(_day_url(DAY)).text
     assert "&lt;script&gt;alert(&#34;xss&#34;)&lt;/script&gt;" in html
     assert "&lt;b&gt;bold&lt;/b&gt;" in html
     assert '<script>alert("xss")</script>' not in html
@@ -145,7 +181,9 @@ def test_chat_page_renders_timestamps_in_application_timezone(
         _create(session, "Запись с известным UTC", datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc))
         session.commit()
 
-        html = api_client.get("/").text
+        # 2026-01-01T00:00Z is 05:45 on 2026-01-01 in Kathmandu, so that is the
+        # local day the page has to be asked for (T16b: the page is one day).
+        html = api_client.get(_day_url(date(2026, 1, 1))).text
         assert 'datetime="2026-01-01T05:45:00+05:45"' in html
         assert "01.01.2026 05:45" in html
     finally:
@@ -153,7 +191,179 @@ def test_chat_page_renders_timestamps_in_application_timezone(
 
 
 # ---------------------------------------------------------------------------
-# progressive loading of older messages
+# the day as the unit (task T16b)
+# ---------------------------------------------------------------------------
+
+
+def test_day_page_shows_only_the_requested_day(api_client: TestClient, session: Session) -> None:
+    _create(session, "запись десятого", _at(9))
+    _create(session, "запись одиннадцатого", datetime(2026, 9, 11, 9, tzinfo=timezone.utc))
+    session.commit()
+
+    html = api_client.get(_day_url(DAY)).text
+    assert "запись десятого" in html
+    assert "запись одиннадцатого" not in html
+    assert 'datetime="2026-09-10T12:00:00+03:00"' in html
+    assert 'datetime="2026-09-11' not in html
+
+
+def test_day_page_defaults_to_today_and_names_it(api_client: TestClient, session: Session) -> None:
+    today = _app_today()
+    MessageRepository(session).create(
+        kind=MessageKind.text,
+        body_text="сегодняшняя запись",
+        created_at=datetime.now(timezone.utc),
+    )
+    session.commit()
+
+    html = api_client.get("/").text
+    assert "сегодняшняя запись" in html
+    # The human-readable title of the day and its ISO date are both rendered.
+    assert f'value="{today.isoformat()}"' in html
+    assert "Сегодня" in html
+
+
+def test_day_counters_count_records_and_voice_messages(
+    api_client: TestClient, session: Session
+) -> None:
+    _create(session, "первая", _at(8))
+    _create(session, "вторая", _at(9))
+    _create_voice(session, _at(10))
+    session.commit()
+
+    html = api_client.get(_day_url(DAY)).text
+    assert "3 записи · из них 1 голосовое сообщение" in html
+
+
+def test_day_counters_use_the_right_plural_forms(api_client: TestClient, session: Session) -> None:
+    """The counters agree with the number they count (no "1 записи")."""
+    _create(session, "одна", _at(8))
+    session.commit()
+    assert "1 запись" in api_client.get(_day_url(DAY)).text
+
+    for index in range(2):
+        _create(session, f"ещё-{index}", _at(9 + index))
+    session.commit()
+    assert "3 записи" in api_client.get(_day_url(DAY)).text
+
+
+def test_day_counters_stay_in_step_with_the_feed(api_client: TestClient) -> None:
+    """The header counts real rows and says so in machine-readable form.
+
+    The server renders the numbers it counted as ``data-total``/``data-voice``
+    and app.js adjusts exactly those numbers when this page saves or deletes an
+    entry (see the "day counters" module in app.js), so the sentence can never
+    drift from the feed. Whether it really moves is a runtime property, checked
+    by driving the page, not here.
+    """
+    html = api_client.get(_day_url(DAY)).text
+    assert 'data-role="day-counters"' in html
+    assert 'data-total="0"' in html
+    assert 'data-voice="0"' in html
+
+    script = (REPO_ROOT / "src/diary/static/js/app.js").read_text(encoding="utf-8")
+    assert 'announceEntryChange("diary:entry-added", "text")' in script
+    assert 'announceEntryChange("diary:entry-added", "audio")' in script
+    assert '"diary:entry-removed"' in script
+    assert 'document.addEventListener("diary:entry-added"' in script
+    assert "counters.textContent = label(total, voice)" in script
+
+
+def test_day_page_counts_the_whole_day_not_only_the_rendered_window(
+    api_client: TestClient,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pages_module, "PAGE_LIMIT", 1)
+    _create(session, "старейшая", _at(8))
+    _create(session, "средняя", _at(9))
+    _create_voice(session, _at(10))
+    session.commit()
+
+    html = api_client.get(_day_url(DAY)).text
+    # One entry is rendered (the newest), the counters still describe the day.
+    assert "средняя" not in html
+    assert "3 записи · из них 1 голосовое сообщение" in html
+
+
+def test_empty_day_shows_a_hint_instead_of_entries(api_client: TestClient) -> None:
+    html = api_client.get(_day_url(DAY)).text
+    assert 'id="message-empty"' in html
+    assert "Пока нет записей за этот день." in html
+    assert "Напишите первую ниже" in html
+    assert "Записей нет" in html
+    assert 'class="message"' not in html
+
+
+def test_invalid_date_falls_back_to_today_with_a_notice(
+    api_client: TestClient,
+) -> None:
+    """A malformed ?date= is a readable page, never an error (and never a 500)."""
+    today = _app_today()
+    for value in ("not-a-date", "2026-13-45", "10.09.2026", "9999-12-31", "0001-01-01"):
+        response = api_client.get("/", params={"date": value})
+        assert response.status_code == 200, value
+        html = response.text
+        assert "Дата в адресе не распознана" in html, value
+        assert f'value="{today.isoformat()}"' in html, value
+
+    # An empty parameter means "no date asked for": today, without a notice.
+    blank = api_client.get("/", params={"date": ""})
+    assert blank.status_code == 200
+    assert "Дата в адресе не распознана" not in blank.text
+
+
+def test_date_longer_than_the_limit_is_rejected_with_422(api_client: TestClient) -> None:
+    response = api_client.get("/", params={"date": "9" * 33})
+    assert response.status_code == 422
+
+
+def test_day_picker_and_day_navigation_links(api_client: TestClient) -> None:
+    today = _app_today()
+    html = api_client.get("/").text
+    assert 'type="date"' in html
+    assert 'id="day-picker"' in html
+    assert 'name="date"' in html
+    assert f'value="{today.isoformat()}"' in html
+    # Previous/next are plain links to the neighbouring local days ...
+    assert f'href="/?date={(today - timedelta(days=1)).isoformat()}"' in html
+    assert f'href="/?date={(today + timedelta(days=1)).isoformat()}"' in html
+    # ... and on today's page there is nothing to go "back to today" from.
+    assert 'href="/">К сегодняшнему дню' not in html
+
+    yesterday = today - timedelta(days=1)
+    earlier = api_client.get(_day_url(yesterday)).text
+    assert f'href="/?date={(yesterday - timedelta(days=1)).isoformat()}"' in earlier
+    assert f'href="/?date={today.isoformat()}"' in earlier
+    assert "К сегодняшнему дню" in earlier
+    # Yesterday is named as such, without pretending to be today.
+    assert "Вчера" in earlier
+
+
+def test_day_page_uses_the_same_day_window_as_the_daily_summary_layer(
+    api_client: TestClient, session: Session
+) -> None:
+    """Midnight belongs to the *local* day, exactly as ADR-007 §1 defines it.
+
+    The default application timezone is Europe/Moscow (UTC+03:00, no DST), so
+    20:59Z and 21:01Z on 2026-09-10 are 23:59 and 00:01 local — the two sides
+    of midnight. Each lands on its own day page and on no other.
+    """
+    _create(session, "до полуночи", datetime(2026, 9, 10, 20, 59, tzinfo=timezone.utc))
+    _create(session, "после полуночи", datetime(2026, 9, 10, 21, 1, tzinfo=timezone.utc))
+    session.commit()
+
+    html = api_client.get(_day_url(DAY)).text
+    assert "до полуночи" in html
+    assert "после полуночи" not in html
+
+    tomorrow = api_client.get(_day_url(DAY + timedelta(days=1))).text
+    assert "после полуночи" in tomorrow
+    assert "до полуночи" not in tomorrow
+
+
+# ---------------------------------------------------------------------------
+# progressive loading of older entries inside the day
 # ---------------------------------------------------------------------------
 
 
@@ -167,7 +377,7 @@ def test_chat_page_shows_older_control_only_when_older_messages_exist(
     _create(session, "запись-2", _at(9))
     session.commit()
 
-    html = api_client.get("/").text
+    html = api_client.get(_day_url(DAY)).text
     assert "запись-1" in html
     assert "запись-2" in html
     assert "Показать более старые записи" not in html
@@ -184,7 +394,7 @@ def test_older_fragment_walks_history_in_order_without_gaps(
     session.commit()
 
     # First page: the most recent window (запись-6, -7, -8), oldest first.
-    page = api_client.get("/")
+    page = api_client.get(_day_url(DAY))
     assert page.status_code == 200
     html = page.text
     assert "Показать более старые записи" in html
@@ -256,6 +466,116 @@ def test_older_fragment_rejects_invalid_cursor(api_client: TestClient) -> None:
 def test_older_fragment_missing_cursor_returns_422(api_client: TestClient) -> None:
     response = api_client.get("/messages/fragments/older")
     assert response.status_code == 422
+
+
+def test_older_fragment_stops_at_the_beginning_of_the_cursor_day(
+    api_client: TestClient,
+    session: Session,
+) -> None:
+    """Paging is bounded by the day (T16b): it never walks into the day before.
+
+    A day with entries *and* older entries on the previous day: the fragment
+    returns the rest of the cursor's day and then says "start of history",
+    instead of offering the neighbouring day's entries (which are reached
+    through the day navigation of the header).
+    """
+    older_day_message = _create(
+        session, "запись предыдущего дня", datetime(2026, 9, 9, 9, tzinfo=timezone.utc)
+    )
+    day_messages = [_create(session, f"запись-{index}", _at(8 + index)) for index in range(3)]
+    session.commit()
+
+    cursor = f"{day_messages[-1].created_at.isoformat()}|{day_messages[-1].id}"
+    fragment = api_client.get("/messages/fragments/older", params={"cursor": cursor, "limit": "5"})
+    assert fragment.status_code == 200
+    body = fragment.text
+    # The rest of the same day is returned, the previous day is not.
+    for message in day_messages[:-1]:
+        assert f'id="message-{message.id}"' in body
+    assert f'id="message-{older_day_message.id}"' not in body
+    assert "запись предыдущего дня" not in body
+    assert "Начало истории" in body
+    assert OLDER_CURSOR_RE.search(body) is None
+
+
+# ---------------------------------------------------------------------------
+# the voice card: real duration only, decorative waveform (task T16b)
+# ---------------------------------------------------------------------------
+
+
+def test_voice_card_renders_no_duration_from_the_server(
+    api_client: TestClient, session: Session
+) -> None:
+    """The duration is never rendered by the server.
+
+    This guards the static contract: the card carries an empty, hidden duration
+    element (filled in from the audio metadata by app.js) and no number that
+    could have been invented server-side. Whether the browser really reports a
+    duration is a runtime property, checked by driving the page, not here.
+    """
+    _create_voice(session, _at(10))
+    session.commit()
+
+    html = api_client.get(_day_url(DAY)).text
+    wrapper = re.search(r'<p class="audio-duration"[^>]*>.*?</p>', html, re.DOTALL)
+    assert wrapper is not None, "the voice card must carry the duration element"
+    markup = wrapper.group(0)
+    assert 'data-role="duration-wrap"' in markup
+    assert "hidden" in markup.split(">", 1)[0]
+    # No time-looking value anywhere inside the duration element.
+    assert re.search(r"\d{1,2}:\d{2}", markup) is None
+    # The element is empty until the browser provides a real value.
+    value = re.search(r'<span class="audio-duration__value" data-role="duration"></span>', markup)
+    assert value is not None
+
+    # The rendered decorative waveform: bars, no text and no numbers at all.
+    rendered_waveform = re.search(r'<span class="waveform"[^>]*>.*?</span>', html, re.DOTALL)
+    assert rendered_waveform is not None
+    bars = rendered_waveform.group(0)
+    assert 'aria-hidden="true"' in bars
+    assert bars.count("<i>") == 20
+    assert re.search(r"\d", bars) is None, "the waveform must not carry numbers"
+
+
+def test_waveform_is_decorative_and_hidden_from_assistive_technology() -> None:
+    """The waveform is a shape, not information: it is ``aria-hidden``, holds
+    no numbers and is not derived from the recording (the backend stores none).
+    """
+    template = (REPO_ROOT / "src/diary/templates/_message.html").read_text(encoding="utf-8")
+    waveform = re.search(r'<span class="waveform"[^>]*>', template)
+    assert waveform is not None
+    assert 'aria-hidden="true"' in waveform.group(0)
+
+    script = (REPO_ROOT / "src/diary/static/js/app.js").read_text(encoding="utf-8")
+    # The duration comes from the audio element's own metadata ...
+    assert "loadedmetadata" in script
+    assert "audio.duration" in script
+    # ... and an unusable value hides the element instead of showing something.
+    assert "isFinite(seconds) && seconds > 0" in script
+    assert "wrapper.hidden = true" in script
+    # Appended voice messages get the same decorative waveform.
+    assert "buildAudioCard" in script
+    assert "waveform.setAttribute" in script and '"aria-hidden", "true"' in script
+
+    css = (REPO_ROOT / "src/diary/static/css/app.css").read_text(encoding="utf-8")
+    assert re.search(r"\.audio-duration\s*\{[^}]*font-variant-numeric:\s*tabular-nums", css)
+
+
+def test_compose_form_declares_whether_the_visible_day_is_today(
+    api_client: TestClient,
+) -> None:
+    """An entry can only be created "now": the page tells the client whether the
+    day on screen is today, so a save can never be appended to another day."""
+    today_html = api_client.get("/").text
+    assert 'data-day-is-today="true"' in today_html
+    other_day = _app_today() - timedelta(days=3)
+    other_html = api_client.get(_day_url(other_day)).text
+    assert 'data-day-is-today="false"' in other_html
+    assert "Новая запись будет создана в сегодняшнем дне" in other_html
+
+    script = (REPO_ROOT / "src/diary/static/js/app.js").read_text(encoding="utf-8")
+    assert "viewedDayIsToday" in script
+    assert "showSavedOnAnotherDay" in script
 
 
 # ---------------------------------------------------------------------------

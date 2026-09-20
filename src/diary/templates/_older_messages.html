@@ -1,9 +1,13 @@
-{# Fragment returned by GET /messages/fragments/older (Task 06).
+{# Fragment returned by GET /messages/fragments/older (Task 06, day-bounded
+   since task T16b).
 
-   Body: the next older messages in chronological order (they are inserted at
-   the top of ``#message-list`` with hx-swap="afterbegin", i.e. prepended to
-   what is already shown, which keeps the boundary ordering exact even when
-   several messages share a ``created_at``).
+   Body: the next older entries of the *same local calendar day* the cursor
+   belongs to, in chronological order (they are inserted at the top of
+   ``#message-list`` with hx-swap="afterbegin", i.e. prepended to what is
+   already shown, which keeps the boundary ordering exact even when several
+   messages share a ``created_at``). The day bound is what keeps the day feed
+   inside its day: paging stops at that day's first entry, and the earlier
+   days are reached through the day navigation of the page header.
 
    Out-of-band tail: a fresh ``#older-control`` carrying the next cursor (or
    the "start of history" marker when paging is exhausted) — htmx swaps it in

@@ -18,6 +18,12 @@
    the database-free privacy page, which passes no ``nav`` and therefore
    shows no counters.
 
+   The list itself lives in ``_nav_links.html`` because it is rendered twice
+   (task T16b): once in the sidebar and once in the compact topbar menu that
+   keeps the sections reachable under 700px, where the sidebar is hidden. The
+   compact menu is a native ``<details>`` disclosure — no script, keyboard
+   operable, and hidden above the breakpoint.
+
    The context panel is rendered only when a page sets ``context_panel = true``
    *and* fills the ``context`` block (Jinja cannot tell "empty block" from
    "block not overridden" without rendering it twice, so the page declares its
@@ -63,35 +69,7 @@
       </div>
 
       <nav class="nav" aria-label="Разделы">
-        <span class="nav-label">Дневник</span>
-        <a class="nav-item{% if nav_current == 'chat' %} nav-item--active{% endif %}"
-           href="/"{% if nav_current == 'chat' %} aria-current="page"{% endif %}>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
-          Дневник
-        </a>
-        <a class="nav-item{% if nav_current == 'exports' %} nav-item--active{% endif %}"
-           href="/exports"{% if nav_current == 'exports' %} aria-current="page"{% endif %}>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
-          Недельные выгрузки
-          {%- if nav %}
-          <span class="count"><span class="visually-hidden">всего: </span>{{ nav.exports_count }}</span>
-          {%- endif %}
-        </a>
-
-        <span class="nav-label">Система</span>
-        <a class="nav-item{% if nav_current == 'processing' %} nav-item--active{% endif %}"
-           href="/processing"{% if nav_current == 'processing' %} aria-current="page"{% endif %}>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v4l2.5 2.5"/><circle cx="12" cy="12" r="9"/></svg>
-          Обработка
-          {%- if nav %}
-          <span class="count"><span class="visually-hidden">задач в работе: </span>{{ nav.active_jobs }}</span>
-          {%- endif %}
-        </a>
-        <a class="nav-item{% if nav_current == 'privacy' %} nav-item--active{% endif %}"
-           href="/privacy"{% if nav_current == 'privacy' %} aria-current="page"{% endif %}>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
-          Приватность
-        </a>
+        {% include "_nav_links.html" %}
       </nav>
 
       <div class="sidebar-bottom">
@@ -115,13 +93,33 @@
           <h1>{% block page_title %}{% endblock %}</h1>
           {% block page_subtitle %}{% endblock %}
         </div>
-        <button type="button" class="theme-toggle" data-action="toggle-theme">
-          <span class="theme-toggle__label">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6.7 6.7 0 1 0 9 9A9 9 0 1 1 12 3Z"/></svg>
-            Тема
-          </span>
-          <span class="theme-toggle__state" data-role="theme-name" aria-live="polite">Светлая</span>
-        </button>
+        <div class="topbar-actions">
+          {# Compact section menu (task T16b). At <=700px the mockup hides the
+             whole sidebar, which left the narrow layout with no way to reach
+             another page. This is the access-equivalent of that layout: a
+             native <details>/<summary> disclosure (no JS, keyboard operable,
+             an accessible name on both the trigger and the menu) that renders
+             the very same links as the sidebar — one included source of truth
+             (``_nav_links.html``) — and is only displayed below the
+             breakpoint, so it never duplicates the sidebar for wide
+             viewports or for screen readers. #}
+          <details class="compact-nav">
+            <summary class="compact-nav__summary">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+              Разделы
+            </summary>
+            <nav class="compact-nav__menu" aria-label="Разделы (компактное меню)">
+              {% include "_nav_links.html" %}
+            </nav>
+          </details>
+          <button type="button" class="theme-toggle" data-action="toggle-theme">
+            <span class="theme-toggle__label">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6.7 6.7 0 1 0 9 9A9 9 0 1 1 12 3Z"/></svg>
+              Тема
+            </span>
+            <span class="theme-toggle__state" data-role="theme-name" aria-live="polite">Светлая</span>
+          </button>
+        </div>
       </header>
       {% block content %}{% endblock %}
     </div>

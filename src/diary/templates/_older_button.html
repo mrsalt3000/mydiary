@@ -1,7 +1,12 @@
-{# "Load older" control (Task 06). Rendered both on the chat page (initial
-   state) and inside the older-messages fragment response as an htmx OOB swap
-   that advances the cursor or stops paging. ``older_cursor`` is pre-URL-encoded
-   by the server. #}
+{# "Load older" control (Task 06; day-bounded since task T16b). Rendered both
+   on the day page (initial state) and inside the older-messages fragment
+   response as an htmx OOB swap that advances the cursor or stops paging.
+   ``older_cursor`` is pre-URL-encoded by the server.
+
+   Since T16b the fragment walks the *day the cursor belongs to*, so this
+   control appears only when that single day holds more entries than one
+   window, and it ends at the day's first entry: the day is the page's unit,
+   the previous days are reached through the day navigation in the header. #}
 {% if has_more %}
 <button id="older-button"
         type="button"
