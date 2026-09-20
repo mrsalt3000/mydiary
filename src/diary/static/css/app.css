@@ -216,6 +216,66 @@ body {
   opacity: 0.7;
 }
 
+/* --------------------- message deletion (T15, ADR-011) ------------------ */
+
+.message__actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.message-action {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 0.4rem;
+  color: var(--color-text);
+  cursor: pointer;
+  font: inherit;
+  padding: 0.2rem 0.65rem;
+}
+
+.message-action:hover:not(:disabled),
+.message-action:focus-visible {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.message-action:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.message-action--delete {
+  color: var(--color-text-muted);
+}
+
+.message-action--danger {
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+
+.message__confirm {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  width: 100%;
+}
+
+/* The panel is a flex container, so the UA rule for [hidden] needs a nudge. */
+.message__confirm[hidden] {
+  display: none;
+}
+
+.message__confirm-text {
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  margin: 0;
+  width: 100%;
+}
+
 /* ------------------------------ voice compose --------------------------- */
 
 .voice {

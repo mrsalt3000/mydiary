@@ -362,10 +362,18 @@ def resolve_audio_file(session: Session, audio_file_id: uuid.UUID) -> tuple[Path
     The path always originates from the database row written by the server
     (never from user input). As defense in depth the resolved path is checked
     to stay inside ``AppSettings.audio_dir``.
+
+    A voice message the user has deleted (``messages.deleted_at`` set —
+    ADR-011 / task T15) resolves as not found: the bytes should already be
+    gone from disk, but a failed unlink must not turn "deleted" back into a
+    playable (or transcribable) resource.
     """
     settings = get_settings()
     row = AudioFileRepository(session).get(audio_file_id)
     if row is None:
+        raise AudioNotFoundError("Audio file not found.")
+    message = MessageRepository(session).get(row.message_id)
+    if message is None or message.deleted_at is not None:
         raise AudioNotFoundError("Audio file not found.")
     audio_root = settings.audio_dir.resolve()
     candidate = (settings.audio_dir / row.storage_path).resolve()

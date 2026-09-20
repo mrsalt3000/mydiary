@@ -4,8 +4,10 @@ Uses an isolated, migrated SQLite test database (fixtures from
 ``tests/integration/conftest.py``) plus synthetic data only. Covers: message
 creation, persistence across an engine restart, deterministic history
 ordering (including same-second tie-breaks by id), cursor pagination without
-gaps or duplicates, application-timezone rendering of timestamps, the soft
-delete policy, and validation errors that never echo submitted content.
+gaps or duplicates, application-timezone rendering of timestamps, the deletion
+policy (ADR-011 / task T15; the audio side is covered by
+``test_message_deletion.py``), and validation errors that never echo submitted
+content.
 """
 
 from __future__ import annotations
@@ -260,11 +262,18 @@ def test_created_at_rendered_in_application_timezone(
 
 
 # ---------------------------------------------------------------------------
-# soft delete policy
+# deletion policy (ADR-011 / task T15; the Task 05 policy was mark-only)
 # ---------------------------------------------------------------------------
 
 
-def test_delete_hides_message_but_keeps_row(api_client: TestClient, session: Session) -> None:
+def test_delete_hides_message_and_erases_its_text(api_client: TestClient, session: Session) -> None:
+    """Deletion policy of ADR-011 (task T15), which replaces the Task 05 one.
+
+    The row and its ``deleted_at`` mark stay (traceability), but the source text
+    itself is erased — the Task 05 expectation that ``body_text`` survives the
+    deletion is intentionally gone. The voice-message side (audio bytes and
+    transcription text) is covered by ``test_message_deletion.py``.
+    """
     created = api_client.post(MESSAGES_URL, json={"body": "Удаляемая запись."}).json()
     message_id = created["id"]
 
@@ -280,7 +289,7 @@ def test_delete_hides_message_but_keeps_row(api_client: TestClient, session: Ses
     assert row is not None
     assert row.deleted_at is not None
     assert row.deleted_at.tzinfo is timezone.utc
-    assert row.body_text == "Удаляемая запись."  # immutable source text intact
+    assert row.body_text == ""  # erased on the user's explicit request (ADR-011)
 
 
 def test_repeat_delete_returns_404(api_client: TestClient) -> None:

@@ -330,6 +330,46 @@ def test_recording_timer_keeps_the_indicator_accessible() -> None:
     assert "font-variant-numeric: tabular-nums" in rule.group(0)
 
 
+def test_message_delete_control_needs_an_explicit_confirmation() -> None:
+    """T15: every message carries a delete action with a clear accessible name,
+    and a single click can never delete anything.
+
+    This guards the static contract only. The round trip itself — the existing
+    ``DELETE /api/v1/messages/{id}``, the erased text/bytes and the 404 that
+    means "already deleted" — is exercised in ``test_message_deletion.py``; that
+    the message disappears without a reload is a runtime property of the page.
+    """
+    template = (REPO_ROOT / "src/diary/templates/_message.html").read_text(encoding="utf-8")
+    # The same control is rendered for text and for voice messages.
+    assert template.count('{% include "_message_actions.html" %}') == 2
+
+    actions = (REPO_ROOT / "src/diary/templates/_message_actions.html").read_text(encoding="utf-8")
+    assert 'data-action="delete-message"' in actions
+    assert 'data-message-id="{{ message.id }}"' in actions
+    # The repeated "Удалить" is disambiguated by the message timestamp.
+    assert 'aria-label="Удалить запись от {{ message.created_at_display }}"' in actions
+    # Confirmation is a real second step (its own buttons), not a visual hint.
+    assert 'data-action="delete-message-confirm"' in actions
+    assert 'data-action="delete-message-cancel"' in actions
+    assert "Удалить запись?" in actions
+    panel = re.search(r'<div class="message__confirm"[^>]*>', actions)
+    assert panel is not None
+    assert "hidden" in panel.group(0)
+
+    script = (REPO_ROOT / "src/diary/static/js/app.js").read_text(encoding="utf-8")
+    assert '"/api/v1/messages/"' in script
+    assert 'method: "DELETE"' in script
+    # 404 (unknown or already deleted) is caught with 204 and removes the
+    # message — it is never reported as a failure.
+    assert "response.status === 204 || response.status === 404" in script
+    assert "Escape" in script
+    # Messages appended after a save get exactly the same controls.
+    assert "buildMessageActions(" in script
+
+    css = (REPO_ROOT / "src/diary/static/css/app.css").read_text(encoding="utf-8")
+    assert re.search(r"\.message__confirm\[hidden\]\s*\{[^}]*display:\s*none", css) is not None
+
+
 def test_app_serves_local_static_assets(api_client: TestClient) -> None:
     for url_path in (
         "/static/css/app.css",

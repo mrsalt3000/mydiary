@@ -4,10 +4,13 @@
  * Scope: the text compose form (Task 06), voice messages (Task 07):
  * recording through MediaRecorder when available, a file-upload fallback
  * through a hidden <input type=file>, upload to POST /api/v1/audio and
- * insertion of the created voice message into the chat list; and the manual
+ * insertion of the created voice message into the chat list; the manual
  * transcription flow (Task 09): POST .../transcribe on button click, job
- * polling and raw-text rendering below the audio player. The "load older
- * messages" paging stays declarative (htmx server-rendered fragments).
+ * polling and raw-text rendering below the audio player; and deletion of a
+ * message (task T15, ADR-011): an inline confirmation step, then
+ * DELETE /api/v1/messages/{id} and removal of the message from the list. The
+ * "load older messages" paging stays declarative (htmx server-rendered
+ * fragments).
  *
  * Safety rules (must be preserved by any later edit):
  *  - Diary text and audio metadata are NEVER placed into the DOM as markup.
@@ -19,6 +22,10 @@
  *  - Error/info strings shown to the user are static; server-provided error
  *    payloads are never echoed into the page.
  *  - No fetch/script/link to external hosts: the page only talks to this app.
+ *  - Deletion is irreversible (the message text and, for a voice message, the
+ *    audio file are erased), so it only ever runs behind the explicit
+ *    confirmation step; a 404 means "already deleted" and is not shown as a
+ *    failure.
  */
 "use strict";
 
@@ -68,6 +75,61 @@
     return meta;
   }
 
+  /* Delete controls of one message (task T15, ADR-011): mirrors
+     ``_message_actions.html`` so a freshly appended message behaves exactly
+     like a server-rendered one. Built with createElement/textContent only —
+     no HTML-string sinks. */
+  function buildMessageActions(messageId, createdAtIso) {
+    var box = document.createElement("div");
+    box.className = "message__actions";
+
+    var open = document.createElement("button");
+    open.type = "button";
+    open.className = "message-action message-action--delete";
+    open.setAttribute("data-action", "delete-message");
+    open.setAttribute("data-message-id", messageId);
+    open.setAttribute("aria-label", "Удалить запись от " + formatTimestamp(createdAtIso));
+    open.textContent = "Удалить";
+
+    var panel = document.createElement("div");
+    panel.className = "message__confirm";
+    panel.setAttribute("data-role", "delete-confirm");
+    panel.setAttribute("role", "group");
+    panel.setAttribute("aria-label", "Подтверждение удаления записи");
+    panel.hidden = true;
+
+    var text = document.createElement("p");
+    text.className = "message__confirm-text";
+    text.textContent =
+      "Удалить запись? Текст и голосовой файл будут стёрты без возможности восстановления.";
+
+    var confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.className = "message-action message-action--danger";
+    confirm.setAttribute("data-action", "delete-message-confirm");
+    confirm.textContent = "Да, удалить";
+
+    var cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "message-action";
+    cancel.setAttribute("data-action", "delete-message-cancel");
+    cancel.textContent = "Отмена";
+
+    var status = document.createElement("p");
+    status.className = "message__note";
+    status.setAttribute("data-role", "delete-status");
+    status.setAttribute("role", "status");
+    status.hidden = true;
+
+    panel.appendChild(text);
+    panel.appendChild(confirm);
+    panel.appendChild(cancel);
+    box.appendChild(open);
+    box.appendChild(panel);
+    box.appendChild(status);
+    return box;
+  }
+
   function appendMessage(message) {
     if (emptyState && emptyState.parentNode === messageList) {
       emptyState.remove();
@@ -84,6 +146,7 @@
 
     article.appendChild(meta);
     article.appendChild(body);
+    article.appendChild(buildMessageActions(message.id, message.created_at));
     messageList.appendChild(article);
     article.scrollIntoView({ block: "nearest" });
   }
@@ -383,6 +446,7 @@
     article.appendChild(meta);
     article.appendChild(box);
     article.appendChild(panel);
+    article.appendChild(buildMessageActions(payload.message_id, payload.created_at));
     messageList.appendChild(article);
     article.scrollIntoView({ block: "nearest" });
   }
@@ -881,4 +945,194 @@
     }
     tick();
   }
+})();
+
+/* ------------------------------------------------------------------ *
+ * Message deletion (task T15, ADR-011).
+ * ------------------------------------------------------------------ *
+ * "Удалить" under a message does not delete anything by itself: it only
+ * reveals the inline confirmation panel. The deletion happens after the
+ * explicit "Да, удалить" (or never, on "Отмена"/Escape) because it is
+ * irreversible — the message text and, for a voice message, the stored audio
+ * file are erased. The request is the existing
+ * DELETE /api/v1/messages/{id}: 204 and 404 both mean "the message is gone"
+ * (404 = unknown or already deleted) and both remove it from the list without
+ * a page reload. Click handling is delegated from the document, so messages
+ * appended by this file and messages loaded later through htmx work the same.
+ * Status and error strings are static; the server payload is never rendered.
+ */
+(function () {
+  var GENERIC_ERROR = "Не удалось удалить запись. Попробуйте ещё раз.";
+  var DELETING = "Удаление…";
+  var EMPTY_STATE_TEXT = "Пока нет записей. Напишите первую ниже.";
+
+  function deleteButtonFor(article) {
+    return article.querySelector('[data-action="delete-message"]');
+  }
+
+  function confirmPanelFor(article) {
+    return article.querySelector('[data-role="delete-confirm"]');
+  }
+
+  function setStatus(article, text) {
+    var status = article.querySelector('[data-role="delete-status"]');
+    if (!status) {
+      return;
+    }
+    status.textContent = text;
+    status.hidden = text.length === 0;
+  }
+
+  function setPanelBusy(article, busy) {
+    var panel = confirmPanelFor(article);
+    if (!panel) {
+      return;
+    }
+    var buttons = panel.querySelectorAll("button");
+    for (var index = 0; index < buttons.length; index += 1) {
+      buttons[index].disabled = busy;
+    }
+  }
+
+  function openConfirm(article) {
+    var panel = confirmPanelFor(article);
+    var open = deleteButtonFor(article);
+    if (!panel || !open) {
+      return;
+    }
+    setStatus(article, "");
+    setPanelBusy(article, false);
+    open.hidden = true;
+    panel.hidden = false;
+    var confirmButton = panel.querySelector('[data-action="delete-message-confirm"]');
+    if (confirmButton) {
+      confirmButton.focus(); // the second step must not be reachable by accident
+    }
+  }
+
+  function closeConfirm(article) {
+    var panel = confirmPanelFor(article);
+    var open = deleteButtonFor(article);
+    if (!panel || !open) {
+      return;
+    }
+    panel.hidden = true;
+    open.hidden = false;
+    setStatus(article, "");
+    open.focus();
+  }
+
+  function ensureEmptyState(messageList) {
+    if (messageList.querySelector(".message") !== null) {
+      return;
+    }
+    if (document.getElementById("older-control") !== null) {
+      // Older messages are still paginated above the list: "no entries yet"
+      // would be a lie.
+      return;
+    }
+    var empty = document.createElement("p");
+    empty.id = "message-empty";
+    empty.className = "message-list__empty";
+    empty.textContent = EMPTY_STATE_TEXT;
+    messageList.appendChild(empty);
+  }
+
+  function messageIdOf(article) {
+    var button = deleteButtonFor(article);
+    var declared = button ? button.getAttribute("data-message-id") : null;
+    if (declared) {
+      return declared;
+    }
+    var prefix = "message-"; // server-rendered article id is "message-<uuid>"
+    return article.id.indexOf(prefix) === 0 ? article.id.slice(prefix.length) : "";
+  }
+
+  function focusAfterRemoval(neighbour) {
+    var button = neighbour ? deleteButtonFor(neighbour) : null;
+    if (button) {
+      button.focus();
+      return;
+    }
+    var textarea = document.getElementById("message-text");
+    if (textarea) {
+      textarea.focus();
+    }
+  }
+
+  function removeMessage(article) {
+    var messageList = article.parentNode;
+    // Remember a neighbour before the article (and the focused button) goes:
+    // the keyboard user must not be dropped back to the top of the document.
+    var neighbour = article.nextElementSibling || article.previousElementSibling;
+    article.remove();
+    if (messageList && messageList.id === "message-list") {
+      ensureEmptyState(messageList);
+    }
+    focusAfterRemoval(neighbour);
+  }
+
+  function confirmDelete(article) {
+    var messageId = messageIdOf(article);
+    if (!messageId) {
+      setStatus(article, GENERIC_ERROR);
+      return;
+    }
+    setPanelBusy(article, true);
+    setStatus(article, DELETING);
+    fetch("/api/v1/messages/" + encodeURIComponent(messageId), { method: "DELETE" })
+      .then(function (response) {
+        if (response.status === 204 || response.status === 404) {
+          // 204: deleted. 404: unknown or already deleted — same outcome for
+          // the user, so it is not treated as a failure.
+          removeMessage(article);
+          return;
+        }
+        throw new Error("delete-failed");
+      })
+      .catch(function () {
+        setPanelBusy(article, false);
+        setStatus(article, GENERIC_ERROR);
+      });
+  }
+
+  document.addEventListener("click", function (event) {
+    var target = event.target;
+    if (!target || typeof target.closest !== "function") {
+      return;
+    }
+    var article = target.closest(".message");
+    if (!article) {
+      return;
+    }
+    if (target.closest('[data-action="delete-message"]')) {
+      openConfirm(article);
+      return;
+    }
+    if (target.closest('[data-action="delete-message-confirm"]')) {
+      confirmDelete(article);
+      return;
+    }
+    if (target.closest('[data-action="delete-message-cancel"]')) {
+      closeConfirm(article);
+    }
+  });
+
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "Escape") {
+      return;
+    }
+    var target = event.target;
+    if (!target || typeof target.closest !== "function") {
+      return;
+    }
+    var article = target.closest(".message");
+    if (!article) {
+      return;
+    }
+    var panel = confirmPanelFor(article);
+    if (panel && !panel.hidden) {
+      closeConfirm(article);
+    }
+  });
 })();

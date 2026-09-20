@@ -1,0 +1,32 @@
+{# Delete action of one diary message (task T15, ADR-011). Included by
+   ``_message.html`` for text and voice messages alike, so the control — and its
+   accessible name — is the same everywhere (including the htmx-loaded "older
+   messages" fragment).
+
+   Deletion is irreversible: the message text and, for a voice message, the
+   stored audio file are erased. It therefore needs an explicit second step —
+   a real button in a panel, never a purely visual hint. The panel starts
+   hidden and is revealed by app.js; the request goes to the existing
+   ``DELETE /api/v1/messages/{id}`` and never carries any diary content.
+
+   ``aria-label`` names the message (its timestamp) so the repeated "Удалить"
+   is unambiguous in a screen-reader button list. #}
+<div class="message__actions">
+  <button type="button" class="message-action message-action--delete"
+          data-action="delete-message" data-message-id="{{ message.id }}"
+          aria-label="Удалить запись от {{ message.created_at_display }}">
+    Удалить
+  </button>
+  <div class="message__confirm" data-role="delete-confirm" role="group"
+       aria-label="Подтверждение удаления записи" hidden>
+    <p class="message__confirm-text">
+      Удалить запись? Текст и голосовой файл будут стёрты без возможности
+      восстановления.
+    </p>
+    <button type="button" class="message-action message-action--danger"
+            data-action="delete-message-confirm">Да, удалить</button>
+    <button type="button" class="message-action"
+            data-action="delete-message-cancel">Отмена</button>
+  </div>
+  <p class="message__note" data-role="delete-status" role="status" hidden></p>
+</div>

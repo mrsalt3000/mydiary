@@ -41,6 +41,7 @@
     </button>
     <p class="message__note" data-role="note" role="status" hidden></p>
   </div>
+  {% include "_message_actions.html" %}
 </article>
 {% else %}
 <article class="message" id="message-{{ message.id }}">
@@ -48,5 +49,6 @@
     <time datetime="{{ message.created_at_iso }}">{{ message.created_at_display }}</time>
   </header>
   <div class="message__body">{{ message.body }}</div>
+  {% include "_message_actions.html" %}
 </article>
 {% endif %}

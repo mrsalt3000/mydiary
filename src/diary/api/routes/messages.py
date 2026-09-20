@@ -6,8 +6,9 @@ HTTP response. No business logic and no direct session/model access here.
 
 - ``POST /api/v1/messages``        — create a text message (201);
 - ``GET /api/v1/messages``         — cursor history, newest page first (200);
-- ``DELETE /api/v1/messages/{id}`` — soft delete (204; 404 when unknown or
-  already deleted; 422 for a malformed UUID).
+- ``DELETE /api/v1/messages/{id}`` — delete a message: mark it, erase its text
+  and remove its audio bytes (204; 404 when unknown or already deleted; 422 for
+  a malformed UUID). Policy: ADR-011 / task T15.
 """
 
 from __future__ import annotations
@@ -29,7 +30,9 @@ from diary.domain.chat.service import (
     MessageNotFoundError,
     create_text_message,
     list_messages,
-    soft_delete_message,
+)
+from diary.domain.chat.service import (
+    delete_message as delete_message_service,
 )
 
 router = APIRouter(prefix="/messages", tags=["messages"])
@@ -120,9 +123,14 @@ def delete_message(
     message_id: uuid.UUID,
     session: Annotated[Session, Depends(get_session)],
 ) -> Response:
-    """Soft-delete a message (deletion policy documented in the chat service)."""
+    """Delete a message: mark it, erase its text and remove its audio bytes.
+
+    404 for an unknown id and for an already-deleted message (identical by
+    design — the client reads that as "already deleted"). Deletion policy is
+    documented in :mod:`diary.domain.chat.service` and in ADR-011.
+    """
     try:
-        soft_delete_message(session, message_id)
+        delete_message_service(session, message_id)
     except MessageNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Message not found.") from exc
     return Response(status_code=204)
