@@ -42,6 +42,7 @@ from diary.db.repositories import (
     TranscriptionRepository,
 )
 from diary.domain.audio.service import AudioNotFoundError, store_audio
+from diary.domain.transcription import providers as transcription_providers
 from diary.domain.transcription import service as transcription_service
 from diary.main import app
 from diary.workers import handlers
@@ -116,21 +117,38 @@ def api_client(session_factory) -> Iterator[TestClient]:
 class FakeTranscriptionProvider:
     """Deterministic fake STT provider: returns queued outputs and can fail a
     fixed number of times before producing any text (the ``version`` attribute
-    mirrors the real adapter's provenance hook)."""
+    mirrors the real adapter's provenance hook).
+
+    Since T11 the manual STT path runs through ``asr.run``, so the fake also
+    implements the provider protocol's ``unload()`` (released after every turn)
+    and appends to ``journal`` when one is given — that is how the order «LLM
+    unloaded → STT → Whisper unloaded» is asserted end-to-end.
+    """
 
     version = "9.9.9"
 
-    def __init__(self, outputs: list[str] | None = None, failures: int = 0) -> None:
+    def __init__(
+        self, outputs: list[str] | None = None, failures: int = 0, journal: list[str] | None = None
+    ) -> None:
         self.outputs = list(outputs) if outputs else ["Синтетический текст расшифровки."]
         self.failures = failures
         self.calls = 0
+        self.unload_calls = 0
+        self.journal = journal
 
     def transcribe(self, audio_path, profile: FasterWhisperProfile) -> str:
         self.calls += 1
+        if self.journal is not None:
+            self.journal.append("stt")
         if self.calls <= self.failures:
             raise RuntimeError("synthetic provider failure")
         index = min(self.calls - 1 - self.failures, len(self.outputs) - 1)
         return self.outputs[index]
+
+    def unload(self) -> None:
+        self.unload_calls += 1
+        if self.journal is not None:
+            self.journal.append("whisper_unload")
 
 
 def _fake_profile() -> FasterWhisperProfile:
@@ -147,14 +165,30 @@ def _fake_profile() -> FasterWhisperProfile:
 def _install_fake_transcription(
     monkeypatch: pytest.MonkeyPatch,
     provider: FakeTranscriptionProvider,
+    *,
+    unload_journal: list[str] | None = None,
 ) -> None:
-    """Replace the profile loader and provider factory in the domain service."""
+    """Replace the profile loader, the provider registry and the LLM unloader.
+
+    The manual path runs through ``asr.run`` (T11), which resolves its provider
+    from the providers **registry**; the service's provenance probe uses the
+    same registry entry. ``unload_journal`` (when given) records the injected
+    LLM unload, so a test can assert it happens *before* STT.
+    """
     monkeypatch.setattr(
         transcription_service,
         "_load_transcription_profile",
         lambda: _fake_profile(),
     )
-    monkeypatch.setattr(transcription_service, "create_provider", lambda profile: provider)
+    monkeypatch.setitem(
+        transcription_providers.PROVIDER_REGISTRY, "faster_whisper", lambda: provider
+    )
+
+    def _unload_llm() -> None:
+        if unload_journal is not None:
+            unload_journal.append("llm_unload")
+
+    monkeypatch.setattr(transcription_service, "_default_llm_unloader", _unload_llm)
 
 
 def _upload_audio(api_client: TestClient) -> tuple[uuid.UUID, uuid.UUID]:
@@ -311,6 +345,33 @@ def test_transcribe_job_succeeds_and_persists_raw_without_touching_audio(
     # File bytes on disk are intact and the model ran exactly once.
     assert _audio_bytes(session_factory, audio_id) == before
     assert fake.calls == 1
+
+
+def test_the_manual_stt_job_unloads_the_llm_before_it_recognises(
+    session_factory,
+    api_client,
+    monkeypatch,
+) -> None:
+    """The manual button now goes through ``asr.run`` (T11, ADR-010).
+
+    The whole point of the T09→T11 requirement: the LLM is released
+    **deliberately** before speech-to-text starts (not because the server
+    happens to be started with ``OLLAMA_KEEP_ALIVE=0``), and Whisper is
+    released again afterwards — the phase-2 VRAM veto expressed as an order.
+    """
+    journal: list[str] = []
+    fake = FakeTranscriptionProvider(outputs=["Синтетика расшифровки."], journal=journal)
+    _install_fake_transcription(monkeypatch, fake, unload_journal=journal)
+    audio_id, _ = _upload_audio(api_client)
+
+    response = api_client.post(f"{AUDIO_URL}/{audio_id}/transcribe")
+    assert response.status_code == 202
+    assert process_due_jobs(session_factory, worker_id="test-worker") == 1
+
+    assert journal == ["llm_unload", "stt", "whisper_unload"]
+    # The transcription was released exactly once, and the slot-free order is
+    # the one ``asr.run`` guarantees (see tests/unit/test_asr_sequential.py).
+    assert fake.unload_calls == 1
 
 
 def test_replaying_a_succeeded_job_after_stale_reset_does_not_duplicate(

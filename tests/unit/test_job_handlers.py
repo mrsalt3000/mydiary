@@ -48,6 +48,70 @@ def test_pipeline_job_type_handlers_are_registered_by_default() -> None:
         assert job_type.value in handlers.known_job_types()
 
 
+def test_phase2_layer_handlers_are_registered_by_default() -> None:
+    """Task T11: the three dispatched phase-2 layers are handled.
+
+    Before T11 these job types had no handler, so a phase-2 job enqueued for
+    them failed permanently without running the layer.
+    """
+    for job_type in (JobType.stt_corrected, JobType.daily_summary, JobType.weekly_summary):
+        assert handlers.get_handler(job_type) is not None
+        assert job_type.value in handlers.known_job_types()
+
+
+def test_the_coach_note_has_no_handler_by_design() -> None:
+    """Layer 5 stays «explicit launch only» (T07 decision 3): no handler.
+
+    A ``coach_note`` job therefore still fails permanently instead of producing
+    a coaching note behind the user's back; the note is produced only through
+    the explicit call (``run_coach_step`` / the T11 CLI).
+    """
+    assert handlers.get_handler(JobType.coach_note) is None
+    assert JobType.coach_note.value not in handlers.known_job_types()
+
+
+@pytest.mark.parametrize(
+    ("job_type", "anchor_key"),
+    [
+        (JobType.stt_corrected, "raw_id"),
+        (JobType.daily_summary, "local_date"),
+        (JobType.weekly_summary, "week_id"),
+    ],
+)
+def test_phase2_handler_fails_permanently_without_its_anchor(
+    job_type: JobType, anchor_key: str
+) -> None:
+    """A phase-2 job whose payload has no anchor is a deterministic failure.
+
+    It is raised before any database or orchestrator work, so the test needs no
+    session (the payload check runs ahead of the layer call).
+    """
+    handler = handlers.get_handler(job_type)
+    assert handler is not None
+    job = Job(job_type=job_type, payload_json=None)
+    with pytest.raises(handlers.PermanentJobError, match=anchor_key):
+        handler(session=None, job=job)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("job_type", "payload"),
+    [
+        (JobType.stt_corrected, {"raw_id": "not-a-uuid"}),
+        (JobType.daily_summary, {"local_date": "14.09.2026"}),
+    ],
+)
+def test_phase2_handler_rejects_a_malformed_anchor(
+    job_type: JobType, payload: dict[str, str]
+) -> None:
+    """A malformed anchor never reaches the layer (it can never be retried into
+    a success)."""
+    handler = handlers.get_handler(job_type)
+    assert handler is not None
+    job = Job(job_type=job_type, payload_json=payload)
+    with pytest.raises(handlers.PermanentJobError, match="no valid"):
+        handler(session=None, job=job)  # type: ignore[arg-type]
+
+
 def test_override_and_get_handler_roundtrip() -> None:
     """Direct registry overrides (used by queue tests) are visible through
     ``get_handler``, including lookup by the stored string form."""

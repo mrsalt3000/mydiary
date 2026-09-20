@@ -15,7 +15,26 @@ Responsibilities
 * :func:`run_transcription` — executes one claimed ``transcribe_audio`` job
   (called by the worker handler): resolves the stored audio file, loads the
   ``transcription`` profile from the models configuration (Task 03), runs the
-  configured provider and persists the result.
+  configured provider **through the sequential access point**
+  :func:`diary.domain.transcription.asr.run` and persists the result.
+
+Sequential GPU access (task T11, ADR-010)
+=========================================
+
+The manual «Расшифровать» button of phase 1 reaches this module through a
+durable ``transcribe_audio`` job, so this function is the path the phase-2 veto
+«Whisper and the LLM are never resident in VRAM at the same time» has to hold
+for. It therefore never calls the provider directly: speech-to-text runs inside
+:func:`~diary.domain.transcription.asr.run`, which takes the process-wide GPU
+slot, calls the **injected** ``unload_llm`` callable first and releases Whisper
+afterwards. ``unload_llm`` is a parameter (default:
+:func:`_default_llm_unloader`, the production unloader built from the model
+configuration by :mod:`diary.domain.llm.unload`); the ASR module and this
+service name no LLM tool, so a test can assert the order with a fake callable.
+
+The provider instance this module creates is used **only** for its optional
+provenance hook (``version``) and never loads a model — loading happens lazily
+inside the transcription itself.
 
 Transcription lifecycle and idempotency (ADR-005, architecture brief §8)
 ========================================================================
@@ -45,6 +64,7 @@ message (provider errors are sanitised inside the adapter boundary).
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 
 from sqlalchemy.orm import Session
 
@@ -57,6 +77,8 @@ from diary.db.repositories import (
     TranscriptionRepository,
 )
 from diary.domain.audio.service import AudioNotFoundError, resolve_audio_file
+from diary.domain.llm.unload import unload_local_llms
+from diary.domain.transcription import asr
 from diary.domain.transcription.providers import (
     ProviderUnavailableError,
     TranscriptionProvider,
@@ -87,6 +109,22 @@ def _load_transcription_profile() -> FasterWhisperProfile:
     (no models YAML is needed in CI; monkeypatched in integration tests).
     """
     return load_models_config().transcription
+
+
+def _default_llm_unloader() -> None:
+    """The production ``unload_llm`` callable of a manual STT turn (ADR-010).
+
+    Evicts every configured local LLM (``keep_alive: 0`` == ``ollama stop``)
+    before Whisper starts, so the phase-2 VRAM veto no longer depends on the
+    server being started with ``OLLAMA_KEEP_ALIVE=0``. The model configuration
+    is read on every call — the worker is long-lived, and
+    :func:`~diary.domain.llm.unload.unload_local_llms` is exactly the "config at
+    call time" unload.
+
+    Module-level for the same reason as ``_load_transcription_profile``: tests
+    replace it with a fake and never contact (nor unload) a real LLM server.
+    """
+    unload_local_llms()
 
 
 def find_active_transcription_job(session: Session, audio_file_id: uuid.UUID) -> Job | None:
@@ -130,14 +168,30 @@ def request_transcription(
     return job
 
 
-def run_transcription(session: Session, job: Job) -> None:
+def run_transcription(
+    session: Session,
+    job: Job,
+    *,
+    unload_llm: Callable[[], None] | None = None,
+) -> None:
     """Execute one claimed ``transcribe_audio`` job (worker handler core).
+
+    Speech-to-text runs through :func:`diary.domain.transcription.asr.run`,
+    which holds the exclusive GPU slot and calls ``unload_llm`` **before** any
+    recognition work, so the phase-2 veto holds for the manual button too
+    (ADR-010). ``unload_llm`` defaults to the production unloader built from
+    the model configuration; tests inject a fake callable (see
+    :func:`_default_llm_unloader`).
 
     The caller (``diary.workers.runner``) owns the transaction: on a normal
     return it commits the session and marks the job ``succeeded``; on an
     exception it applies the retry policy. This function commits itself only
     when it writes the single terminal ``failed`` row on the final attempt
     (the runner would otherwise roll the handler session back after the raise).
+
+    A failed LLM unload raises :class:`~diary.domain.transcription.asr.LlmUnloadError`
+    (no STT is started; the handler/core records no result row and the retry
+    policy applies), which is the loud direction of the veto.
     """
     audio_file_id = _payload_audio_id(job)
     if _has_recorded_success(session, audio_file_id, job):
@@ -164,9 +218,13 @@ def run_transcription(session: Session, job: Job) -> None:
             "The audio file for this transcription job is missing on disk."
         )
     profile = _load_transcription_profile()
+    # Provenance probe only: it reads the adapter's optional ``version`` hook
+    # (an installed-distribution lookup) and loads nothing — the transcription
+    # itself runs on the instance ``asr.run`` creates under the GPU slot.
     provider = create_provider(profile)
+    resolved_unload = unload_llm if unload_llm is not None else _default_llm_unloader
     try:
-        raw_text = provider.transcribe(audio_path, profile)
+        raw_text = asr.run(audio_path, profile, unload_llm=resolved_unload)
     except ProviderUnavailableError:
         # Environment problem (faster-whisper not installed): never retryable;
         # the handler maps it to a permanent job failure. No result row is

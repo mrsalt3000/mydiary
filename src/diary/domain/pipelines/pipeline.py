@@ -10,7 +10,7 @@ phase-2 chain is::
       → sum_weekly   (one run per ISO week, anchor ``week_id``)
       → coach        (layer 5, **explicit call only**, anchor ``summary_id``)
 
-Three entry points, one per unit of work:
+Entry points, one per unit of work (T09; the message unit is added by T11):
 
 * :func:`run_day_chain` — one local calendar day: the day's messages through
   ``stt_fix`` and then the day through ``sum_daily``;
@@ -19,6 +19,12 @@ Three entry points, one per unit of work:
 * :func:`run_coach_step` — **the only path to the coaching note** (T07 decision
   3: «запуск только явно»). No parameter of the day/week chain can reach it and
   nothing else in the worker calls it; see :func:`run_week_chain`'s note.
+
+Task T11 adds one more unit of work, the smallest one: :func:`run_stt_fix_step`
+corrects exactly one message. It is the unit behind a ``stt_corrected`` job
+(the day chain is not a substitute — a single-message job must not also
+summarize the day), and the day chain runs the same helper once per message, so
+both paths produce identical steps.
 
 Why a layer step is not just "call the service"
 ==============================================
@@ -104,21 +110,34 @@ from diary.core.models_config import ModelsConfig, OpenAICompatibleProfile, load
 from diary.core.settings import get_settings
 from diary.db.base import utc_now
 from diary.db.models import Artifact, PipelineType, ProcessingRun, RunStatus
-from diary.db.repositories import MAX_ERROR_SUMMARY_LENGTH, ProcessingRunRepository
-from diary.domain.contracts import CoachNote, DailySummary, SttCorrection, WeeklySummary
+from diary.db.repositories import (
+    MAX_ERROR_SUMMARY_LENGTH,
+    MessageRepository,
+    ProcessingRunRepository,
+)
+from diary.domain.contracts import (
+    CoachNote,
+    DailySummary,
+    RawEntry,
+    SttCorrection,
+    WeeklySummary,
+)
 from diary.domain.llm.errors import LLMProviderUnavailableError
 from diary.domain.llm.models import LLMRequest, LLMResponse, LLMUsage, request_input_sha256
 from diary.domain.llm.providers import LLMProvider, create_llm_provider, resolve_completion_params
 from diary.domain.llm.service import resolve_phase2_profile
 from diary.domain.pipelines import registry as pipeline_registry
-from diary.domain.pipelines.base import PipelineNotRegisteredError
+from diary.domain.pipelines.base import PipelineInputError, PipelineNotRegisteredError
 from diary.domain.pipelines.coach.coach_input import collect_week_summary
 from diary.domain.pipelines.coach.pipeline import PROMPT_VERSION as COACH_PROMPT_VERSION
 from diary.domain.pipelines.coach.service import coach_note
 from diary.domain.pipelines.naming import PIPELINE_PROFILE_NAME
 from diary.domain.pipelines.stt_fix.pipeline import PROMPT_VERSION as STT_FIX_PROMPT_VERSION
 from diary.domain.pipelines.stt_fix.service import correct_stt
-from diary.domain.pipelines.sum_daily.day_input import collect_day_entries
+from diary.domain.pipelines.sum_daily.day_input import (
+    collect_day_entries,
+    local_date_of,
+)
 from diary.domain.pipelines.sum_daily.pipeline import PROMPT_VERSION as SUM_DAILY_PROMPT_VERSION
 from diary.domain.pipelines.sum_daily.service import sum_daily
 from diary.domain.pipelines.sum_weekly.pipeline import PROMPT_VERSION as SUM_WEEKLY_PROMPT_VERSION
@@ -133,9 +152,11 @@ __all__ = [
     "CoachStepOutcome",
     "DayChainOutcome",
     "SkippedStep",
+    "SttFixStepOutcome",
     "WeekChainOutcome",
     "run_coach_step",
     "run_day_chain",
+    "run_stt_fix_step",
     "run_week_chain",
 ]
 
@@ -209,6 +230,21 @@ class DayChainOutcome:
     def layers(self) -> tuple[PipelineType, ...]:
         """The layers that actually ran, in order."""
         return tuple(step.layer for step in self.steps)
+
+
+@dataclass(frozen=True)
+class SttFixStepOutcome:
+    """Result of :func:`run_stt_fix_step` — the correction of exactly one message.
+
+    Exactly one of ``step`` (the run that stored the correction) and ``skipped``
+    (the layer is switched off, or the message has no text yet) is set;
+    ``correction`` is the validated contract when the step ran.
+    """
+
+    raw_id: uuid.UUID
+    step: ChainStep | None = None
+    skipped: SkippedStep | None = None
+    correction: SttCorrection | None = None
 
 
 @dataclass(frozen=True)
@@ -539,6 +575,137 @@ def _safe_summary(error: BaseException) -> str:
 
 
 # ---------------------------------------------------------------------------
+# One message: the stt_fix step (shared by the day chain and the job dispatch)
+# ---------------------------------------------------------------------------
+
+
+def _stt_fix_step(
+    session: Session,
+    *,
+    entry: RawEntry,
+    profile_name: str,
+    profile: OpenAICompatibleProfile,
+    provider: LLMProvider,
+    created_at: datetime | None,
+) -> tuple[ChainStep, SttCorrection | None]:
+    """Run one ``stt_fix`` step for ``entry`` under its own processing run.
+
+    The single-message unit of the chain: the day chain calls it once per
+    message of the day, and :func:`run_stt_fix_step` calls it for the message a
+    ``stt_corrected`` job names. ``entry`` is never empty here — the callers
+    skip a message with no text before calling.
+    """
+    subject = f"message:{entry.id}"
+
+    def perform_stt_fix(
+        step_provider: LLMProvider,
+        run_id: uuid.UUID,
+        *,
+        corrected_entry: RawEntry = entry,
+    ) -> _StepProduct[SttCorrection]:
+        outcome = correct_stt(
+            session,
+            entry=corrected_entry,
+            profile=profile,
+            provider=step_provider,
+            processing_run_id=run_id,
+            created_at=created_at,
+        )
+        return _StepProduct(artifact=outcome.artifact, payload=outcome.correction)
+
+    step, product = _run_step(
+        session,
+        layer=PipelineType.stt_corrected,
+        profile_name=profile_name,
+        profile=profile,
+        provider=provider,
+        prompt_version=STT_FIX_PROMPT_VERSION,
+        subject=subject,
+        perform=perform_stt_fix,
+    )
+    return step, product.payload
+
+
+def run_stt_fix_step(
+    session: Session,
+    *,
+    raw_id: uuid.UUID,
+    models_config: ModelsConfig | None = None,
+    providers: Mapping[str, LLMProvider] | None = None,
+    local_tz: str | None = None,
+    created_at: datetime | None = None,
+) -> SttFixStepOutcome:
+    """Correct exactly one message — the ``stt_corrected`` unit of work.
+
+    The message is resolved by identity (never by a caller-supplied text) and
+    mapped onto the ``raw_entry`` contract by the day layer's own selector, so
+    the correction always describes exactly the stored row a summary would see:
+    the message's local day is derived from its timestamp in ``local_tz``
+    (default ``APP_TIMEZONE``) and the entry is looked up in that day's
+    ``raw_entry[]``. A message that does not exist or is soft-deleted is a loud
+    :class:`~diary.domain.pipelines.base.PipelineInputError` — no correction is
+    invented for it.
+
+    Outcomes mirror the day chain: an absent ``diary_stt`` profile means the
+    layer is switched off (``profile_off``) and a message with no text yet (a
+    voice message without a succeeded transcription) is skipped with
+    ``no_input``; otherwise the step runs under its own processing run and the
+    validated :class:`~diary.domain.contracts.SttCorrection` is returned.
+    """
+    config = models_config if models_config is not None else load_models_config()
+    timezone_name = local_tz or get_settings().timezone
+    subject = f"message:{raw_id}"
+    entry = _entry_for_message(session, raw_id=raw_id, local_tz=timezone_name)
+    stt_name, stt_profile = _layer_profile(config, PipelineType.stt_corrected)
+    if stt_profile is None:
+        return SttFixStepOutcome(
+            raw_id=raw_id,
+            skipped=SkippedStep(PipelineType.stt_corrected, SKIP_PROFILE_OFF, subject),
+        )
+    if not entry.text.strip():
+        return SttFixStepOutcome(
+            raw_id=raw_id,
+            skipped=SkippedStep(PipelineType.stt_corrected, SKIP_NO_INPUT, subject),
+        )
+    active_stt_profile = stt_profile
+    stt_provider = _provider_for(
+        profile_name=stt_name, profile=active_stt_profile, providers=providers
+    )
+    step, correction = _stt_fix_step(
+        session,
+        entry=entry,
+        profile_name=stt_name,
+        profile=active_stt_profile,
+        provider=stt_provider,
+        created_at=created_at,
+    )
+    return SttFixStepOutcome(raw_id=raw_id, step=step, correction=correction)
+
+
+def _entry_for_message(session: Session, *, raw_id: uuid.UUID, local_tz: str) -> RawEntry:
+    """The ``raw_entry`` of the stored message ``raw_id`` (loud when absent).
+
+    The day's own selector is reused on purpose: a single-message step must map
+    a row onto the contract exactly as the day step does (text messages by
+    ``body_text``, voice messages by the raw text of the newest succeeded
+    transcription), so nothing can diverge between the two paths. The local day
+    of the message is derived from its UTC timestamp in ``local_tz``.
+    """
+    message = MessageRepository(session).get(raw_id)
+    if message is None:
+        raise PipelineInputError("The message this step was asked to correct does not exist.")
+    day = local_date_of(message.created_at, ZoneInfo(local_tz))
+    for entry in collect_day_entries(session, local_date=day, tz=ZoneInfo(local_tz)):
+        if entry.id == raw_id:
+            return entry
+    # The row exists but the day selector did not return it: it is soft-deleted
+    # (or its audio file row is gone). Either way there is nothing to correct.
+    raise PipelineInputError(
+        "The message this step was asked to correct is not available for correction."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Day chain
 # ---------------------------------------------------------------------------
 
@@ -584,38 +751,20 @@ def run_day_chain(
             profile_name=stt_name, profile=active_stt_profile, providers=providers
         )
         for entry in entries:
-            subject = f"message:{entry.id}"
             if not entry.text.strip():
                 # A voice message that has not been transcribed yet has nothing
                 # to correct: the step is skipped, never asked to invent text.
-                skipped.append(SkippedStep(PipelineType.stt_corrected, SKIP_NO_INPUT, subject))
-                continue
-
-            def perform_stt_fix(
-                step_provider: LLMProvider,
-                run_id: uuid.UUID,
-                *,
-                corrected_entry=entry,
-            ) -> _StepProduct[SttCorrection]:
-                outcome = correct_stt(
-                    session,
-                    entry=corrected_entry,
-                    profile=active_stt_profile,
-                    provider=step_provider,
-                    processing_run_id=run_id,
-                    created_at=created_at,
+                skipped.append(
+                    SkippedStep(PipelineType.stt_corrected, SKIP_NO_INPUT, f"message:{entry.id}")
                 )
-                return _StepProduct(artifact=outcome.artifact, payload=outcome.correction)
-
-            step, _ = _run_step(
+                continue
+            step, _ = _stt_fix_step(
                 session,
-                layer=PipelineType.stt_corrected,
+                entry=entry,
                 profile_name=stt_name,
                 profile=active_stt_profile,
                 provider=stt_provider,
-                prompt_version=STT_FIX_PROMPT_VERSION,
-                subject=subject,
-                perform=perform_stt_fix,
+                created_at=created_at,
             )
             steps.append(step)
 

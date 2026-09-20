@@ -68,6 +68,7 @@ from diary.domain.contracts import COACH_DISCLAIMER
 from diary.domain.llm.errors import LLMStructuredOutputError
 from diary.domain.llm.models import LLMRequest, LLMResponse, LLMUsage
 from diary.domain.pipelines import registry as pipeline_registry
+from diary.domain.pipelines.base import PipelineInputError
 from diary.domain.pipelines.coach.coach_input import CoachInputError
 from diary.domain.pipelines.coach.pipeline import PROMPT_VERSION as COACH_PROMPT_VERSION
 from diary.domain.pipelines.coach.pipeline import SUMMARY_HEADER
@@ -79,6 +80,7 @@ from diary.domain.pipelines.pipeline import (
     SkippedStep,
     run_coach_step,
     run_day_chain,
+    run_stt_fix_step,
     run_week_chain,
 )
 from diary.domain.pipelines.stt_fix.pipeline import ENTRY_HEADER
@@ -854,3 +856,96 @@ def test_a_voice_message_without_a_transcription_is_skipped_per_message(
     # The untranscribed voice message still belongs to the day's input (its raw
     # text is empty by contract) — it is skipped, not dropped silently.
     assert '"source": "voice"' in providers["diary_sum"].requests[0].messages[0].content
+
+
+# ---------------------------------------------------------------------------
+# one message: the stt_fix unit added by T11 (the job dispatch's smallest unit)
+# ---------------------------------------------------------------------------
+
+
+def test_the_message_step_corrects_exactly_one_message_of_the_day(
+    session: Session, providers: dict[str, FakeLayerProvider]
+) -> None:
+    """``run_stt_fix_step`` must not reach beyond the message it was given."""
+    first = _text_message(session, body=MORNING_TEXT, created_at=DAY_MORNING_UTC)
+    _text_message(session, body=EVENING_TEXT, created_at=DAY_EVENING_UTC)
+    session.commit()
+
+    outcome = run_stt_fix_step(
+        session,
+        raw_id=first.id,
+        models_config=_models_config(),
+        providers=providers,
+        local_tz=LOCAL_TZ,
+    )
+
+    assert outcome.skipped is None
+    step = outcome.step
+    assert step is not None and step.layer is PipelineType.stt_corrected
+    assert step.input_ref == f"message:{first.id}"
+    assert outcome.correction is not None and outcome.correction.raw_id == first.id
+    # Exactly one LLM call: the other message of the day was not touched, and no
+    # day summary was produced (that is the day chain's job, not this unit's).
+    assert len(providers["diary_stt"].requests) == 1
+    assert MORNING_TEXT in providers["diary_stt"].requests[0].messages[0].content
+    assert providers["diary_sum"].requests == []
+    stored = list_layer_results(session, layer=ArtifactLayer.stt_corrected)
+    assert len(stored) == 1 and stored[0].raw_id == first.id
+
+
+def test_the_message_step_is_skipped_when_the_layer_is_switched_off(
+    session: Session, providers: dict[str, FakeLayerProvider]
+) -> None:
+    message = _text_message(session, body=MORNING_TEXT, created_at=DAY_MORNING_UTC)
+    session.commit()
+
+    outcome = run_stt_fix_step(
+        session,
+        raw_id=message.id,
+        models_config=_models_config(stt=False),
+        providers=providers,
+        local_tz=LOCAL_TZ,
+    )
+
+    assert outcome.step is None
+    assert outcome.skipped == SkippedStep(
+        PipelineType.stt_corrected, SKIP_PROFILE_OFF, f"message:{message.id}"
+    )
+    assert providers["diary_stt"].requests == []
+    assert list_layer_results(session, layer=ArtifactLayer.stt_corrected) == []
+
+
+def test_the_message_step_skips_a_voice_message_without_a_transcription(
+    session: Session, providers: dict[str, FakeLayerProvider]
+) -> None:
+    voice = _voice_message(session, created_at=DAY_MORNING_UTC)
+    session.commit()
+
+    outcome = run_stt_fix_step(
+        session,
+        raw_id=voice.id,
+        models_config=_models_config(),
+        providers=providers,
+        local_tz=LOCAL_TZ,
+    )
+
+    assert outcome.step is None
+    assert outcome.skipped == SkippedStep(
+        PipelineType.stt_corrected, SKIP_NO_INPUT, f"message:{voice.id}"
+    )
+    assert providers["diary_stt"].requests == []
+
+
+def test_the_message_step_fails_loudly_for_an_unknown_message(
+    session: Session, providers: dict[str, FakeLayerProvider]
+) -> None:
+    with pytest.raises(PipelineInputError):
+        run_stt_fix_step(
+            session,
+            raw_id=uuid.uuid4(),
+            models_config=_models_config(),
+            providers=providers,
+            local_tz=LOCAL_TZ,
+        )
+    assert providers["diary_stt"].requests == []
+    assert list_layer_results(session, layer=ArtifactLayer.stt_corrected) == []

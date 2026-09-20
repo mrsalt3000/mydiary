@@ -20,10 +20,15 @@
 # Использование:
 #   scripts/run-local.sh web [аргументы...]      # uvicorn на 127.0.0.1:8000
 #   scripts/run-local.sh worker [аргументы...]   # воркер очереди задач
+#   scripts/run-local.sh cli [аргументы...]      # python -m diary.cli (day/week/coach/backup)
 #   scripts/run-local.sh --help
 #
 # Аргументы после режима ЗАМЕНЯЮТ аргументы по умолчанию (web: --host 127.0.0.1
-# --port 8000 --reload; worker: --poll-interval 2).
+# --port 8000 --reload; worker: --poll-interval 2; cli: ничего — подкоманду
+# передавайте явно, например `cli day --date 2026-09-14`). Режим cli — это
+# «один вход» в пайплайн фазы 2 с этой машины (T11): он готовит то же
+# окружение, что web/worker (.env в окружение, шим libcublas, HF_HUB_OFFLINE),
+# без которого профили LLM не найдут ключ, а STT на GPU — библиотеку.
 #
 # Переопределяемые переменные окружения:
 #   CT2_CUDA_SHIM_DIR  каталог с libcublas.so.12 (по умолчанию ~/.local/lib/ct2-cuda)
@@ -52,9 +57,9 @@ fi
 shift
 
 case "$mode" in
-    web | worker) ;;
+    web | worker | cli) ;;
     *)
-        printf 'run-local.sh: неизвестный режим %s (ожидается web или worker)\n' "$mode" >&2
+        printf 'run-local.sh: неизвестный режим %s (ожидается web, worker или cli)\n' "$mode" >&2
         exit 2
         ;;
 esac
@@ -104,5 +109,11 @@ case "$mode" in
         fi
         printf 'run-local.sh: worker | %s | HF_HUB_OFFLINE=%s\n' "$cuda_note" "$HF_HUB_OFFLINE" >&2
         exec "$VENV_PYTHON" -m diary.workers.runner "$@"
+        ;;
+    cli)
+        # Подкоманда обязательна (day/week/coach/backup/recover) — без неё
+        # аргументов нет, и argparse сам объяснит, что нужно.
+        printf 'run-local.sh: cli | %s | HF_HUB_OFFLINE=%s\n' "$cuda_note" "$HF_HUB_OFFLINE" >&2
+        exec "$VENV_PYTHON" -m diary.cli "$@"
         ;;
 esac

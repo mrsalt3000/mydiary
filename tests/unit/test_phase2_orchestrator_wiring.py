@@ -109,8 +109,13 @@ def test_the_explicit_coach_entry_point_is_the_only_one_that_touches_layer_5() -
     assert "collect_week_summary" in referenced
 
 
-def test_only_the_underscored_helpers_and_the_three_entry_points_exist() -> None:
-    """The public surface is exactly the three explicit operations."""
+def test_only_the_underscored_helpers_and_the_explicit_entry_points_exist() -> None:
+    """The public surface is exactly the explicit per-unit operations.
+
+    T09 defined the day, week and coach units; T11 added the smallest unit —
+    the correction of one message (``run_stt_fix_step``), which is what a
+    ``stt_corrected`` job dispatches. The set stays closed: no helper leaks out.
+    """
     assert set(pipeline.__all__) == {
         "ORCHESTRATOR",
         "SKIP_NO_INPUT",
@@ -119,9 +124,11 @@ def test_only_the_underscored_helpers_and_the_three_entry_points_exist() -> None
         "CoachStepOutcome",
         "DayChainOutcome",
         "SkippedStep",
+        "SttFixStepOutcome",
         "WeekChainOutcome",
         "run_coach_step",
         "run_day_chain",
+        "run_stt_fix_step",
         "run_week_chain",
     }
 

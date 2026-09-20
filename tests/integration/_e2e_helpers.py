@@ -39,6 +39,7 @@ from diary.core.models_config import FasterWhisperProfile
 from diary.db.base import utc_now
 from diary.db.models import JobStatus, Message, MessageKind
 from diary.db.repositories import JobRepository, MessageRepository
+from diary.domain.transcription import providers as transcription_providers
 from diary.domain.transcription import service as transcription_service
 from diary.workers.runner import process_due_jobs
 
@@ -104,6 +105,9 @@ class SyntheticSTTProvider:
     ``before_transcribe`` (optional) runs on every call right before the fake
     produces its outcome — used by the duplicate-claim test to hold one worker
     mid-job while a second worker attempts the claim.
+
+    ``unload`` mirrors the T03 provider protocol: ``asr.run`` releases Whisper
+    after every turn, and since T11 the manual STT path goes through it.
     """
 
     version = "0.0.0-e2e"
@@ -119,6 +123,7 @@ class SyntheticSTTProvider:
         self.failures = failures
         self.before_transcribe = before_transcribe
         self.calls = 0
+        self.unload_calls = 0
 
     def transcribe(self, audio_path, profile: FasterWhisperProfile) -> str:
         self.calls += 1
@@ -128,6 +133,10 @@ class SyntheticSTTProvider:
             raise RuntimeError("synthetic STT failure")
         index = min(self.calls - 1 - self.failures, len(self.outputs) - 1)
         return self.outputs[index]
+
+    def unload(self) -> None:
+        """Release the (fake) model — ``asr.run`` calls this in its ``finally``."""
+        self.unload_calls += 1
 
 
 def fake_stt_profile() -> FasterWhisperProfile:
@@ -142,14 +151,31 @@ def fake_stt_profile() -> FasterWhisperProfile:
     )
 
 
+def _noop_unload() -> None:
+    """The injected ``unload_llm`` of the e2e helper: does nothing, records nothing.
+
+    A real unloader would contact (and unload) the developer's living LLM
+    server, which a test must never do (T11/ADR-010).
+    """
+
+
 def install_fake_stt(monkeypatch: pytest.MonkeyPatch, provider: SyntheticSTTProvider) -> None:
-    """Wire the fake STT provider into the transcription service (Task-09 seams)."""
+    """Wire the fake STT provider into the manual transcription path (T09/T11 seams).
+
+    Three seams, because the manual path now runs through the sequential access
+    point: the profile loader, the provider **registry** that ``asr.run``
+    resolves its instance from, and the default LLM-unload callable that
+    ``run_transcription`` hands to ``asr.run``.
+    """
     monkeypatch.setattr(
         transcription_service,
         "_load_transcription_profile",
         lambda: fake_stt_profile(),
     )
-    monkeypatch.setattr(transcription_service, "create_provider", lambda profile: provider)
+    monkeypatch.setitem(
+        transcription_providers.PROVIDER_REGISTRY, "faster_whisper", lambda: provider
+    )
+    monkeypatch.setattr(transcription_service, "_default_llm_unloader", _noop_unload)
 
 
 # ---------------------------------------------------------------------------
