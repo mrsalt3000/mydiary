@@ -153,6 +153,7 @@ from diary.domain.contracts.invariants import (
 from diary.domain.llm.models import LLMRequest, LLMResponse, LLMUsage
 from diary.domain.llm.providers import LLMProvider, create_llm_provider
 from diary.domain.llm.service import resolve_phase2_profile
+from diary.domain.pipelines.base import PipelineInvariantError
 from diary.domain.pipelines.coach.pipeline import PROFILE_NAME as COACH_PROFILE_NAME
 from diary.domain.pipelines.coach.service import coach_note
 from diary.domain.pipelines.stt_fix.pipeline import PROFILE_NAME as STT_PROFILE_NAME
@@ -929,7 +930,16 @@ def evaluate_chunk(
         raw_state_before = _raw_state(session) if chunk.category in {"stt_error", "day"} else None
 
         started = time.perf_counter()
-        _run_layer(session, chunk, profile=resolved_profile, provider=provider)
+        refused: PipelineInvariantError | None = None
+        try:
+            _run_layer(session, chunk, profile=resolved_profile, provider=provider)
+        except PipelineInvariantError as exc:
+            # The layer refused its own output (T17b): the gate found a violated
+            # invariant and stored nothing. That is the production behaviour, so
+            # the chunk is graded as a failure of exactly those checks — grading
+            # a stored artifact here instead would measure something production
+            # can no longer produce, which is the drift finding F1 was about.
+            refused = exc
         outcome.latency_s = time.perf_counter() - started
         session.commit()
 
@@ -937,6 +947,18 @@ def evaluate_chunk(
             outcome.violations.append(
                 Violation("raw_rows_unchanged", "a raw source row changed during the run")
             )
+        if refused is not None:
+            # Fail-closed here too: a refusal that names no check still failed the
+            # chunk. `quality.py` always fills `checks` from a non-empty violation
+            # list, so this is a guard against a future caller that raises the
+            # error bare — grading it as a pass would hide the refusal entirely.
+            named = refused.checks or ("pipeline_invariant_refused",)
+            outcome.violations.extend(
+                Violation(check, "the layer refused to store its output") for check in named
+            )
+            _record_measurements(outcome, chunk, resolved_profile, provider)
+            _apply_latency_budget(outcome)
+            return outcome
         payload = _latest_result_payload(session, chunk)
 
     model, contract_violations = _validate_output(chunk, payload)

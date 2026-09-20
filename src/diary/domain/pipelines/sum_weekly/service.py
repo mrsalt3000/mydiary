@@ -40,6 +40,7 @@ validated contract; nothing here logs them (AGENTS.md §7-8).
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -52,6 +53,7 @@ from diary.db.results import save_layer_result
 from diary.domain.contracts import DailySummary, WeeklySummary
 from diary.domain.llm.providers import LLMProvider, create_llm_provider
 from diary.domain.llm.service import resolve_phase2_profile
+from diary.domain.pipelines.quality import generate_with_invariants
 from diary.domain.pipelines.sum_weekly.pipeline import PROFILE_NAME, SumWeeklyPipeline
 from diary.domain.pipelines.sum_weekly.week_input import (
     collect_week_summaries,
@@ -113,23 +115,46 @@ def sum_weekly(
 
     pipeline = SumWeeklyPipeline()
     chunks = pipeline.chunk_summaries(week_summaries, profile=profile)
-    if len(chunks) == 1:
-        response = provider.complete(pipeline.build_request(summaries=chunks[0]))
-    else:
-        partials: list[WeeklySummary] = []
-        for chunk in chunks:
-            chunk_response = provider.complete(pipeline.build_request(summaries=chunk))
-            partials.append(
-                pipeline.parse_result(
-                    chunk_response,
-                    week_id=week_id,
-                    daily_ids=[summary.date.isoformat() for summary in chunk],
-                )
+    layer = ArtifactLayer.weekly_summary.value
+
+    def generate_from(chunk: list[DailySummary]) -> Callable[[int], WeeklySummary]:
+        """One full attempt at the rollup of ``chunk`` (request, call, contract)."""
+
+        def generate(_attempt: int) -> WeeklySummary:
+            response = provider.complete(pipeline.build_request(summaries=chunk))
+            return pipeline.parse_result(
+                response,
+                week_id=week_id,
+                daily_ids=[summary.date.isoformat() for summary in chunk],
             )
-        merge_request = pipeline.build_merge_request(partials=partials)
-        pipeline.require_merge_fits(merge_request, profile=profile)
-        response = provider.complete(merge_request)
-    summary = pipeline.parse_result(response, week_id=week_id, daily_ids=daily_ids)
+
+        return generate
+
+    if len(chunks) == 1:
+        summary = generate_with_invariants(
+            layer=layer, source=chunks[0], generate=generate_from(chunks[0])
+        )
+    else:
+        # A chunk's partial is graded against the chunk it was written from, so a
+        # partial that invents a fact cannot be laundered through the merge.
+        partials: list[WeeklySummary] = [
+            generate_with_invariants(layer=layer, source=chunk, generate=generate_from(chunk))
+            for chunk in chunks
+        ]
+
+        def generate_merge(_attempt: int) -> WeeklySummary:
+            merge_request = pipeline.build_merge_request(partials=partials)
+            pipeline.require_merge_fits(merge_request, profile=profile)
+            response = provider.complete(merge_request)
+            return pipeline.parse_result(response, week_id=week_id, daily_ids=daily_ids)
+
+        # The merge is graded against the week's own days, not against the
+        # partials it was handed: the days are the normative source of the week
+        # (and the facts the eval harness grades the same output against), while
+        # a number that exists only in a partial is not a fact about the week.
+        summary = generate_with_invariants(
+            layer=layer, source=week_summaries, generate=generate_merge
+        )
     artifact = save_layer_result(
         session,
         layer=ArtifactLayer.weekly_summary,

@@ -84,6 +84,26 @@ class PipelineOutputError(PipelinePermanentError):
     """The structured LLM output failed validation; no file may be written."""
 
 
+class PipelineInvariantError(PipelineOutputError):
+    """The generated text broke an invariant; the layer refuses to store it.
+
+    Raised by the runtime gate (T17b) after the layer has spent its own bounded
+    regeneration attempts, so it stays a :class:`PipelineOutputError` and a
+    :class:`PipelinePermanentError`: the worker fails the job permanently
+    instead of calling the model again through the retry loop. The message names
+    the violated checks and their counts, never the generated text
+    (AGENTS.md §7–8).
+
+    :attr:`checks` carries the same information in structured form — the names
+    of the invariants that were violated, never the offending text — so a caller
+    (the eval harness) can grade the refusal without parsing the message.
+    """
+
+    def __init__(self, message: str, *, checks: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.checks = checks
+
+
 class PipelineStorageError(PipelinePermanentError):
     """The derived artifact file could not be written atomically."""
 
@@ -239,6 +259,7 @@ __all__ = [
     "PipelineError",
     "PipelineExportNotFoundError",
     "PipelineInputError",
+    "PipelineInvariantError",
     "PipelineNotRegisteredError",
     "PipelineOriginalFileMissingError",
     "PipelineOutputError",

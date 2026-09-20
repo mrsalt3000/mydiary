@@ -50,6 +50,7 @@ from diary.db.results import save_layer_result
 from diary.domain.contracts import DailySummary, RawEntry
 from diary.domain.llm.providers import LLMProvider, create_llm_provider
 from diary.domain.llm.service import resolve_phase2_profile
+from diary.domain.pipelines.quality import generate_with_invariants
 from diary.domain.pipelines.sum_daily.day_input import collect_day_entries
 from diary.domain.pipelines.sum_daily.pipeline import PROFILE_NAME, SumDailyPipeline
 
@@ -95,9 +96,17 @@ def sum_daily(
         else collect_day_entries(session, local_date=local_date, tz=ZoneInfo(timezone_name))
     )
     pipeline = SumDailyPipeline()
-    request = pipeline.build_request(entries=day_entries)
-    response = provider.complete(request)
-    summary = pipeline.parse_result(response, local_date=local_date)
+
+    def generate(_attempt: int) -> DailySummary:
+        request = pipeline.build_request(entries=day_entries)
+        response = provider.complete(request)
+        return pipeline.parse_result(response, local_date=local_date)
+
+    summary = generate_with_invariants(
+        layer=ArtifactLayer.daily_summary.value,
+        source=day_entries,
+        generate=generate,
+    )
     artifact = save_layer_result(
         session,
         layer=ArtifactLayer.daily_summary,

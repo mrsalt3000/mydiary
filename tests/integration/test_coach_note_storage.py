@@ -331,11 +331,13 @@ def test_the_twin_summary_id_anchor_and_contract_field_agree(session: Session) -
 
 def test_a_rerun_appends_a_new_version_and_keeps_the_previous_one(session: Session) -> None:
     _store_week_summary(session)
+    # Versions are told apart by words, not digits: a figure the weekly summary
+    # does not carry is refused by the runtime gate (T17b).
     first_provider = _FakeProvider(
-        _note_payload(observations=["Первое наблюдение версии 1.", *OBSERVATIONS[1:]])
+        _note_payload(observations=["Первое наблюдение версии первой.", *OBSERVATIONS[1:]])
     )
     second_provider = _FakeProvider(
-        _note_payload(observations=["Первое наблюдение версии 2.", *OBSERVATIONS[1:]])
+        _note_payload(observations=["Первое наблюдение версии второй.", *OBSERVATIONS[1:]])
     )
 
     first = coach_note(session, week_id=WEEK_ID, provider=first_provider)
@@ -350,9 +352,9 @@ def test_a_rerun_appends_a_new_version_and_keeps_the_previous_one(session: Sessi
     assert [row.version for row in lineage] == [1, 2]
     # Append-only: the first version still carries its own note (ADR-005).
     assert lineage[0].result_json is not None
-    assert lineage[0].result_json["observations"][0] == "Первое наблюдение версии 1."
+    assert lineage[0].result_json["observations"][0] == "Первое наблюдение версии первой."
     assert lineage[1].result_json is not None
-    assert lineage[1].result_json["observations"][0] == "Первое наблюдение версии 2."
+    assert lineage[1].result_json["observations"][0] == "Первое наблюдение версии второй."
 
 
 def test_a_new_version_of_the_week_starts_a_new_note_lineage(session: Session) -> None:

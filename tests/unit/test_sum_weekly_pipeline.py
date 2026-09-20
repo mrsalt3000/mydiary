@@ -67,6 +67,19 @@ DAYS = [day.isoformat() for day in week_days(WEEK_ID)]
 FACTS = [f"Синтетический факт дня {day}." for day in DAYS]
 ROLLUP = "Неделя прошла вокруг отчёта и бассейна; сон сбился к середине недели."
 
+#: Distinct markers for the partial rollups, spelled as words: a partial naming
+#: a quantity its chunk does not contain is refused by the runtime gate (T17b),
+#: and a week never needs more chunks than it has days.
+PARTIAL_MARKERS = (
+    "первая",
+    "вторая",
+    "третья",
+    "четвёртая",
+    "пятая",
+    "шестая",
+    "седьмая",
+)
+
 
 def _summaries() -> list[DailySummary]:
     return [
@@ -129,7 +142,7 @@ class _ChunkAwareProvider:
             return _rollup_response(self.final_rollup)
         index = self.rollup_calls
         self.rollup_calls += 1
-        return _rollup_response(f"{self.partial_prefix} {index}.")
+        return _rollup_response(f"{self.partial_prefix} {PARTIAL_MARKERS[index]}.")
 
 
 def _json_response(payload: object) -> LLMResponse:
@@ -584,7 +597,7 @@ def test_a_chunked_run_reconciles_the_partials_with_one_merge_call(
     # The merge input is the ordered partial rollups — not the raw day summaries.
     partials = _merge_partials(_request_content(merge_request))
     assert [partial["rollup"] for partial in partials] == [
-        f"Частичная сводка {index}." for index in range(provider.rollup_calls)
+        f"Частичная сводка {PARTIAL_MARKERS[index]}." for index in range(provider.rollup_calls)
     ]
     assert [item for partial in partials for item in partial["daily_ids"]] == DAYS
     # The stored result covers every day that was fed and is the merged rollup.

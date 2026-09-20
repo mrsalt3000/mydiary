@@ -40,6 +40,7 @@ from diary.db.results import save_layer_result
 from diary.domain.contracts import RawEntry, SttCorrection
 from diary.domain.llm.providers import LLMProvider, create_llm_provider
 from diary.domain.llm.service import resolve_phase2_profile
+from diary.domain.pipelines.quality import generate_with_invariants
 from diary.domain.pipelines.stt_fix.pipeline import PROFILE_NAME, SttFixPipeline
 
 
@@ -70,9 +71,17 @@ def correct_stt(
     run appends ``v+1`` and keeps the previous result intact (ADR-005).
     """
     pipeline = SttFixPipeline()
-    request = pipeline.build_request(entry=entry)
-    response = provider.complete(request)
-    correction = pipeline.parse_result(response, entry=entry, profile=profile)
+
+    def generate(_attempt: int) -> SttCorrection:
+        request = pipeline.build_request(entry=entry)
+        response = provider.complete(request)
+        return pipeline.parse_result(response, entry=entry, profile=profile)
+
+    correction = generate_with_invariants(
+        layer=ArtifactLayer.stt_corrected.value,
+        source=[entry],
+        generate=generate,
+    )
     artifact = save_layer_result(
         session,
         layer=ArtifactLayer.stt_corrected,

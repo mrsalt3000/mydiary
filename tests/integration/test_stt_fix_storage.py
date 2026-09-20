@@ -140,8 +140,10 @@ def test_valid_correction_is_appended_under_the_message_anchor(session: Session)
 
 
 def test_uncertain_fragments_are_stored_verbatim_substrings(session: Session) -> None:
-    message = _message(session)
     fragment = "три тыщи восемьсот"
+    # The source carries the fragment, so the correction stays grounded (the
+    # runtime gate refuses an invented quantity, T17b).
+    message = _message(session, body=f"вечером пазваню в банк {fragment}")
     text = f"Вечером позвоню в банк, {fragment}."
     provider = _FakeProvider({"text": text, "uncertain": [fragment]})
 

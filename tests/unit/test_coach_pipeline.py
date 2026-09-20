@@ -50,6 +50,12 @@ import pytest
 from diary.core.settings import PROJECT_ROOT
 from diary.db.models import Artifact, ArtifactLayer, JobType, PipelineType
 from diary.domain.contracts import COACH_DISCLAIMER, CoachNote, WeeklySummary
+from diary.domain.contracts.golden import ADVICE_EVALUATION_LEXEMES
+from diary.domain.contracts.invariants import (
+    check_generated_text,
+    input_facts,
+    lexeme_hits,
+)
 from diary.domain.llm.errors import LLMStructuredOutputError
 from diary.domain.llm.models import LLMRequest, LLMResponse
 from diary.domain.pipelines import naming
@@ -198,8 +204,35 @@ def _run(
 # ---------------------------------------------------------------------------
 
 
-def test_prompt_template_is_v2_and_demands_3_2_1() -> None:
-    assert PROMPT_VERSION == "v2"
+def test_the_prompt_example_passes_the_invariants() -> None:
+    """The example the prompt tells the model to imitate must pass the gate.
+
+    Since T17b the layer refuses a note that breaks an invariant, so a prompt
+    whose own example broke one would instruct the model straight into a refusal.
+    """
+    prompt = PROMPT_PATH.read_text(encoding="utf-8")
+    section = prompt.split("## Синтетический пример", 1)[1]
+    head = section.split("Корректный ответ", 1)[0]
+    start = head.index("```json") + len("```json")
+    source = json.loads(head[start : head.index("```", start)])
+    body = section.split("Корректный ответ", 1)[1]
+    answer, _ = json.JSONDecoder().raw_decode(body[body.index("{") :])
+    assert check_generated_text("coach_note", answer, input_facts(source)) == []
+
+
+def test_the_prompt_teaches_no_form_the_gate_refuses() -> None:
+    """The allowed forms are a promise to the model, so they must be forms the
+    gate accepts. v2 offered «попробуй, если захочется…», and the advice check
+    refuses that lexeme, so a model following the prompt had its whole note
+    refused (T17b) instead of merely being flagged."""
+    prompt = PROMPT_PATH.read_text(encoding="utf-8")
+    start = prompt.index("Допустимы формы")
+    forms = prompt[start : prompt.index("\n- ", start)]
+    assert lexeme_hits(forms, ADVICE_EVALUATION_LEXEMES) == []
+
+
+def test_prompt_template_is_v3_and_demands_3_2_1() -> None:
+    assert PROMPT_VERSION == "v3"
     assert PROMPT_PATH.is_file()
     text = PROMPT_PATH.read_text(encoding="utf-8")
     # The three answer fields and their counts are explicit.
@@ -635,5 +668,5 @@ def test_the_layer_4_pipeline_is_not_replaced_by_the_coach_layer() -> None:
 
 def test_prompt_and_layer_files_live_under_the_t07_locations() -> None:
     assert PROMPT_PATH.parent.name == "coach_note"
-    assert PROMPT_PATH.name == "v2.md"
+    assert PROMPT_PATH.name == "v3.md"
     assert CoachNotePipeline.output_ext == ".md"

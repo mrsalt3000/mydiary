@@ -44,3 +44,4 @@
 | [ADR-009](ADR-009-optional-reasoning-effort.md) | Опциональное поле `reasoning_effort` у LLM-профиля и запроса (T02b) | Accepted | 2026-09-19 |
 | [ADR-010](ADR-010-manual-stt-through-the-shared-gpu-slot.md) | Ручная расшифровка идёт через общий GPU-слот; LLM выгружается явно (T11) | Accepted | 2026-09-20 |
 | [ADR-011](ADR-011-delete-message-erases-text-and-audio.md) | Удаление сообщения стирает текст и голосовой файл; заменяет политику Task 05 и ограничивает ADR-005 явным действием пользователя (T15) | Accepted | 2026-09-20 |
+| [ADR-012](ADR-012-refuse-instead-of-annotate.md) | Слой отказывается сохранять вывод, нарушающий инварианты текста (отказ вместо пометки; T17b) | Accepted | 2026-09-20 |

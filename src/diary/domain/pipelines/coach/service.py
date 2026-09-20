@@ -72,6 +72,7 @@ from diary.domain.pipelines.coach.coach_input import (
     ensure_input_matches_week,
 )
 from diary.domain.pipelines.coach.pipeline import PROFILE_NAME, CoachNotePipeline
+from diary.domain.pipelines.quality import generate_with_invariants
 
 
 @dataclass(frozen=True)
@@ -112,9 +113,17 @@ def coach_note(
     )
     ensure_input_matches_week(run_input, week_id)
     pipeline = CoachNotePipeline()
-    request = pipeline.build_request(summary=run_input.summary)
-    response = provider.complete(request)
-    note = pipeline.parse_result(response, week_id=run_input.week_id)
+
+    def generate(_attempt: int) -> CoachNote:
+        request = pipeline.build_request(summary=run_input.summary)
+        response = provider.complete(request)
+        return pipeline.parse_result(response, week_id=run_input.week_id)
+
+    note = generate_with_invariants(
+        layer=ArtifactLayer.coach_note.value,
+        source=[run_input.summary],
+        generate=generate,
+    )
     artifact = save_layer_result(
         session,
         layer=ArtifactLayer.coach_note,

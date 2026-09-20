@@ -64,7 +64,7 @@ from diary.domain.llm.structured import parse_contract_response
 from diary.domain.pipelines.base import PipelinePermanentError, SecondFamilyLayer
 
 #: Versioned prompt template of this layer (``prompts/coach_note/v2.md``).
-PROMPT_VERSION = "v2"
+PROMPT_VERSION = "v3"
 #: Prompt template location: ``prompts/coach_note/v2.md``.
 PROMPT_PATH = PROJECT_ROOT / "prompts" / "coach_note" / f"{PROMPT_VERSION}.md"
 #: Phase-2 profile field of ``configs/models.yaml`` this layer runs under.

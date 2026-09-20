@@ -241,12 +241,15 @@ def test_envelope_fields_come_from_the_backend_not_the_answer(
 
 def test_doubt_is_expressed_only_through_uncertain(store: _RecordingStore) -> None:
     uncertain_fragment = "три тыщи восемьсот"
+    raw_text = f"вечером пазваню в банк {uncertain_fragment}"
     text = f"Вечером позвоню в банк, {uncertain_fragment}."
     provider = _FakeProvider(_json_response({"text": text, "uncertain": [uncertain_fragment]}))
 
+    # The fragment is in the source: a correction stays faithful to it, and an
+    # invented quantity would now be refused by the runtime gate (T17b).
     outcome = stt_fix_service.correct_stt(
         None,  # type: ignore[arg-type]
-        entry=_entry(),
+        entry=_entry(text=raw_text),
         profile=_profile(),
         provider=provider,
     )

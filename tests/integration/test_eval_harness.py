@@ -34,6 +34,7 @@ from diary.domain.contracts.golden import (
     BUDGET_RESERVE_TOKENS,
     LAYER_PROMPT_TOKENS_EST,
     PROFILE_MAX_TOKENS,
+    DailyInvariants,
     GoldenChunk,
     reserve_tokens_for,
 )
@@ -91,6 +92,39 @@ def _passing(chunk: GoldenChunk) -> dict[str, object]:
 
 def _checks(outcome: Any) -> set[str]:
     return set(outcome.failed_checks)
+
+
+def _violations_of_a_payload(
+    chunk: GoldenChunk, payload: dict[str, object], check: str
+) -> list[Any]:
+    """Run one harness check against a payload directly, bypassing the layer.
+
+    Since T17b a violating completion never reaches the store — the layer refuses
+    it — so the end-to-end path can only prove *that* a chunk failed and on which
+    check. The harness's own checks survive as a second line of defence for a
+    payload that was stored, and this helper is how their precision (which token
+    they caught) stays covered.
+
+    The completion is completed with the envelope the backend owns (ADR-007 §7):
+    a stored payload carries it, a raw completion does not. Only the day
+    category is supported, because only its envelope is derivable from the chunk
+    alone (the coaching note's anchor is an artifact id the store assigns).
+    """
+    if not isinstance(chunk.invariants, DailyInvariants):
+        raise AssertionError("this helper only rebuilds the envelope of a day chunk")
+    stored = {**payload, "date": chunk.invariants.expected_date.isoformat()}
+    model, _ = harness._validate_output(chunk, stored)
+    assert model is not None
+    facts = harness._chunk_facts(chunk)
+    ctx = harness.CheckContext(
+        chunk=chunk,
+        model=model,
+        payload=stored,
+        input_json_before=harness.canonical_input_json(chunk.input),
+        input_text=facts.text,
+        input_numbers=facts.numbers,
+    )
+    return harness.CHECKERS[check](ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -222,15 +256,19 @@ def test_a_budget_overflow_is_detected(chunks: list[GoldenChunk]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_an_advice_phrase_fails_the_chunk(models_config) -> None:
+def test_an_advice_phrase_is_refused_by_the_layer(models_config) -> None:
+    """The layer refuses advice before storage (T17b) and the chunk fails on it."""
     chunk = _chunk("day-01-quiet-monday")
     payload = _passing(chunk)
     payload["facts"] = ["Ты молодец, успела многое."]
     outcome = _run(chunk, payload, models_config)
     assert not outcome.passed
     assert "advice_and_judgement_absent" in _checks(outcome)
-    assert "forbidden_lexemes" in _checks(outcome)
     assert "output_contract" not in _checks(outcome)  # the completion is valid JSON of the contract
+    # The layer refused, so the harness never sees a stored payload to grade; its
+    # own blacklist check keeps biting when handed one directly.
+    violations = _violations_of_a_payload(chunk, payload, "forbidden_lexemes")
+    assert violations and {violation.check for violation in violations} == {"forbidden_lexemes"}
 
 
 def test_a_moralising_phrase_fails_the_chunk(models_config) -> None:
@@ -259,32 +297,36 @@ def test_a_causal_connector_is_allowed_in_an_open_question(models_config) -> Non
     assert "causal_claims_absent" not in _checks(outcome)
 
 
-def test_an_invented_number_fails_the_chunk(models_config) -> None:
+def test_an_invented_number_is_refused_by_the_layer(models_config) -> None:
     chunk = _chunk("day-01-quiet-monday")
     payload = _passing(chunk)
     payload["facts"] = ["Закрыла 9 задач из списка."]
     outcome = _run(chunk, payload, models_config)
+    assert not outcome.passed
     assert "no_new_facts" in _checks(outcome)
-    assert "numbers_grounded" in _checks(outcome)
+    grounded = _violations_of_a_payload(chunk, payload, "numbers_grounded")
+    assert [violation.check for violation in grounded] == ["numbers_grounded"]
 
 
-def test_an_invented_numeral_word_fails_the_chunk(models_config) -> None:
+def test_an_invented_numeral_word_is_refused_by_the_layer(models_config) -> None:
     """The T07 case «два созвона при трёх во входе», normalized to digits."""
     chunk = _chunk("day-01-quiet-monday")
     payload = _passing(chunk)
     payload["facts"] = ["Успела сделать зарядку восемь раз."]
     outcome = _run(chunk, payload, models_config)
     assert "no_new_facts" in _checks(outcome)
-    assert any("numeral word" in violation.detail for violation in outcome.violations)
+    violations = _violations_of_a_payload(chunk, payload, "no_new_facts")
+    assert any("numeral word" in violation.detail for violation in violations)
 
 
-def test_an_invented_proper_name_fails_the_chunk(models_config) -> None:
+def test_an_invented_proper_name_is_refused_by_the_layer(models_config) -> None:
     chunk = _chunk("day-01-quiet-monday")
     payload = _passing(chunk)
     payload["facts"] = ["Встретилась с Ольгой и обсудила отчёт."]
     outcome = _run(chunk, payload, models_config)
     assert "no_new_facts" in _checks(outcome)
-    assert any("proper name" in violation.detail for violation in outcome.violations)
+    violations = _violations_of_a_payload(chunk, payload, "no_new_facts")
+    assert any("proper name" in violation.detail for violation in violations)
 
 
 def test_the_contract_constant_digit_is_not_an_invented_fact(models_config) -> None:
@@ -327,16 +369,25 @@ def test_an_invalid_contract_shape_is_rejected_before_storage(models_config) -> 
     assert [violation.check for violation in violations] == ["output_contract"]
 
 
-def test_the_violating_result_is_still_stored_by_the_layer(models_config) -> None:
-    """The harness checks what the layer stored — prompts alone do not stop it."""
+def test_a_violating_result_never_reaches_the_store(models_config) -> None:
+    """T17b inverts what T10 could only measure: the layer now refuses.
+
+    Before the gate the completion was stored and the harness flagged it, which
+    is why the phase acceptance could measure advice and causal claims in real
+    artifacts. The refusal is the contract now, and the failure is reported
+    through the checks the gate named rather than through a graded payload.
+    """
     chunk = _chunk("day-01-quiet-monday")
     payload = _passing(chunk)
     payload["facts"] = ["Ты молодец."]
     outcome = _run(chunk, payload, models_config)
     assert not outcome.passed
-    # The layer itself accepted and stored the completion: this is exactly the
-    # gap T10 closes, so the failure comes from the harness, not the layer.
     assert "output_contract" not in _checks(outcome)
+    assert [
+        violation.check
+        for violation in outcome.violations
+        if "refused to store" in violation.detail
+    ] == ["advice_and_judgement_absent"]
 
 
 def test_ungrounded_content_words_are_a_diagnostic_not_a_failure(models_config) -> None:

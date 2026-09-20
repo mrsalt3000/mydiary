@@ -50,6 +50,8 @@ from diary.db.repositories import (
 from diary.db.results import list_layer_results, trace_layer_result
 from diary.domain.llm.errors import LLMStructuredOutputError
 from diary.domain.llm.models import LLMRequest, LLMResponse
+from diary.domain.pipelines.base import PipelineInvariantError
+from diary.domain.pipelines.quality import GENERATION_ATTEMPTS
 from diary.domain.pipelines.sum_daily.day_input import DayInputError
 from diary.domain.pipelines.sum_daily.pipeline import ENTRIES_HEADER
 from diary.domain.pipelines.sum_daily.service import sum_daily
@@ -507,6 +509,37 @@ def test_an_extra_field_in_the_completion_stores_nothing(session: Session) -> No
     assert list_layer_results(session, layer=ArtifactLayer.daily_summary, local_date=DAY) == []
     assert _raw_state(session) == raw_before
     assert session.scalars(select(Message)).all()  # the source stays readable
+
+
+def test_a_completion_that_breaks_an_invariant_stores_nothing(
+    session: Session,
+) -> None:
+    """T17b: the layer refuses its own output before it can be stored.
+
+    Before the gate the advice was stored and only the eval harness flagged it,
+    which is how the phase acceptance could measure advice in real artifacts.
+    Now the run fails permanently, names the check it broke and leaves no
+    artifact, no marker and no text of the diary behind in the error.
+    """
+    _text_message(session, body=MORNING_TEXT, created_at=_utc("2026-09-13T22:00:00"))
+    session.commit()
+    raw_before = _raw_state(session)
+    payload = _payload()
+    payload["facts"] = ["Ты молодец, успела многое."]
+    provider = _FakeProvider(payload)
+
+    with pytest.raises(PipelineInvariantError) as error:
+        sum_daily(session, local_date=DAY, profile=_profile(), provider=provider, local_tz=LOCAL_TZ)
+    # Checked before the rollback: "nothing was written" is a stronger claim than
+    # "nothing survived a rollback", and only the first one is the guarantee.
+    assert list_layer_results(session, layer=ArtifactLayer.daily_summary, local_date=DAY) == []
+    session.rollback()
+
+    assert error.value.checks == ("advice_and_judgement_absent",)
+    assert "молодец" not in str(error.value)
+    assert len(provider.requests) == GENERATION_ATTEMPTS  # a bounded regeneration
+    assert list_layer_results(session, layer=ArtifactLayer.daily_summary, local_date=DAY) == []
+    assert _raw_state(session) == raw_before
 
 
 def test_the_result_carries_no_weekly_export_reference(session: Session) -> None:

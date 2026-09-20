@@ -46,6 +46,7 @@ from diary.domain.contracts.golden import (
     ADVICE_EVALUATION_LEXEMES,
     CAUSAL_CONNECTOR_LEXEMES,
     CONTRACT_CONSTANT_DIGITS,
+    DEFAULT_FORBIDDEN_LEXEMES,
     LEXEME_FIDELITY_CONTRACTS,
     NON_CONTENT_INPUT_KEYS,
     NUMERAL_WORDS,
@@ -251,10 +252,22 @@ def generated_values(payload: Mapping[str, object], fields: Sequence[str]) -> It
 def advice_and_judgement_violations(
     contract: str, payload: Mapping[str, object], facts: InputFacts
 ) -> list[InvariantViolation]:
-    """No advice, praise, evaluation or morality in the generated text fields."""
+    """No advice, praise, evaluation, morality or diagnosis in the generated text.
+
+    The vocabulary is the union of
+    :data:`~diary.domain.contracts.golden.DEFAULT_FORBIDDEN_LEXEMES` — the
+    baseline every layer inherits, which carries the product's first veto
+    («диагноз», «лечение») — and
+    :data:`~diary.domain.contracts.golden.ADVICE_EVALUATION_LEXEMES`. The
+    harness applies the same union through its two checks (its
+    ``forbidden_lexemes`` check adds the per-chunk list on top of the baseline,
+    and a runtime call has no chunk to supply). Before T17b the diagnosis words
+    reached production unguarded, because production applied no check at all.
+    """
+    lexemes = sorted(set(DEFAULT_FORBIDDEN_LEXEMES) | set(ADVICE_EVALUATION_LEXEMES))
     violations: list[InvariantViolation] = []
     for value in generated_values(payload, generated_text_fields(contract)):
-        for hit in introduced_lexemes(contract, value, ADVICE_EVALUATION_LEXEMES, facts.text):
+        for hit in introduced_lexemes(contract, value, lexemes, facts.text):
             violations.append(InvariantViolation(ADVICE_CHECK, f"advice/evaluation lexeme {hit!r}"))
     return violations
 
