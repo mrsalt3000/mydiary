@@ -1,0 +1,138 @@
+{# Processing panel of the day page — the shell's third column (task T16c).
+
+   Included by ``chat.html`` inside ``{% block context %}``, i.e. only on the
+   day page; ``base.html`` renders the <aside class="context-panel"> and only
+   when ``context_panel`` is set, so no other page reserves the column.
+
+   The mockup ties its panel to one record. A day holds several records and the
+   derivational layers do not share an anchor (ADR-007 §1, ADR-008), so this
+   panel is a *day* panel of two honest blocks instead:
+
+   1. «Записи дня» — the requested local day: how many entries, how many have
+      audio, how many are transcribed and how many are still waiting. Each
+      voice record gets a row with its real transcription state (the caption and
+      the button label come from the same ``_audio_view`` the card below is
+      rendered with) and — when transcription can be started *and* that card is
+      on this page — a link to that card's own "Расшифровать" button. The panel
+      adds no second trigger: the STT action and its job poller exist once, in
+      ``static/js/app.js``. A day longer than the feed's page window keeps such
+      rows too — the day block counts the whole day — but marks them
+      ("в более старых записях") instead of linking to a card that is not
+      rendered yet.
+   2. «Недельные слои» — the weekly export of the week this day belongs to:
+      normalization, summary and wellbeing are stored per *export*, not per
+      message, so they are shown here with links to the existing export pages.
+      A week without an export says so and links to ``/exports``, where one is
+      created.
+
+   What is deliberately absent (dead elements are worse than missing ones):
+   the mockup's "Показать происхождение" (there is no provenance page to open),
+   its "Экспортировать запись" (the product exports weeks, not single entries)
+   and its close button (the panel is server-rendered; closing it would only
+   hide information, not navigate anywhere).
+
+   No diary text is rendered here — only counts, statuses, times, file names
+   and model names read from the configuration. No script of its own: the panel
+   is a snapshot of the server state, and it says so. #}
+<div class="context-panel__head">
+  <h2>Обработка дня</h2>
+</div>
+<p class="context-panel__hint">{{ panel.snapshot_note }}</p>
+
+<section class="process-card">
+  <h3 class="process-title">Записи дня</h3>
+  <p class="process-subtitle">{{ panel.day_title }}</p>
+  {% if panel.has_entries %}
+  <div class="pipeline">
+    {% for step in panel.steps %}
+    <div class="pipeline-step">
+      <span class="step-icon{% if step.state %} {{ step.state }}{% endif %}" aria-hidden="true">
+        {%- if step.state == 'done' -%}
+        <svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>
+        {%- else -%}
+        <svg viewBox="0 0 24 24"><path d="M12 8v4l2.5 2.5"/><circle cx="12" cy="12" r="9"/></svg>
+        {%- endif -%}
+      </span>
+      <div class="step-content">
+        <p class="step-title">{{ step.title }}</p>
+        <p class="step-detail">{{ step.detail }}</p>
+        {% if step.chip %}<span class="chip">{{ step.chip }}</span>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="step-detail">{{ panel.empty_text }}</p>
+  {% endif %}
+
+  {% if panel.voice_rows %}
+  <ul class="panel-voices" aria-label="Голосовые записи дня">
+    {% for row in panel.voice_rows %}
+    <li class="panel-voice">
+      <span class="panel-voice__time">{{ row.time_display }}</span>
+      <span class="panel-voice__status">{{ row.status_label }}</span>
+      {% if row.action %}
+      <a class="panel-voice__action" href="{{ row.action.url }}"
+         aria-label="{{ row.action.aria_label }}">
+        {{ row.action.label }}
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+      </a>
+      {% elif row.note %}
+      {# The message is part of the day but not of the rendered window: its
+         row keeps the real state and states where the card is, instead of an
+         action whose target is not on the page (task T16c rework). #}
+      <span class="chip">{{ row.note }}</span>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+
+<section class="process-card">
+  <h3 class="process-title">Недельные слои</h3>
+  <p class="process-subtitle">Неделя {{ panel.week.week_title }}</p>
+  {% if panel.week.has_export %}
+  <p class="step-detail">
+    {{ panel.week.filename }} · ревизия r{{ panel.week.revision }}{% if panel.week.exports_count > 1 %} из {{ panel.week.exports_count }}{% endif %}
+  </p>
+  <div class="pipeline">
+    {% for layer in panel.week.layers %}
+    <div class="pipeline-step">
+      <span class="step-icon{% if layer.state %} {{ layer.state }}{% endif %}" aria-hidden="true">
+        {%- if layer.state == 'done' -%}
+        <svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>
+        {%- else -%}
+        <svg viewBox="0 0 24 24"><path d="M12 8v4l2.5 2.5"/><circle cx="12" cy="12" r="9"/></svg>
+        {%- endif -%}
+      </span>
+      <div class="step-content">
+        {% if layer.url %}
+        <p class="step-title"><a href="{{ layer.url }}">{{ layer.title }}</a></p>
+        {% else %}
+        <p class="step-title">{{ layer.title }}</p>
+        {% endif %}
+        <p class="step-detail">{{ layer.detail }}</p>
+        {% if layer.chip %}<span class="chip">{{ layer.chip }}</span>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  <div class="context-actions">
+    <a class="context-action" href="{{ panel.week.export_url }}">{{ panel.export_link_label }}</a>
+  </div>
+  {% else %}
+  <p class="step-detail">{{ panel.no_export_text }}</p>
+  <div class="context-actions">
+    <a class="context-action" href="{{ panel.week.create_url }}">{{ panel.create_export_link_label }}</a>
+  </div>
+  {% endif %}
+</section>
+
+{# Delicacy note: the short form of the wellbeing-layer disclaimer
+   (`diary.domain.pipelines.wellbeing.safety.DISCLAIMER`, layer 5). Nothing new
+   is promised — the same limits are already stated on the wellbeing page and
+   in docs/privacy-and-safety.md §6. #}
+<p class="privacy-note">
+  <strong>{{ panel.wellbeing_note_title }}</strong>{{ panel.wellbeing_note }}
+</p>

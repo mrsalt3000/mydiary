@@ -473,12 +473,245 @@ textarea {
   align-items: center;
   display: flex;
   justify-content: space-between;
-  margin-bottom: 1.4rem;
+  margin-bottom: 0.5rem;
 }
 
 .context-panel__head h2 {
   font-size: 0.95rem;
   margin: 0;
+}
+
+/* The panel is a server-rendered snapshot: it says so above the cards instead
+   of silently going stale while a transcription runs in the feed below. */
+.context-panel__hint {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  margin: 0 0 1.1rem;
+}
+
+/* --------------------- processing panel (T16c) -------------------------- */
+
+/* Card, pipeline and chip follow ``docs/mockups/mydiary-ui-mockup.html``
+   (``.process-card`` / ``.pipeline`` / ``.step-icon`` / ``.chip``), with the
+   T16a tokens. The mockup's third block (a single record) is split into the
+   day block and the weekly-layers block; see api/routes/pages.py and
+   templates/_context_panel.html for why. */
+
+.process-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  margin-bottom: 0.9rem;
+  padding: 0.9rem;
+}
+
+.process-title {
+  font-size: 0.82rem;
+  font-weight: 700;
+  margin: 0 0 0.15rem;
+}
+
+.process-subtitle {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin: 0 0 0.9rem;
+}
+
+.pipeline {
+  display: grid;
+}
+
+.pipeline-step {
+  display: grid;
+  grid-template-columns: 1.65rem 1fr;
+  position: relative;
+}
+
+.pipeline-step:not(:last-child)::before {
+  background: var(--border-strong);
+  content: "";
+  height: calc(100% - 1.7rem);
+  left: 0.78rem;
+  position: absolute;
+  top: 1.7rem;
+  width: 1px;
+}
+
+.step-icon {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  color: var(--text-muted);
+  display: grid;
+  height: 1.56rem;
+  place-items: center;
+  position: relative;
+  width: 1.56rem;
+  z-index: 1;
+}
+
+.step-icon svg {
+  fill: none;
+  height: 0.82rem;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+  width: 0.82rem;
+}
+
+.step-icon.done {
+  background: var(--success-soft);
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.step-icon.pending {
+  background: var(--warning-soft);
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.step-content {
+  padding: 0.1rem 0 0.75rem 0.65rem;
+}
+
+.step-title {
+  font-size: 0.82rem;
+  font-weight: 650;
+  margin: 0;
+}
+
+.step-title a {
+  color: inherit;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 0.15rem;
+}
+
+.step-title a:hover,
+.step-title a:focus-visible {
+  color: var(--accent);
+  text-decoration-color: currentColor;
+}
+
+.step-detail {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  margin: 0.2rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+/* Chip: the mockup's pill, but with --text on --surface-muted instead of
+   --text-muted (which lands at ~4.3:1 in the light palette, below 4.5:1 for a
+   font this size). Size and background still mark it as secondary. */
+.chip {
+  background: var(--surface-muted);
+  border-radius: 999px;
+  color: var(--text);
+  display: inline-block;
+  font-size: 0.66rem;
+  font-weight: 600;
+  margin-top: 0.35rem;
+  padding: 0.1rem 0.45rem;
+}
+
+/* Per-voice rows: time · real state · a jump link to that card's own button. */
+.panel-voices {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 0.3rem;
+  list-style: none;
+  margin: 0.2rem 0 0;
+  padding: 0.6rem 0 0;
+}
+
+.panel-voice {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.5rem;
+  font-size: 0.72rem;
+}
+
+.panel-voice__time {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.panel-voice__status {
+  color: var(--text);
+}
+
+.panel-voice__action {
+  align-items: center;
+  color: var(--accent);
+  display: inline-flex;
+  font-weight: 650;
+  gap: 0.15rem;
+  margin-left: auto;
+  text-decoration: none;
+}
+
+.panel-voice__action:hover,
+.panel-voice__action:focus-visible {
+  text-decoration: underline;
+}
+
+.panel-voice__action svg {
+  fill: none;
+  height: 0.85rem;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+  width: 0.85rem;
+}
+
+.context-actions {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.context-action {
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  display: inline-flex;
+  font-size: 0.75rem;
+  font-weight: 600;
+  justify-content: flex-start;
+  min-height: 2rem;
+  padding: 0 0.6rem;
+  text-decoration: none;
+}
+
+.context-action:hover,
+.context-action:focus-visible {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+/* Delicacy note. The mockup sets its text in --text-muted on --accent-soft
+   (~4.2:1 in the light palette — below 4.5:1 for this font size), so the note
+   body uses --text instead: a safety-relevant sentence is worth more than the
+   mockup's exact tone. The strong first line keeps its own, stronger colour. */
+.privacy-note {
+  background: var(--accent-soft);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  font-size: 0.72rem;
+  margin-top: 1.1rem;
+  padding: 0.8rem;
+}
+
+.privacy-note strong {
+  color: var(--text);
+  display: block;
+  font-size: 0.72rem;
+  margin-bottom: 0.2rem;
 }
 
 @media (max-width: 1080px) {

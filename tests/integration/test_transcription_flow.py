@@ -660,7 +660,12 @@ def test_chat_page_renders_failed_state_after_terminal_failure(
     html = api_client.get("/").text
     assert "Ошибка расшифровки" in html
     assert "Расшифровать" in html  # the button invites an explicit retry
-    assert "Расшифровано" not in html
+    # Nothing presents this message as transcribed. The day page also carries
+    # the processing panel (T16c), which counts the failure in words
+    # ("Расшифровано 0 из 1 · с ошибкой 1"), so the guard is asserted on the
+    # message's own state rather than on the bare word.
+    assert 'data-transcription-state="succeeded"' not in html
+    assert 'data-role="status-text">Расшифровано<' not in html
 
 
 # ---------------------------------------------------------------------------

@@ -4,7 +4,8 @@ Mounted at the application root (no prefix; ``/api/v1`` stays the JSON API).
 
 - ``GET /``                              — one day of the diary (task T16b):
   the day's entries (date-as-unit, counters, day navigation) with the compose
-  form and the "load older" control when that day holds more than one window;
+  form, the "load older" control when that day holds more than one window and
+  the processing panel in the shell's third column (task T16c);
 - ``GET /messages/fragments/older``      — HTML fragment of the next older
   window *of the day the cursor belongs to* (htmx ``afterbegin`` into
   ``#message-list``) plus an out-of-band ``#older-control`` that carries the
@@ -38,6 +39,7 @@ Rendering decisions
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import date, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Annotated, Any
@@ -409,6 +411,14 @@ def chat_page(
     initially; the "older" control then pages *inside that day*
     (:func:`older_messages_fragment`), so nothing is silently dropped and the
     feed never spills over into the neighbouring days.
+
+    The processing panel (task T16c) describes the *whole* requested day, not
+    the rendered window: its counters and rows are built from ``day_messages``
+    by :func:`_day_processing_panel`. Its jump actions, however, are limited to
+    the messages of the rendered ``window`` — the panel is rendered with the
+    same window the feed holds, so a row can never point at a card that is not
+    on the page. This is the only page that sets ``context_panel``, so the
+    shell reserves the third column here and nowhere else.
     """
     settings = get_settings()
     today = local_date_of(utc_now(), settings.tzinfo)
@@ -416,6 +426,7 @@ def chat_page(
     day_messages = _day_messages(session, day, settings.tzinfo)
     window, next_cursor = _day_history_window(day_messages, limit=PAGE_LIMIT)
     older_cursor = _encode_cursor(next_cursor) if next_cursor is not None else None
+    day_fields = _day_view(day, today=today, messages=day_messages, notice=day_notice)
     return templates.TemplateResponse(
         request,
         "chat.html",
@@ -430,7 +441,18 @@ def chat_page(
             "audio_accept": ",".join(settings.allowed_audio_mime_types),
             "nav_current": "chat",
             "nav": _nav_context(session),
-            **_day_view(day, today=today, messages=day_messages, notice=day_notice),
+            # The day page is the only page that fills the third column (T16c).
+            "context_panel": True,
+            "panel": _day_processing_panel(
+                session,
+                day=day,
+                day_title=day_fields["day_title"],
+                messages=day_messages,
+                # The very window the feed below renders: a panel action may
+                # only point at a card that is really on the page.
+                rendered_ids={message.id for message in window},
+            ),
+            **day_fields,
         },
     )
 
@@ -616,6 +638,405 @@ def _day_view(
         "prev_day_title": _day_title(previous_day, today),
         "next_day_url": f"/?date={next_day.isoformat()}",
         "next_day_title": _day_title(next_day, today),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Task T16c — the day page's processing panel
+# ---------------------------------------------------------------------------
+
+#: Day-block step captions; the step rows follow the mockup's pipeline.
+PANEL_ORIGINALS_TITLE = "Оригиналы"
+PANEL_AUDIO_TITLE = "Аудио"
+PANEL_TRANSCRIPTION_TITLE = "Транскрипция"
+
+#: Reference note shown with the wellbeing layer (T16c). The mockup's short
+#: sentence, which says the same as ``wellbeing.safety.DISCLAIMER`` (layer 5's
+#: disclaimer spells it out) — nothing new is promised here.
+PANEL_WELLBEING_NOTE_TITLE = "Деликатная рефлексия"
+PANEL_WELLBEING_NOTE = "Wellbeing-слой не ставит диагнозов и не заменяет профессиональную помощь."
+
+#: The panel renders server state once, at page render time. Saying so keeps a
+#: number honest after the user starts a transcription from the card below
+#: (that flow updates the card, not the panel — there is exactly one job
+#: poller in the product, see ``static/js/app.js``).
+PANEL_SNAPSHOT_NOTE = "Статусы — по данным на момент загрузки страницы."
+
+#: Caption of the panel's link to the weekly export detail page.
+PANEL_EXPORT_LINK = "Открыть выгрузку недели"
+
+#: Caption of the fallback link when this week has no export at all.
+PANEL_NO_EXPORT_TEXT = "Выгрузки за эту неделю нет."
+PANEL_CREATE_EXPORT_LINK = "Создать выгрузку недели"
+
+#: Caption of a voice row whose audio-file row is missing entirely.
+PANEL_AUDIO_FILE_MISSING = "Аудиофайл не найден"
+PANEL_LAYER_NOT_RUN = "Не посчитано"
+
+#: Mark of a voice row whose message lies *outside* the rendered feed window
+#: (a day longer than :data:`PAGE_LIMIT`). The row keeps its real status — the
+#: day block counts the whole day — but offers no jump, because the card it
+#: would point at is not on the page yet; the words name the control that
+#: brings it in ("Показать более старые записи").
+PANEL_VOICE_OLDER_NOTE = "в более старых записях"
+
+
+def _pipeline_model_chips() -> dict[str, str]:
+    """Per-layer model chips for the weekly block, from the real configuration.
+
+    Keyed by pipeline value (``normalize`` / ``summarize`` / ``wellbeing``) and
+    built from the *actual* profiles: the model name comes from
+    ``configs/models.yaml`` (e.g. ``diary-stt``) and the locality word is
+    derived from the profile's ``external`` flag — never asserted. A missing or
+    invalid configuration yields no chips at all, so the panel cannot claim a
+    model it does not know. Model names in the mockup (``llama3.2``) are
+    deliberately not reproduced.
+    """
+    try:
+        config = _load_models_config()
+    except ModelsConfigError:
+        return {}
+    profiles = {
+        "normalize": config.normalization,
+        "summarize": config.summarization,
+        "wellbeing": config.wellbeing_analysis,
+    }
+    return {
+        key: f"{profile.model} · {'внешний API' if profile.external else 'локально'}"
+        for key, profile in profiles.items()
+    }
+
+
+def _transcription_chip() -> str | None:
+    """Chip of the STT step (day block) from the configured transcription profile.
+
+    ``None`` when no usable configuration is available: the panel then shows no
+    chip instead of guessing a model or a provider.
+    """
+    try:
+        config = _load_models_config()
+    except ModelsConfigError:
+        return None
+    profile = config.transcription
+    return f"{profile.provider.replace('_', '-')} · {profile.model}"
+
+
+def _panel_step(
+    *,
+    key: str,
+    title: str,
+    detail: str,
+    state: str | None,
+    chip: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    """One pipeline step of the panel (mockup's ``.pipeline-step``).
+
+    ``state`` is ``"done"``, ``"pending"`` or ``None`` (nothing to report) and
+    only drives the icon; the fact itself is always in ``detail``, so the state
+    is readable as text and not only as a colour. ``url`` — when given — is an
+    existing page of the product (never a placeholder action).
+    """
+    return {
+        "key": key,
+        "title": title,
+        "detail": detail,
+        "state": state,
+        "chip": chip,
+        "url": url,
+    }
+
+
+def _day_voice_rows(
+    session: Session, messages: list[Message], *, rendered_ids: Collection[uuid.UUID]
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Per-voice rows of the day block plus the transcription counters.
+
+    Every audio message of the day gets one row: its wall-clock time, the
+    transcription state as the card below words it (the caption and the button
+    label come from the very same :func:`_audio_view` the card is rendered
+    with — the state is never computed twice) and, when the transcription can
+    actually be started, a *link to that card's own button*
+    (``#transcription-<audio file id>``).
+
+    ``messages`` is the whole day while the feed renders only its newest
+    window, so ``rendered_ids`` — the ids of the messages actually on the page
+    (built by :func:`chat_page` from the very window it renders) — gates the
+    jump: a row of a message outside that window carries ``note``
+    (:data:`PANEL_VOICE_OLDER_NOTE`) instead of an action, and never an
+    ``href`` to a missing anchor. The row itself is *not* dropped: the block
+    counts the whole day, and hiding a record the counters do count would make
+    the block disagree with itself.
+
+    The link deliberately replaces a second button: the STT action and its job
+    poller exist exactly once in the product (``static/js/app.js``), so a
+    second trigger would either duplicate the polling loop or need new client
+    logic. While a job is in flight the card's button is disabled, so no action
+    is offered here either.
+
+    Counters: ``transcribed`` (succeeded), ``awaiting`` (not requested or
+    queued — waiting for a manual run), ``running``, ``failed`` and ``missing``
+    (an audio message without an ``audio_files`` row: reported as such, not
+    counted as awaiting).
+    """
+    settings = get_settings()
+    rows: list[dict[str, Any]] = []
+    counters = {
+        "total": len(messages),
+        "voice": 0,
+        "transcribed": 0,
+        "awaiting": 0,
+        "running": 0,
+        "failed": 0,
+        "missing": 0,
+    }
+    for message in messages:
+        if message.kind is not MessageKind.audio:
+            continue
+        counters["voice"] += 1
+        time_display = message.created_at.astimezone(settings.tzinfo).strftime(TIME_FORMAT)
+        audio = _audio_view(session, message.id)
+        if audio is None:
+            counters["missing"] += 1
+            rows.append(
+                {
+                    "time_display": time_display,
+                    "status_label": PANEL_AUDIO_FILE_MISSING,
+                    "state": None,
+                    "action": None,
+                    "note": None,
+                }
+            )
+            continue
+        status = TranscriptionStatus(audio["transcription_status"])
+        if status is TranscriptionStatus.succeeded:
+            counters["transcribed"] += 1
+        elif status in (TranscriptionStatus.not_requested, TranscriptionStatus.queued):
+            counters["awaiting"] += 1
+        elif status is TranscriptionStatus.running:
+            counters["running"] += 1
+        else:
+            counters["failed"] += 1
+        state = "done" if status is TranscriptionStatus.succeeded else "pending"
+        action: dict[str, str] | None = None
+        note: str | None = None
+        in_flight = audio["active_job_id"] is not None or status in (
+            TranscriptionStatus.queued,
+            TranscriptionStatus.running,
+        )
+        if not in_flight and message.id in rendered_ids:
+            label = str(audio["transcription_button_label"])
+            action = {
+                "url": f"#transcription-{audio['audio_file_id']}",
+                "label": label,
+                "aria_label": f"{label}: перейти к голосовому сообщению за {time_display}",
+            }
+        elif not in_flight:
+            # The card exists in the day, but not in this page: state the real
+            # reason instead of offering a jump into nowhere.
+            note = PANEL_VOICE_OLDER_NOTE
+        rows.append(
+            {
+                "time_display": time_display,
+                "status_label": audio["transcription_label"],
+                "state": state,
+                "action": action,
+                "note": note,
+            }
+        )
+    return rows, counters
+
+
+def _day_block_steps(counters: dict[str, int], *, stt_chip: str | None) -> list[dict[str, Any]]:
+    """The «Записи дня» steps: originals, audio, transcription.
+
+    Counted from the day's rows only; a step that has nothing to report says so
+    instead of showing a zero. The transcription step's state is ``done`` only
+    when every voice message of the day is transcribed.
+    """
+    total = counters["total"]
+    voice_total = counters["voice"]
+    steps = [
+        _panel_step(
+            key="originals",
+            title=PANEL_ORIGINALS_TITLE,
+            detail=f"{total} {_russian_plural(total, ENTRY_FORMS)}",
+            state="done",
+            chip="локальное хранилище",
+        )
+    ]
+    if voice_total == 0:
+        steps.append(
+            _panel_step(
+                key="audio",
+                title=PANEL_AUDIO_TITLE,
+                detail="Голосовых записей нет",
+                state=None,
+            )
+        )
+        steps.append(
+            _panel_step(
+                key="transcription",
+                title=PANEL_TRANSCRIPTION_TITLE,
+                detail="Расшифровывать нечего",
+                state=None,
+                chip=stt_chip,
+            )
+        )
+        return steps
+
+    steps.append(
+        _panel_step(
+            key="audio",
+            title=PANEL_AUDIO_TITLE,
+            detail=f"{voice_total} {_russian_plural(voice_total, VOICE_FORMS)}",
+            state="done",
+        )
+    )
+    parts = [f"Расшифровано {counters['transcribed']} из {voice_total}"]
+    if counters["awaiting"]:
+        parts.append(f"ждут запуска {counters['awaiting']}")
+    if counters["running"]:
+        parts.append(f"расшифровывается {counters['running']}")
+    if counters["failed"]:
+        parts.append(f"с ошибкой {counters['failed']}")
+    if counters["missing"]:
+        parts.append(f"без файла {counters['missing']}")
+    steps.append(
+        _panel_step(
+            key="transcription",
+            title=PANEL_TRANSCRIPTION_TITLE,
+            detail=" · ".join(parts),
+            state="done" if counters["transcribed"] == voice_total else "pending",
+            chip=stt_chip,
+        )
+    )
+    return steps
+
+
+def _week_layers_view(session: Session, day: date) -> dict[str, Any]:
+    """The «Недельные слои» block: the week's export and its computed layers.
+
+    Normalization, summary and wellbeing are anchored to a *weekly export*
+    (ADR-007 §1), not to a message, so this block is the only honest place for
+    them. The week is the one containing the day on screen
+    (:func:`sunday_date_for`), and the block shows the newest revision of that
+    week's export — the one whose layer pages the links open.
+
+    Reuses :func:`_export_management_view`, i.e. the same per-layer view model
+    the exports pages render, so the panel and those pages cannot disagree
+    about what is computed. When the week has no export the block says so and
+    links to ``/exports`` (where an export is created) instead of offering an
+    action that cannot work.
+    """
+    sunday = sunday_date_for(day)
+    monday = sunday - timedelta(days=6)
+    exports = WeeklyExportRepository(session).list_by_week(sunday)
+    view: dict[str, Any] = {
+        "week_title": f"{monday.strftime('%d.%m.%Y')} — {sunday.strftime('%d.%m.%Y')}",
+        "has_export": bool(exports),
+        "exports_count": len(exports),
+        "create_url": "/exports",
+        "layers": [],
+    }
+    if not exports:
+        return view
+
+    record = exports[-1]  # list_by_week orders by revision: the newest one.
+    base = _export_view(record)
+    management = _export_management_view(session, record, _active_pipeline_jobs(session))
+    layer_urls = {
+        "normalize": str(base["compare_url"]),
+        "summarize": str(base["summary_url"]),
+        "wellbeing": str(base["wellbeing_url"]),
+    }
+    chips = _pipeline_model_chips()
+    active_jobs = management["active_jobs"]
+    layers: list[dict[str, Any]] = []
+    for item in management["derived"]:
+        key = str(item["key"])
+        artifact = item.get("artifact")
+        artifact_info = artifact if isinstance(artifact, dict) else None
+        if artifact_info is not None:
+            version_label = artifact_info["version_label"] or "версия"
+            detail = f"{version_label} · создано {artifact_info['created_display']}"
+            state: str | None = "done"
+        elif active_jobs.get(key) is not None:
+            # A run of this layer is in flight right now (the exports pages read
+            # the same mapping), so "not computed" would be a half-truth.
+            detail = "Прогон идёт"
+            state = "pending"
+        elif item.get("last_run_label"):
+            detail = f"Прогон: {item['last_run_label']}"
+            in_flight_run = item.get("last_run_status") in (
+                RunStatus.queued.value,
+                RunStatus.running.value,
+            )
+            state = "pending" if in_flight_run else None
+        else:
+            detail = PANEL_LAYER_NOT_RUN
+            state = None
+        layers.append(
+            _panel_step(
+                key=key,
+                title=LAYER_TITLES[ArtifactLayer(item["layer"])],
+                detail=detail,
+                state=state,
+                chip=chips.get(key),
+                url=layer_urls.get(key),
+            )
+        )
+    view.update(
+        {
+            "export_url": f"/exports/{record.id}",
+            "filename": base["filename"],
+            "revision": record.revision,
+            "layers": layers,
+        }
+    )
+    return view
+
+
+def _day_processing_panel(
+    session: Session,
+    *,
+    day: date,
+    day_title: str,
+    messages: list[Message],
+    rendered_ids: Collection[uuid.UUID],
+) -> dict[str, Any]:
+    """Template fields of the day page's processing panel (task T16c).
+
+    Two honest blocks, because the derivational layers do not share one anchor
+    (ADR-007 §1, ADR-008): «Записи дня» describes the day itself (originals,
+    voice messages, transcription — transcription is stored per audio file),
+    and «Недельные слои» describes the weekly export of the week this day
+    belongs to (normalization, summary, wellbeing are stored per export).
+
+    ``messages`` is the whole requested day (every number is counted from real
+    rows) while ``rendered_ids`` is the message window the feed below renders:
+    the day block reports the whole day but only offers jump actions into that
+    window, so the panel can never point at a card that is not on the page
+    (:func:`_day_voice_rows`).
+
+    Every number is counted from the database and every caption comes either
+    from a database row or from the loaded model configuration; nothing is
+    invented, and a step with nothing to report says so in words.
+    """
+    rows, counters = _day_voice_rows(session, messages, rendered_ids=rendered_ids)
+    return {
+        "day_title": day_title,
+        "has_entries": counters["total"] > 0,
+        "empty_text": "За этот день записей нет.",
+        "steps": _day_block_steps(counters, stt_chip=_transcription_chip()),
+        "voice_rows": rows,
+        "week": _week_layers_view(session, day),
+        "snapshot_note": PANEL_SNAPSHOT_NOTE,
+        "wellbeing_note_title": PANEL_WELLBEING_NOTE_TITLE,
+        "wellbeing_note": PANEL_WELLBEING_NOTE,
+        "export_link_label": PANEL_EXPORT_LINK,
+        "no_export_text": PANEL_NO_EXPORT_TEXT,
+        "create_export_link_label": PANEL_CREATE_EXPORT_LINK,
     }
 
 

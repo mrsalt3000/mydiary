@@ -27,9 +27,10 @@
    The context panel is rendered only when a page sets ``context_panel = true``
    *and* fills the ``context`` block (Jinja cannot tell "empty block" from
    "block not overridden" without rendering it twice, so the page declares its
-   intent). No page does today — the processing chain is task T16c — so the
-   shell stays two-column instead of reserving an empty 332px column; the
-   third column, its width token and its breakpoints are in place.
+   intent). Today exactly one page does — the day page, whose processing panel
+   is task T16c — so the shell stays two-column everywhere else instead of
+   reserving an empty 332px column. The label names that panel truthfully; a
+   page opting in later must keep it so.
 #}
 <html lang="ru">
 <head>
@@ -124,7 +125,7 @@
       {% block content %}{% endblock %}
     </div>
     {% if context_panel %}
-    <aside class="context-panel" aria-label="Контекст записи">
+    <aside class="context-panel" aria-label="Обработка дня">
       {% block context %}{% endblock %}
     </aside>
     {% endif %}

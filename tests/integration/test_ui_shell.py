@@ -367,7 +367,8 @@ def test_pages_render_inside_the_shell(api_client: TestClient, path: str) -> Non
     response = api_client.get(path)
     assert response.status_code == 200
     html = response.text
-    assert 'class="app-shell"' in html
+    # The class may carry the "with-context" modifier (the day page does, T16c).
+    assert re.search(r'class="app-shell[\s"]', html)
     assert '<aside class="sidebar"' in html
     assert 'class="topbar"' in html
     assert "<h1>" in html
@@ -456,15 +457,24 @@ def test_narrow_screen_navigation_keeps_every_section_reachable(
     assert "compact-nav" not in script
 
 
-def test_context_panel_column_is_structural_only() -> None:
-    """No page has context content yet (the chain is task T16c), so the shell
-    must not reserve an empty column; the panel and its token are in place.
+def test_exactly_the_day_page_fills_the_context_panel() -> None:
+    """The shell's third column is opt-in: a page must set ``context_panel``
+    *and* fill the ``context`` block, so a page without context does not
+    reserve an empty 332px column.
+
+    Since T16c exactly one page does — the day page, whose processing panel is
+    that task (its content is covered by ``test_context_panel.py``). The other
+    pages must stay two-column.
     """
     base = (TEMPLATES_DIR / "base.html").read_text(encoding="utf-8")
     assert "{% if context_panel %}" in base
     assert 'class="context-panel"' in base
+
+    chat = (TEMPLATES_DIR / "chat.html").read_text(encoding="utf-8")
+    assert "{% block context %}" in chat
+    assert "_context_panel.html" in chat
+
     for name in (
-        "chat.html",
         "exports.html",
         "processing.html",
         "privacy.html",
@@ -475,6 +485,7 @@ def test_context_panel_column_is_structural_only() -> None:
     ):
         source = (TEMPLATES_DIR / name).read_text(encoding="utf-8")
         assert "context_panel" not in source, name
+        assert "{% block context %}" not in source, name
 
 
 def test_shell_pages_set_their_own_title_and_subtitle() -> None:
