@@ -1,0 +1,145 @@
+# configs/models.cpu.example.yaml — СИНТЕТИЧЕСКИЙ ПРИМЕР (не рабочий конфиг).
+#
+# ОТЛИЧИЙ ОТ configs/models.example.yaml ДВА, и оба обязаны быть явными:
+#   1. у трёх профилей слоёв фазы 2 в поле `model` стоят CPU-теги
+#      `diary-stt-cpu` / `diary-sum-cpu` / `diary-coach-cpu` вместо GPU-тегов
+#      `diary-stt` / `diary-sum` / `diary-coach`;
+#   2. `timeout_s` у этих трёх профилей = 600 вместо 120 — транспортный запас:
+#      на CPU один вызов слоя недели/coach занимает 30–110 с (замеры T13 в
+#      docs/device-choice.md), и 120 с рискуют оборвать вызов по таймауту.
+#      Это параметр транспорта, а не модели, поэтому латентность от него не
+#      зависит и сравнение устройств он не искажает.
+# Всё остальное (temperature, max_tokens, reasoning_effort, MVP-профили) —
+# как в примере: иначе сравнение устройств было бы нечестным.
+#
+# CPU-теги создаются из парных Modelfile с `PARAMETER num_gpu 0`
+# (ollama/Modelfile.stt-cpu|sum-cpu|coach-cpu). Приёмка T13 требует наблюдаемого
+# доказательства CPU-исполнения: `ollama ps` должен показывать `100% CPU`, а лог
+# сервера — `-ngl 0` / `cpu-only`. Если `num_gpu 0` не действует, замер
+# недействителен (числа и вердикт — docs/device-choice.md).
+#
+# Зачем это вообще: veto фазы 2 «STT и LLM не в VRAM одновременно» требует
+# холодной LLM, а порог T10 «правка < 5 с» — тёплой. На CPU LLM VRAM не
+# занимает вовсе, поэтому Whisper можно держать резидентно; плата — латентность
+# (измерено в T13: укладывается ли она в 3 минуты на операцию).
+#
+# Политика: см. configs/README.md и docs/privacy-and-safety.md §2.
+# - Секретов в этом файле НЕТ. Поля api_key_env хранят только ИМЯ переменной
+#   окружения; значение резолвится из окружения в рантайме.
+# - Четыре задачи MVP настраиваются независимо; провайдер/модель могут отличаться.
+# - transcription в MVP — только локальный faster_whisper;
+#   normalization/summarization/wellbeing_analysis — только openai_compatible.
+# - Три профиля слоёв фазы 2 (T02) — `diary_stt`, `diary_sum`, `diary_coach` —
+#   ОПЦИОНАЛЬНЫ: отсутствие профиля означает «слой отключён», а не ошибку
+#   (docs/tasklist-phase2.md §9.8). Валидатор принимает конфиг и без них.
+#
+# Как использовать: скопируйте файл в configs/models.yaml (в Git не
+# коммитится) и задайте значения. Путь к рабочему файлу можно переопределить
+# переменной окружения MODELS_CONFIG. Пример имен ключей — в .env.example.
+#
+# external: false — локальный эндпоинт (данные не покидают машину);
+# external: true  — внешний сервис: содержимое дневника уходит наружу и
+#                   требует явного включения и раскрытия в UI.
+
+profiles:
+  transcription:
+    provider: faster_whisper      # локальный STT (MVP)
+    model: small                  # имя/размер модели
+    language: ru                  # язык распознавания
+    device: cpu                   # cpu или cuda (опционально, WSL 2)
+    compute_type: int8            # int8/int8_float16/int8_float32/float16/float32
+    beam_size: 5
+
+  normalization:
+    provider: openai_compatible
+    base_url: http://127.0.0.1:11434/v1   # локальный OpenAI-совместимый эндпоинт (пример)
+    model: local-normalizer
+    api_key_env: NORMALIZATION_API_KEY    # имя переменной окружения, НЕ значение
+    timeout_s: 120
+    temperature: 0.0
+    max_tokens: 8000
+    external: false
+
+  summarization:
+    provider: openai_compatible
+    base_url: https://api.example.com/v1  # пример внешнего сервиса
+    model: summary-model
+    api_key_env: SUMMARIZATION_API_KEY
+    timeout_s: 120
+    temperature: 0.2
+    max_tokens: 2000
+    external: true                         # внешняя обработка: требует явного включения
+
+  wellbeing_analysis:
+    provider: openai_compatible
+    base_url: http://127.0.0.1:11434/v1
+    model: local-wellbeing
+    api_key_env: WELLBEING_API_KEY
+    timeout_s: 120
+    temperature: 0.2
+    max_tokens: 1500
+    external: false
+
+# --- Профили слоёв фазы 2 (T02/T13, опциональные) ----------------------------
+# Все три — локальный Ollama по OpenAI-совместимому API. В ЭТОМ файле модели —
+# CPU-теги: теги создаются либо `scripts/serve-ollama.sh create-phase2` (GPU) с
+# `ollama/Modelfile.stt|sum|coach`, либо вручную из CPU-близнецов
+# `ollama/Modelfile.stt-cpu|sum-cpu|coach-cpu` под именами `diary-*-cpu`
+# (единственное отличие близнеца — `PARAMETER num_gpu 0`).
+#
+# temperature ОБЯЗАНА совпадать с `PARAMETER temperature` своего Modelfile:
+# resolve_completion_params() (src/diary/domain/llm/providers.py) всегда
+# отправляет temperature из профиля, поэтому расхождение — тихая подмена
+# (Modelfile проигрывает). Согласование проверяет
+# tests/unit/test_models_config.py; числа — из решения T02 (диапазоны брифа
+# 0.1–0.2 / 0.2–0.3 / 0.4 задают границы выбора, в конфиг попадает одно число).
+# У CPU-тегов значения те же, что у GPU: 0.15 / 0.25 / 0.4.
+#
+# max_tokens — cap генерации, а не резерв VRAM (KV-кэш преаллоцируется под
+# num_ctx). Запас нужен на канал reasoning: размышление тратит те же max_tokens,
+# и при исчерпании лимита content приходит пустым (невалидный вывод = failed
+# run). Поэтому у всех трёх профилей явно стоит `reasoning_effort: none` (T02b,
+# ADR-009) — канал размышлений выключен, лимит целиком уходит на ответ; поле
+# опционально, и при его отсутствии провайдер не отправляет его вовсе
+# (поведение по умолчанию не меняется). Для больших недельных входов (T06) и
+# порога T10 значения max_tokens перепроверить.
+#
+# num_ctx здесь НЕ задаётся: контекст — свойство созданной модели
+# (`PARAMETER num_ctx 8192` в Modelfile), OpenAI-совместимый API Ollama его не
+# принимает (docs/tasklist-phase2.md §5, §9.9).
+#
+# api_key_env указывает на имя переменной; значение Ollama НЕ проверяет
+# (проверено), но приложение отклоняет пустое значение — ключ должен быть
+# непустым (любая строка), иначе профиль считается неготовым.
+  diary_stt:
+    provider: openai_compatible
+    base_url: http://127.0.0.1:11434/v1
+    model: diary-stt-cpu
+    api_key_env: OLLAMA_API_KEY
+    timeout_s: 600
+    temperature: 0.15                      # == PARAMETER temperature в ollama/Modelfile.stt-cpu
+    max_tokens: 3072
+    reasoning_effort: none                 # канал размышлений выключен (T02b, ADR-009)
+    external: false
+
+  diary_sum:
+    provider: openai_compatible
+    base_url: http://127.0.0.1:11434/v1
+    model: diary-sum-cpu
+    api_key_env: OLLAMA_API_KEY
+    timeout_s: 600
+    temperature: 0.25                      # == PARAMETER temperature в ollama/Modelfile.sum-cpu
+    max_tokens: 4096
+    reasoning_effort: none                 # канал размышлений выключен (T02b, ADR-009)
+    external: false
+
+  diary_coach:
+    provider: openai_compatible
+    base_url: http://127.0.0.1:11434/v1
+    model: diary-coach-cpu
+    api_key_env: OLLAMA_API_KEY
+    timeout_s: 600
+    temperature: 0.4                       # == PARAMETER temperature в ollama/Modelfile.coach-cpu
+    max_tokens: 4096
+    reasoning_effort: none                 # канал размышлений выключен (T02b, ADR-009)
+    external: false

@@ -26,6 +26,10 @@
 #                                              # умолчанию ollama/Modelfile (T01)
 #   scripts/serve-ollama.sh create-phase2      # создать три тега профилей фазы 2
 #                                              # (T02): diary-stt, diary-sum, diary-coach
+#   scripts/serve-ollama.sh create-phase2-cpu  # создать CPU-близнецов (T13):
+#                                              # diary-stt-cpu, diary-sum-cpu,
+#                                              # diary-coach-cpu — те же параметры,
+#                                              # но `num_gpu 0` (инференс в RAM)
 #   scripts/serve-ollama.sh --help
 #
 # Переопределяемые переменные окружения:
@@ -51,6 +55,18 @@ MODELFILE="$REPO_ROOT/ollama/Modelfile"
 # (diary_stt/diary_sum/diary_coach в configs/models.example.yaml).
 PHASE2_TAGS=(diary-stt diary-sum diary-coach)
 PHASE2_MODELFILES=(ollama/Modelfile.stt ollama/Modelfile.sum ollama/Modelfile.coach)
+
+# --- CPU-близнецы тех же тегов (T13): те же num_ctx/temperature, но --------
+# `PARAMETER num_gpu 0`. Нужны для замера «LLM на CPU/RAM»: в VRAM модель не
+# попадает вовсе, поэтому veto «STT и LLM не в VRAM одновременно» перестаёт
+# действовать структурно (числа и вердикт — docs/device-choice.md). GPU-теги и
+# их Modelfile при этом не меняются.
+PHASE2_CPU_TAGS=(diary-stt-cpu diary-sum-cpu diary-coach-cpu)
+PHASE2_CPU_MODELFILES=(
+    ollama/Modelfile.stt-cpu
+    ollama/Modelfile.sum-cpu
+    ollama/Modelfile.coach-cpu
+)
 
 # --- рантайм-конфигурация ---------------------------------------------------
 OLLAMA_HOST="127.0.0.1:11434" # только loopback: наружу сервер не публикуется
@@ -261,6 +277,19 @@ cmd_create_phase2() {
     done
 }
 
+# create-phase2-cpu — CPU-близнецы тех же трёх тегов (T13). Отличие только в
+# `PARAMETER num_gpu 0` внутри Modelfile; GPU-теги не затрагиваются. Так же
+# идемпотентен, как create-phase2.
+cmd_create_phase2_cpu() {
+    local i tag modelfile
+    for i in "${!PHASE2_CPU_TAGS[@]}"; do
+        tag="${PHASE2_CPU_TAGS[$i]}"
+        modelfile="${PHASE2_CPU_MODELFILES[$i]}"
+        printf 'serve-ollama.sh: создаю CPU-тег %s из %s\n' "$tag" "$modelfile" >&2
+        cmd_create "$tag" "$modelfile"
+    done
+}
+
 cmd="${1:-}"
 if [ -z "$cmd" ] || [ "$cmd" = "-h" ] || [ "$cmd" = "--help" ]; then
     usage
@@ -278,6 +307,7 @@ case "$cmd" in
     pull) cmd_pull "$@" ;;
     create) cmd_create "$@" ;;
     create-phase2) cmd_create_phase2 ;;
+    create-phase2-cpu) cmd_create_phase2_cpu ;;
     *)
         printf 'serve-ollama.sh: неизвестная команда %s\n\n' "$cmd" >&2
         usage >&2
