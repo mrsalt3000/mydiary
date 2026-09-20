@@ -18,12 +18,15 @@ artifact and is not driven by a weekly export, so it is looked up with
 ``get_pipeline``.
 
 **Nothing calls this function automatically** (T07 decision 3: «запуск только
-явный»). In particular the worker startup (``diary.workers.runner.main``) does
-not register this layer — registering it there and adding a job handler would
-turn an enqueued ``coach_note`` job into an automatic run, which this layer must
-not allow. Launching the layer is a deliberate action of a caller (T09/T11 own
-the UI and the queue wiring), so the registration stays where the caller puts
-it.
+явный»). The worker startup (``diary.workers.runner.main``) **registers** the
+layer since T09 — the orchestrator resolves layers through
+:func:`~diary.domain.pipelines.registry.get_second_family_pipeline`, so an
+unregistered layer could not be run explicitly in the worker process either —
+but registration is not a launch: the worker registers **no job handler** for
+``JobType.coach_note`` (an enqueued ``coach_note`` job therefore still fails
+permanently instead of running the layer) and no route or worker code calls the
+layer service. Launching the layer stays a deliberate action of a caller
+(T09's ``run_coach_step`` and T11's CLI/UI own that wiring).
 """
 
 from __future__ import annotations

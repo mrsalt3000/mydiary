@@ -23,8 +23,9 @@ Covers the definition of done of task T07 (``docs/tasklist-phase2.md`` §6):
 * the input weekly summary is not modified, and the layer has no other write
   path;
 * **launch is explicit only**: importing the package registers nothing, no job
-  handler exists for the layer, the worker startup does not register it and no
-  API route calls it;
+  handler exists for the layer, the worker startup registers the layer (since
+  T09, so the orchestrator can resolve it) but never calls it, and no API route
+  calls it;
 * **layer 4 is untouched**: the coach modules do not import the wellbeing
   package, the two disclaimer constants stay separate and the layer-5 layer /
   pipeline values are distinct from the layer-4 ones.
@@ -554,12 +555,25 @@ print(json.dumps({
     }
 
 
-def test_the_worker_startup_does_not_register_the_layer() -> None:
-    """The layer must not be started by the queue; T09/T11 own that wiring."""
+def test_the_worker_startup_registers_but_never_launches_the_layer() -> None:
+    """The queue must never start the layer; T09/T11 own the explicit wiring.
+
+    Since T09 the worker **registers** the layer (the orchestrator resolves
+    layers through the second-family registry, so an unregistered layer could
+    not be launched explicitly in the worker process either) — but registering
+    is not launching: with no handler for ``JobType.coach_note`` an enqueued job
+    still fails permanently, and no worker code calls the layer service. This is
+    the narrowed, still-structural form of the T07 rule «запуск только явный».
+    """
     runner_source = (PROJECT_ROOT / "src" / "diary" / "workers" / "runner.py").read_text(
         encoding="utf-8"
     )
-    assert "coach" not in runner_source
+    # Registered at startup, so the explicit launch can resolve the layer here.
+    assert "ensure_coach_pipeline_registered" in runner_source
+    # Never launched: no call of the layer or of its service in the worker.
+    assert "run_coach_note(" not in runner_source
+    assert "coach_note(" not in runner_source
+    assert handlers.get_handler(JobType.coach_note) is None
 
 
 def test_no_api_route_runs_the_layer() -> None:

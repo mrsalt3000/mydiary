@@ -433,17 +433,35 @@ def main(argv: list[str] | None = None) -> int:
     # Task 13-15: register the implemented pipelines (normalization,
     # summarization, wellbeing) before any job runs, so real
     # ``normalize``/``summarize``/``wellbeing`` jobs no longer fail
-    # permanently with "pipeline not registered yet". Task T04 adds the
-    # phase-2 STT-correction layer to the second-family half of the registry
-    # (it is per message, not per weekly export). The functions are guarded and
+    # permanently with "pipeline not registered yet". Tasks T04-T07 add the
+    # four phase-2 layers of the second anchor family (ADR-007) to the
+    # second-family half of the registry (they are per message / per local day
+    # / per ISO week, not per weekly export). The functions are guarded and
     # idempotent; importing them here (not at module import time) keeps the
     # registry free of import side effects for the web process and the test
     # suite.
+    #
+    # Registration is not launch: the worker registers the layers so the
+    # orchestrator (``diary.domain.pipelines.pipeline``, task T09) can resolve
+    # them in this process, but it registers **no job handler** for the
+    # phase-2 job types and never calls a layer service. In particular the
+    # coaching note (layer 5) keeps its "explicit launch only" rule (T07
+    # decision 3): an enqueued ``coach_note`` job still fails permanently
+    # instead of running the layer.
+    from diary.domain.pipelines.coach.registration import (
+        ensure_coach_pipeline_registered,
+    )
     from diary.domain.pipelines.normalize.registration import (
         ensure_normalize_pipeline_registered,
     )
     from diary.domain.pipelines.stt_fix.registration import (
         ensure_stt_fix_pipeline_registered,
+    )
+    from diary.domain.pipelines.sum_daily.registration import (
+        ensure_sum_daily_pipeline_registered,
+    )
+    from diary.domain.pipelines.sum_weekly.registration import (
+        ensure_sum_weekly_pipeline_registered,
     )
     from diary.domain.pipelines.summarize.registration import (
         ensure_summarize_pipeline_registered,
@@ -456,6 +474,9 @@ def main(argv: list[str] | None = None) -> int:
     ensure_summarize_pipeline_registered()
     ensure_wellbeing_pipeline_registered()
     ensure_stt_fix_pipeline_registered()
+    ensure_sum_daily_pipeline_registered()
+    ensure_sum_weekly_pipeline_registered()
+    ensure_coach_pipeline_registered()
     worker_id = args.worker_id or _default_worker_id()
     settings: AppSettings = get_settings()
     engine = create_engine(settings=settings)
