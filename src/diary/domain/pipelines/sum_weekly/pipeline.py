@@ -6,7 +6,7 @@ Responsibilities
 * Take **the daily summaries of one ISO week** (selected by
   :mod:`diary.domain.pipelines.sum_weekly.week_input`) and build the
   :class:`LLMRequest` from the versioned prompt template
-  ``prompts/sum_weekly/v1.md`` plus those summaries, in day order. The input is
+  ``prompts/sum_weekly/v2.md`` plus those summaries, in day order. The input is
   the ``DailySummary`` contract of the layer ``daily_summary`` — never raw
   messages and never a weekly export (T06 DoD: "только merge дневных саммари,
   не raw").
@@ -56,9 +56,9 @@ from diary.domain.llm.structured import parse_contract_response
 from diary.domain.pipelines.base import PipelinePermanentError, SecondFamilyLayer
 from diary.domain.pipelines.sum_weekly.week_input import WeeklyInputError
 
-#: Versioned prompt template of this layer (``prompts/sum_weekly/v1.md``).
-PROMPT_VERSION = "v1"
-#: Prompt template location: ``prompts/sum_weekly/v1.md``.
+#: Versioned prompt template of this layer (``prompts/sum_weekly/v2.md``).
+PROMPT_VERSION = "v2"
+#: Prompt template location: ``prompts/sum_weekly/v2.md``.
 PROMPT_PATH = PROJECT_ROOT / "prompts" / "sum_weekly" / f"{PROMPT_VERSION}.md"
 #: Phase-2 profile field of ``configs/models.yaml`` this layer runs under.
 PROFILE_NAME = "diary_sum"

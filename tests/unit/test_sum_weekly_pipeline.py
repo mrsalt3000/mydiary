@@ -221,8 +221,8 @@ def _profile_for_budget(tokens: int) -> OpenAICompatibleProfile:
 # ---------------------------------------------------------------------------
 
 
-def test_prompt_template_is_v1_and_forbids_advice_and_diagnoses() -> None:
-    assert PROMPT_VERSION == "v1"
+def test_prompt_template_is_v2_and_forbids_advice_and_diagnoses() -> None:
+    assert PROMPT_VERSION == "v2"
     assert PROMPT_PATH.is_file()
     text = PROMPT_PATH.read_text(encoding="utf-8")
     # The single output field and the merge mode are explicit.
@@ -562,7 +562,7 @@ def test_the_run_does_not_change_the_week_summaries(store: _RecordingStore) -> N
 def test_the_layer_declares_no_rendered_file_location() -> None:
     """The layer's result is inline; it has no per-layer artifact directory."""
     assert PROMPT_PATH.parent.name == "sum_weekly"
-    assert PROMPT_PATH.name == "v1.md"
+    assert PROMPT_PATH.name == "v2.md"
     assert SumWeeklyPipeline.output_ext == ".md"
 
 

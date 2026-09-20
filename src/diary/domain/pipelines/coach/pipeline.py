@@ -6,7 +6,7 @@ Responsibilities
 * Take **one weekly summary** (the ``WeeklySummary`` contract of the layer
   ``weekly_summary``, selected by :mod:`.coach_input`) and build exactly one
   :class:`LLMRequest` from the versioned prompt template
-  ``prompts/coach_note/v1.md`` plus that summary as JSON. The input is the
+  ``prompts/coach_note/v2.md`` plus that summary as JSON. The input is the
   grounded week rollup — never raw messages, never the day summaries directly
   and never a weekly export (T07 decision 1).
 * Validate the completion against the T00 contract
@@ -63,9 +63,9 @@ from diary.domain.llm.models import LLMRequest, LLMResponse
 from diary.domain.llm.structured import parse_contract_response
 from diary.domain.pipelines.base import PipelinePermanentError, SecondFamilyLayer
 
-#: Versioned prompt template of this layer (``prompts/coach_note/v1.md``).
-PROMPT_VERSION = "v1"
-#: Prompt template location: ``prompts/coach_note/v1.md``.
+#: Versioned prompt template of this layer (``prompts/coach_note/v2.md``).
+PROMPT_VERSION = "v2"
+#: Prompt template location: ``prompts/coach_note/v2.md``.
 PROMPT_PATH = PROJECT_ROOT / "prompts" / "coach_note" / f"{PROMPT_VERSION}.md"
 #: Phase-2 profile field of ``configs/models.yaml`` this layer runs under.
 PROFILE_NAME = "diary_coach"

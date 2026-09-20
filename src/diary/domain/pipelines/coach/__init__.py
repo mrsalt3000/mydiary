@@ -9,7 +9,7 @@ three observations, exactly two hypotheses and one small experiment for the next
   ``WeeklySummary`` artifact of an ISO week (task T06); raw messages, the
   ``daily_summary`` layer and weekly exports are never read;
 * **layer 5 is separate from layer 4** — the layer has its own pipeline type
-  (``coach_note``), its own prompt (``prompts/coach_note/v1.md``), its own
+  (``coach_note``), its own prompt (``prompts/coach_note/v2.md``), its own
   profile (``diary_coach``) and its own disclaimer constant
   (:data:`~diary.domain.contracts.COACH_DISCLAIMER`). It does **not** import,
   re-use or modify ``diary.domain.pipelines.wellbeing`` (its safety classifier,

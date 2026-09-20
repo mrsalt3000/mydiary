@@ -197,8 +197,8 @@ def _run(
 # ---------------------------------------------------------------------------
 
 
-def test_prompt_template_is_v1_and_demands_3_2_1() -> None:
-    assert PROMPT_VERSION == "v1"
+def test_prompt_template_is_v2_and_demands_3_2_1() -> None:
+    assert PROMPT_VERSION == "v2"
     assert PROMPT_PATH.is_file()
     text = PROMPT_PATH.read_text(encoding="utf-8")
     # The three answer fields and their counts are explicit.
@@ -621,5 +621,5 @@ def test_the_layer_4_pipeline_is_not_replaced_by_the_coach_layer() -> None:
 
 def test_prompt_and_layer_files_live_under_the_t07_locations() -> None:
     assert PROMPT_PATH.parent.name == "coach_note"
-    assert PROMPT_PATH.name == "v1.md"
+    assert PROMPT_PATH.name == "v2.md"
     assert CoachNotePipeline.output_ext == ".md"
