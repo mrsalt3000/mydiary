@@ -1,6 +1,6 @@
 # ADR-010: Ручная расшифровка идёт через общий GPU-слот; LLM выгружается явно (T11)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-20
 - Развивает: ADR-007 (вторая семья якорей), ADR-009 (`reasoning_effort`) и правило
   гибрида из `docs/device-choice.md` §11. Исполняется в задаче **T11**

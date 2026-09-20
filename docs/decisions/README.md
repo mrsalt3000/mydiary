@@ -42,5 +42,5 @@
 | [ADR-007](ADR-007-second-anchor-family-for-derivational-layers.md) | Вторая семья якорей происхождения для производных слоёв фазы 2 (вариант B) | Accepted | 2026-09-19 |
 | [ADR-008](ADR-008-second-anchor-family-persistence.md) | Персистентность второй семьи якорей в `artifacts` (дельта схемы под вариант B) | Accepted | 2026-09-19 |
 | [ADR-009](ADR-009-optional-reasoning-effort.md) | Опциональное поле `reasoning_effort` у LLM-профиля и запроса (T02b) | Accepted | 2026-09-19 |
-| [ADR-010](ADR-010-manual-stt-through-the-shared-gpu-slot.md) | Ручная расшифровка идёт через общий GPU-слот; LLM выгружается явно (T11) | Proposed | 2026-09-20 |
-| [ADR-011](ADR-011-delete-message-erases-text-and-audio.md) | Удаление сообщения стирает текст и голосовой файл; заменяет политику Task 05 и ограничивает ADR-005 явным действием пользователя (T15) | Proposed | 2026-09-20 |
+| [ADR-010](ADR-010-manual-stt-through-the-shared-gpu-slot.md) | Ручная расшифровка идёт через общий GPU-слот; LLM выгружается явно (T11) | Accepted | 2026-09-20 |
+| [ADR-011](ADR-011-delete-message-erases-text-and-audio.md) | Удаление сообщения стирает текст и голосовой файл; заменяет политику Task 05 и ограничивает ADR-005 явным действием пользователя (T15) | Accepted | 2026-09-20 |
