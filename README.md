@@ -191,7 +191,7 @@ make contracts                                                  # перезап
 | [`tasklist.md`](tasklist.md) | Авторитетный бэклог Task 01–19 (источник исполнения; не переписывается без запроса) |
 | [`AGENTS.md`](AGENTS.md) | Операционный контракт для агентов: цикл работ, приватность, DoD |
 | [`docs/architecture-brief.md`](docs/architecture-brief.md) | Полный архитектурный бриф (модули, данные, конвейеры, тесты, вехи) |
-| [`docs/decisions/`](docs/decisions/README.md) | ADR-001…006 |
+| [`docs/decisions/`](docs/decisions/README.md) | ADR-001…013 |
 | [`docs/data-lineage.md`](docs/data-lineage.md) | Слои артефактов, ревизии/версии, хэши, имена, прослеживаемость |
 | [`docs/privacy-and-safety.md`](docs/privacy-and-safety.md) | Классификация данных, секреты, провайдеры, логи, wellbeing-границы |
 | [`docs/testing-strategy.md`](docs/testing-strategy.md) | Слои тестов, mock-провайдеры, фикстуры, e2e |
@@ -199,6 +199,8 @@ make contracts                                                  # перезап
 | [`docs/manual-acceptance-checklist.md`](docs/manual-acceptance-checklist.md) | Пошаговый ручной сценарий приёмки MVP на WSL 2 |
 | [`docs/wsl2-deployment-brief.md`](docs/wsl2-deployment-brief.md) | Допущения WSL 2, Docker/Compose, GPU, локальные LLM-эндпоинты |
 | [`docs/execution-protocol.md`](docs/execution-protocol.md) | Протокол multi-agent исполнения задач |
+| [`docs/tasklist-phase2.md`](docs/tasklist-phase2.md), [`docs/acceptance-log.md`](docs/acceptance-log.md), [`docs/session-handoff.md`](docs/session-handoff.md) | Фаза 2: бэклог и статусы задач, журнал приёмок, точка возобновления сессии |
+| [`docs/device-choice.md`](docs/device-choice.md), [`docs/nli-validation-analysis.md`](docs/nli-validation-analysis.md) | Замеры: выбор устройства инференса (гибрид), NLI как валидация суммаризации |
 | [`skills/`](skills/README.md) | Исполнительные руководства по областям |
 | [`prompts/`](prompts/README.md), [`configs/`](configs/README.md), [`data/`](data/README.md) | Политики промптов, конфигурации и приватных данных |
 
