@@ -1692,6 +1692,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.nli:
         try:
             judge = nli_judge()
+            # Prove the instrument *before* the run: an unavailable judge must fail
+            # the run even when the selection turns out to contain no summary chunk
+            # at all, which would otherwise leave the block empty and the run green
+            # (found in the first review of T24a). A scripted judge has no ``load``.
+            load = getattr(judge, "load", None)
+            if callable(load):
+                load()
             outcomes = evaluate_all(
                 chunks,
                 provider_factory=factory,
@@ -1711,6 +1718,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     summary = summarize(outcomes)
     required = len(chunks) if (args.strict or args.chunk) else manifest.threshold.pass_count
     failures: list[str] = []
+    if args.nli and summary.nli_summaries == 0:
+        # The instrument was requested and worked, but there was nothing for it to
+        # verify: a green run would read as «the claims were checked» (T24a review).
+        failures.append(
+            "the NLI check verified nothing: the selected chunks declare no summary claims"
+        )
     if summary.measured == 0:
         # Fail-closed: a run that measured nothing verified nothing, whatever the
         # reason for the skips.

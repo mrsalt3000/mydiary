@@ -63,9 +63,13 @@ select = ["E", "F", "I"]
 python_version = "3.12"
 files = ["src"]
 
-# Optional extras (``stt``, ``nli``) are not installed in CI and ship no type
-# information: the adapters import them lazily and raise a typed error when the
-# extra is missing, so mypy is told not to look inside.
+# Optional extras (``stt``, ``nli``) are not installed in CI, so the adapters —
+# which import them lazily and raise a typed error when the extra is missing — must
+# not make type checking depend on them. ``onnxruntime`` has no stubs and
+# ``tokenizers`` ships ``py.typed`` only in some versions, so a clean
+# ``pip install -e ".[dev]"`` fails on either without this override (verified in
+# the second review of T24a with ``mypy --no-site-packages``); the local venv
+# cannot be trusted to show it, because the ``stt`` extra pulls both packages in.
 [[tool.mypy.overrides]]
 module = ["onnxruntime", "onnxruntime.*", "tokenizers", "tokenizers.*"]
 ignore_missing_imports = true

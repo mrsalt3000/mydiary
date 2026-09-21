@@ -106,6 +106,27 @@ def test_the_settings_default_directory_is_where_the_fetch_script_writes() -> No
     )
 
 
+def test_a_corrupt_file_is_the_typed_failure_not_a_traceback(tmp_path: Path) -> None:
+    """Whatever the loader throws, the caller sees NliUnavailableError.
+
+    Reached with the pin switched off (a deliberately non-pinned experiment): the
+    tokenizer is a text file full of nonsense, so the failure happens while the
+    instrument is being built. Without the wrap it escaped as a raw traceback —
+    found in the first review of T24a.
+    """
+    pytest.importorskip("onnxruntime")
+    pytest.importorskip("tokenizers")
+    (tmp_path / "model.onnx").write_bytes(b"not a model")
+    (tmp_path / "tokenizer.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "config.json").write_text(
+        json.dumps({"id2label": {"0": "entailment", "1": "contradiction", "2": "neutral"}}),
+        encoding="utf-8",
+    )
+    judge = _judge(tmp_path)
+    with pytest.raises(NliUnavailableError, match="could not be loaded"):
+        judge.load()
+
+
 def test_a_different_label_order_is_refused(tmp_path: Path) -> None:
     """A reordered model would invert entailment and contradiction silently."""
     judge = _judge(tmp_path)

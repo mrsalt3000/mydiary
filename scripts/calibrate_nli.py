@@ -54,14 +54,13 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
 from diary.domain.contracts.nli import (  # noqa: E402
-    CONTRADICTION,
-    ENTAILMENT,
-    NEUTRAL,
+    CONTRADICTION_THRESHOLD,
+    PROPOSITIONAL_FIELDS,
     SUPPORT_THRESHOLD,
     Claim,
     Judgement,
+    claims_for,
     judge_claims,
-    split_sentences,
 )
 from diary.domain.nli.onnx_judge import OnnxNliJudge  # noqa: E402
 
@@ -90,18 +89,32 @@ PLANTED = ("number_swap", "antonym", "foreign_claim")
 
 @dataclass
 class Sample:
-    """One judged claim with the label the corpus gave it."""
+    """One judged claim with the label the corpus gave it.
+
+    The two probabilities are the *claim-level aggregates* the rules compute, not
+    the evidence row: ``support_probability`` decides support (with
+    :data:`SUPPORT_THRESHOLD`) and ``contradiction_probability`` is what a
+    contradiction threshold is compared with. Sweeping the evidence row instead was
+    the second defect found in T24a's calibration: a supported claim's evidence row
+    is its weakest sentence, so faithful claims were counted as flagged.
+    """
 
     chunk_id: str
+    field: str
     claim: str
-    p_contradiction: float
-    p_entailment: float
-    p_neutral: float
+    support_probability: float
+    contradiction_probability: float
+    propositional: bool
     label: str  # clean | clean_failed_checks | number_swap | antonym | foreign_claim
 
+    def flagged_at(self, threshold: float) -> bool:
+        """Whether the rule would condemn this claim at ``threshold``."""
+        return self.propositional and self.contradiction_probability >= threshold
+
     @property
-    def contradicts_at(self) -> float:
-        return self.p_contradiction
+    def supported(self) -> bool:
+        """Whether the claim is fully supported (independent of the sweep)."""
+        return self.support_probability >= SUPPORT_THRESHOLD
 
 
 @dataclass
@@ -130,21 +143,26 @@ def load_harness() -> Any:
     return module
 
 
-def _sample(chunk_id: str, claim: str, judgement: Judgement, label: str) -> Sample:
-    probabilities = judgement.probabilities
+def _sample(chunk_id: str, claim: Claim, judgement: Judgement, label: str) -> Sample:
     return Sample(
         chunk_id=chunk_id,
-        claim=claim,
-        p_contradiction=float(probabilities[CONTRADICTION]),
-        p_entailment=float(probabilities[ENTAILMENT]),
-        p_neutral=float(probabilities[NEUTRAL]),
+        field=claim.field,
+        claim=claim.text,
+        support_probability=judgement.support_probability,
+        contradiction_probability=judgement.contradiction_probability,
+        propositional=claim.is_propositional,
         label=label,
     )
 
 
-def _synthetic_claim(text: str, index: int) -> Claim:
-    """A claim object for the calibration corpus (the field does not affect the rule)."""
-    return Claim(contract="calibration", field="captured", index=index, text=text)
+def _synthetic_claim(text: str, index: int, *, contract: str, field: str) -> Claim:
+    """A claim of the calibration corpus, keeping the contract and field it came from.
+
+    The field matters since T24a's second review: the contradiction rule applies to
+    propositional fields only, so a corpus that labelled every synthetic claim
+    «captured» would silently measure a rule that never condemns anything.
+    """
+    return Claim(contract=contract, field=field, index=index, text=text)
 
 
 def plant_number_swap(claim: str) -> str | None:
@@ -174,72 +192,132 @@ def collect(
     )
     judge = OnnxNliJudge.from_settings()
 
-    # Chunk id -> (source sentences, claim texts, label of that summary).
-    captured: dict[str, tuple[list[str], list[str], str]] = {}
-    for run_index in range(max(1, runs)):
-        for chunk in harness.load_golden_set(chunk_ids=only)[1]:
-            if chunk.contract not in harness.NLI_CONTRACTS:
-                continue
-            recorder = Recorder(judge)
-            outcome = harness.evaluate_chunk(
-                chunk, provider=factory(chunk), models_config=config, judge=recorder
-            )
-            label = "clean"
-            if outcome.content_violations:
-                failed = [item.check for item in outcome.content_violations]
-                label = "clean_failed_checks"
-                print(f"  note: {chunk.id} (run {run_index + 1}) failed {failed}", file=sys.stderr)
-            sentences = split_sentences(recorder.pairs[0][0]) if recorder.pairs else []
-            hypotheses: list[str] = []
-            for _sentence, hypothesis in recorder.pairs:
-                if hypothesis not in hypotheses:
-                    hypotheses.append(hypothesis)
-            captured[chunk.id] = (sentences, hypotheses, label)
-            if show_text:
-                print(f"[{chunk.id} run {run_index + 1}] source sentences: {len(sentences)}")
-                for sentence in sentences:
-                    print(f"    · {sentence[:150]}")
+    # Every (run, chunk) is its own capture: a repeated run *adds* a summary rather
+    # than replacing the previous one (the first review of T24a found the opposite —
+    # keying by chunk id discarded the repetitions, so `--runs 6` built a corpus of
+    # three summaries while the documents claimed eighteen).
+    #
+    # The harness knows the *claims* (field and all); its judge only sees texts. The
+    # calibration therefore records the payloads the harness judged, so the corpus
+    # carries the same fields the rules see.
+    payloads: dict[str, dict[str, object]] = {}
+    original_metrics = harness._nli_metrics
+
+    def _recording_metrics(chunk: Any, payload: Any, judge_argument: Any) -> Any:
+        payloads[chunk.id] = dict(payload)
+        return original_metrics(chunk, payload, judge_argument)
+
+    captures: list[tuple[str, str, list[str], list[Claim], str]] = []
+    harness._nli_metrics = _recording_metrics
+    try:
+        for run_index in range(max(1, runs)):
+            for chunk in harness.load_golden_set(chunk_ids=only)[1]:
+                if chunk.contract not in harness.NLI_CONTRACTS:
+                    continue
+                recorder = Recorder(judge)
+                outcome = harness.evaluate_chunk(
+                    chunk, provider=factory(chunk), models_config=config, judge=recorder
+                )
+                label = "clean"
+                if outcome.content_violations:
+                    failed = [item.check for item in outcome.content_violations]
+                    label = "clean_failed_checks"
+                    print(
+                        f"  note: {chunk.id} (run {run_index + 1}) failed {failed}",
+                        file=sys.stderr,
+                    )
+                # The premise is the *whole* source: every sentence the harness asked
+                # about, in the order it asked (the first review of T24a found the
+                # opposite — taking one pair's premise left exactly one sentence, so
+                # the calibration measured a rule nobody ships).
+                sentences = list(dict.fromkeys(premise for premise, _ in recorder.pairs))
+                claims = claims_for(chunk.contract, payloads[chunk.id])
+                captures.append((chunk.id, chunk.contract, sentences, claims, label))
+                if show_text:
+                    print(
+                        f"[{chunk.id} run {run_index + 1}] source sentences: {len(sentences)} "
+                        f"claims: {len(claims)}"
+                    )
+                    for sentence in sentences:
+                        print(f"    · {sentence[:150]}")
+    finally:
+        harness._nli_metrics = original_metrics
 
     samples: list[Sample] = []
 
-    def judge_texts(chunk_id: str, texts: Sequence[str], label: str) -> None:
+    def judge_claims_of(
+        chunk_id: str, sentences: Sequence[str], claims: Sequence[Claim], label: str
+    ) -> None:
         """Verdicts from the *rules*, so the calibration measures what ships."""
-        sentences = captured[chunk_id][0]
-        judgements = judge_claims(
-            sentences,
-            [_synthetic_claim(text, index) for index, text in enumerate(texts, 1)],
-            judge,
-        )
+        judgements = judge_claims(sentences, claims, judge)
         samples.extend(
-            _sample(chunk_id, text, judgement, label)
-            for text, judgement in zip(texts, judgements, strict=True)
+            _sample(chunk_id, claim, judgement, label)
+            for claim, judgement in zip(claims, judgements, strict=True)
         )
 
-    for chunk_id, (_sentences, claims, label) in captured.items():
-        judge_texts(chunk_id, claims, label)
+    for chunk_id, _contract, sentences, claims, label in captures:
+        judge_claims_of(chunk_id, sentences, claims, label)
 
-    # Planted negatives: mutants of clean claims, judged against the same source.
-    for chunk_id in captured:
+    # A chunk's source is identical in every run, so the per-chunk source is taken
+    # from its first capture; claims accumulate across runs.
+    sentences_by_chunk = {chunk_id: sentences for chunk_id, _c, sentences, _k, _l in captures}
+    contract_by_chunk = {chunk_id: contract for chunk_id, contract, _s, _k, _l in captures}
+
+    # Planted negatives: mutants of clean *propositional* claims (a mutated label is
+    # not a defect the rule can judge), against the same source.
+    for chunk_id, sentences in sentences_by_chunk.items():
+        contract = contract_by_chunk[chunk_id]
+        propositional = PROPOSITIONAL_FIELDS.get(contract, ())
         clean = [
-            item.claim for item in samples if item.chunk_id == chunk_id and item.label == "clean"
+            item
+            for item in samples
+            if item.chunk_id == chunk_id and item.label == "clean" and item.field in propositional
         ]
         for mutation, plant_label in (
             (plant_number_swap, "number_swap"),
             (plant_antonym, "antonym"),
         ):
-            mutants = [text for text in (mutation(claim) for claim in clean) if text]
-            if mutants:
-                judge_texts(chunk_id, mutants, plant_label)
+            planted: list[Claim] = []
+            for item in clean:
+                mutated = mutation(item.claim)
+                if mutated:
+                    planted.append(
+                        _synthetic_claim(
+                            mutated, len(planted) + 1, contract=contract, field=item.field
+                        )
+                    )
+            if planted:
+                judge_claims_of(chunk_id, sentences, planted, plant_label)
 
-    # Foreign claims: a claim of another chunk judged against this source, so the
-    # source is silent about it. For a gate this is the dangerous class: silence
-    # must not read as a contradiction.
-    for chunk_id in captured:
-        foreign = [
-            item.claim for item in samples if item.chunk_id != chunk_id and item.label == "clean"
-        ][:4]
+    # Foreign claims: a propositional claim of another chunk judged against this
+    # source, so the source is silent about it. For a gate this is the dangerous
+    # class: silence must not read as a contradiction.
+    for chunk_id, sentences in sentences_by_chunk.items():
+        contract = contract_by_chunk[chunk_id]
+        propositional_fields = PROPOSITIONAL_FIELDS.get(contract, ())
+        if not propositional_fields:
+            # A contract with no propositional field (the weekly rollup, excluded on
+            # its own measurement) cannot be condemned, so it has no «foreign»
+            # class either — planting one would measure a rule that does not apply.
+            continue
+        field = propositional_fields[0]
+        seen: list[str] = []
+        foreign: list[Claim] = []
+        for item in samples:
+            if item.chunk_id == chunk_id or item.label != "clean":
+                continue
+            if item.field not in PROPOSITIONAL_FIELDS.get(contract_by_chunk[item.chunk_id], ()):
+                continue
+            if item.claim in seen:
+                continue
+            seen.append(item.claim)
+            foreign.append(
+                _synthetic_claim(item.claim, len(foreign) + 1, contract=contract, field=field)
+            )
+            if len(foreign) == 4:
+                break
         if foreign:
-            judge_texts(chunk_id, foreign, "foreign_claim")
+            judge_claims_of(chunk_id, sentences, foreign, "foreign_claim")
 
     return samples
 
@@ -252,16 +330,13 @@ def sweep(samples: Sequence[Sample]) -> list[dict[str, float]]:
         row: dict[str, float] = {"threshold": threshold}
         for label in PLANTED:
             planted = [item for item in samples if item.label == label]
-            caught = [item for item in planted if item.contradicts_at >= threshold]
-            row[f"caught_{label}"] = len(caught)
+            row[f"caught_{label}"] = sum(1 for item in planted if item.flagged_at(threshold))
             row[f"total_{label}"] = len(planted)
-        row["flagged_clean"] = sum(1 for item in clean if item.contradicts_at >= threshold)
+        row["flagged_clean"] = sum(1 for item in clean if item.flagged_at(threshold))
         row["total_clean"] = len(clean)
-        row["unsupported_clean"] = sum(1 for item in clean if item.p_entailment < SUPPORT_THRESHOLD)
+        row["unsupported_clean"] = sum(1 for item in clean if not item.supported)
         row["flagged_foreign_as_contradiction"] = sum(
-            1
-            for item in samples
-            if item.label == "foreign_claim" and item.contradicts_at >= threshold
+            1 for item in samples if item.label == "foreign_claim" and item.flagged_at(threshold)
         )
         rows.append(row)
     return rows
@@ -274,14 +349,23 @@ def report(samples: Sequence[Sample], rows: Sequence[Mapping[str, float]], show_
     print("\nкорпус (число утверждений по классам):")
     for label, count in sorted(by_label.items()):
         print(f"  {label:<20} {count}")
+    clean_fields: dict[str, int] = defaultdict(int)
+    for item in samples:
+        if item.label == "clean":
+            clean_fields[item.field] += 1
+    print(
+        "  clean по полям: "
+        + ", ".join(f"{name}={count}" for name, count in sorted(clean_fields.items()))
+    )
 
     if show_text:
         print("\nутверждения и вероятности:")
         for item in samples:
-            mark = "  <-- contradiction" if item.p_contradiction >= 0.60 else ""
+            mark = "  <-- contradiction" if item.flagged_at(CONTRADICTION_THRESHOLD) else ""
             print(
-                f"  {item.chunk_id:<34}{item.label:<20} "
-                f"entr={item.p_entailment:.2f} contr={item.p_contradiction:.2f} "
+                f"  {item.chunk_id:<28}{item.field:<10}{item.label:<20} "
+                f"support={item.support_probability:.2f} "
+                f"contra={item.contradiction_probability:.2f} "
                 f"{item.claim[:60]}{mark}"
             )
 

@@ -168,13 +168,25 @@ class OnnxNliJudge:
                 )
 
         self._id_to_label = self._read_labels()
-        tokenizer = Tokenizer.from_file(str(self.tokenizer_path))
-        tokenizer.enable_truncation(max_length=MAX_PAIR_TOKENS)
-        tokenizer.enable_padding()
-        self._tokenizer = tokenizer
-        self._session = onnxruntime.InferenceSession(
-            str(self.model_path), providers=["CPUExecutionProvider"]
-        )
+        try:
+            tokenizer = Tokenizer.from_file(str(self.tokenizer_path))
+            tokenizer.enable_truncation(max_length=MAX_PAIR_TOKENS)
+            tokenizer.enable_padding()
+            self._tokenizer = tokenizer
+            self._session = onnxruntime.InferenceSession(
+                str(self.model_path), providers=["CPUExecutionProvider"]
+            )
+        except Exception as exc:  # noqa: BLE001 - any loader failure is «unavailable»
+            # A corrupt or foreign file must surface as the same typed failure as a
+            # missing one (a traceback would break the harness contract, found in
+            # the first review of T24a): the fix is the same — fetch the weights.
+            self._session = None
+            self._tokenizer = None
+            raise NliUnavailableError(
+                f"{self.model_path} or {self.tokenizer_path} could not be loaded "
+                f"({type(exc).__name__}): re-run scripts/fetch-nli-model.sh and "
+                'install the extra with pip install -e ".[nli]"'
+            ) from exc
 
     def _read_labels(self) -> dict[int, str]:
         """Read ``id2label`` and refuse a model whose label order we do not know."""

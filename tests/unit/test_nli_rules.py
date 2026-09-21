@@ -158,12 +158,14 @@ def test_support_outvotes_an_unrelated_contradiction() -> None:
 
     With a multi-sentence source, a verbatim entry compared against a *different*
     entry reads as a contradiction (measured 0.79 in T24a). The rule asks every
-    source sentence, and one supporting sentence is enough.
+    source sentence, and one supporting sentence is enough — even when the
+    unrelated sentence is *above* the contradiction threshold, which is what makes
+    this test bite: under «contradiction first» the claim would be condemned.
     """
     judge = scripted(
         {
             ("Утром плавал.", "Утром плавал в бассейне."): _row(0.93, 0.05, 0.02),
-            ("Вечером читал.", "Утром плавал в бассейне."): _row(0.18, 0.79, 0.03),
+            ("Вечером читал.", "Утром плавал в бассейне."): _row(0.02, 0.95, 0.03),
         }
     )
     judgements = judge_claims(
@@ -174,17 +176,94 @@ def test_support_outvotes_an_unrelated_contradiction() -> None:
     assert judgements[0].governing_sentence == 1
 
 
+def test_support_is_a_conjunction_over_the_sentences_of_the_claim() -> None:
+    """One entailed sentence plus one the source is silent about is not «supported».
+
+    The second half of the composition (the first is
+    :func:`test_a_contradicted_clause_condemns_the_whole_claim`): were support the
+    *maximum* over the claim's sentences rather than their conjunction, a claim
+    whose second half the source cannot vouch for would pass as supported.
+    """
+    judge = scripted(
+        {
+            ("Плавал в бассейне.", "Плавал в бассейне."): _row(0.93, 0.05, 0.02),
+            ("Плавал в бассейне.", "День прошёл спокойно."): _row(0.40, 0.20, 0.40),
+            ("Дочитал отчёт.", "Плавал в бассейне."): _row(0.10, 0.30, 0.60),
+            ("Дочитал отчёт.", "День прошёл спокойно."): _row(0.30, 0.20, 0.50),
+        }
+    )
+    judgements = judge_claims(
+        ["Плавал в бассейне.", "Дочитал отчёт."],
+        [_claim("Плавал в бассейне. День прошёл спокойно.")],
+        judge,
+    )
+    assert not judgements[0].is_supported
+    assert not judgements[0].contradicts
+    assert judgements[0].label == NEUTRAL
+    assert [item.claim.coordinate for item in unsupported_judgements(judgements)] == ["facts#1"]
+
+
+def test_a_theme_label_is_judged_but_cannot_condemn() -> None:
+    """A nominal label read as a contradiction must not flag a faithful summary.
+
+    Measured in T24a: the theme «чтение» against «почитала книгу минут 40» scores
+    ``p_contradiction`` 0.90 while the summary is faithful, because a topic is not a
+    proposition. The same numbers on a propositional field do condemn — which is
+    what keeps this test from being satisfied by switching the rule off.
+    """
+    judge = scripted(
+        {
+            ("Почитала книгу минут 40.", "чтение"): _row(0.05, 0.90, 0.05),
+            ("Почитала книгу минут 40.", "Читала весь день напролёт."): _row(0.05, 0.90, 0.05),
+        }
+    )
+    theme = Claim(contract="daily_summary", field="themes", index=1, text="чтение")
+    fact = Claim(
+        contract="daily_summary", field="facts", index=1, text="Читала весь день напролёт."
+    )
+    judgements = judge_claims(["Почитала книгу минут 40."], [theme, fact], judge)
+    assert theme.is_propositional is False
+    assert not judgements[0].contradicts
+    assert judgements[0].label == NEUTRAL
+    assert fact.is_propositional is True
+    assert judgements[1].contradicts
+    assert [item.claim.coordinate for item in contradiction_judgements(judgements)] == ["facts#1"]
+
+
+def test_the_weekly_rollup_is_judged_but_not_condemned() -> None:
+    """The week is out of the rule's scope on its own measurement, not by accident.
+
+    A week summary is an abstraction over seven days: the sentence-level rule
+    condemned **all four** correct rollups of the corrected corpus at every
+    threshold (``docs/nli-validation-analysis.md`` §8.3.3). The rollup is still
+    judged (the support diagnostics see it), but it cannot be condemned until the
+    rule has a weekly formulation.
+    """
+    judge = scripted(
+        {("Плавал в бассейне сорок минут.", "Ходила в бассейн ежедневно."): _row(0.05, 0.95, 0.0)}
+    )
+    rollup = Claim(
+        contract="weekly_summary", field="rollup", index=1, text="Ходила в бассейн ежедневно."
+    )
+    judgements = judge_claims(["Плавал в бассейне сорок минут."], [rollup], judge)
+    assert rollup.is_propositional is False
+    assert not judgements[0].contradicts
+    assert contradiction_judgements(judgements) == []
+
+
 def test_a_contradiction_below_the_threshold_is_not_a_violation() -> None:
     """The threshold, relative to itself: reached counts, one step below does not."""
+    rest = (1.0 - CONTRADICTION_THRESHOLD) / 2
     reached = scripted(
-        {("Плавал сорок минут.", "Плавал много."): _row(0.10, CONTRADICTION_THRESHOLD, 0.05)}
+        {("Плавал сорок минут.", "Плавал много."): _row(rest, CONTRADICTION_THRESHOLD, rest)}
     )
     judgements = judge_claims(["Плавал сорок минут."], [_claim("Плавал много.")], reached)
     assert judgements[0].contradicts
 
     just_below = CONTRADICTION_THRESHOLD - 0.01
+    remainder = (1.0 - just_below) / 2
     below = scripted(
-        {("Плавал сорок минут.", "Плавал много."): _row(0.10, just_below, 0.91 - just_below)}
+        {("Плавал сорок минут.", "Плавал много."): _row(remainder, just_below, remainder)}
     )
     assert not judge_claims(["Плавал сорок минут."], [_claim("Плавал много.")], below)[
         0
@@ -270,10 +349,12 @@ def test_metrics_carry_counts_coordinates_and_probabilities_only() -> None:
 def test_the_thresholds_are_the_reviewed_values() -> None:
     """Threshold changes belong to a measurement, so they are pinned literally.
 
-    ``CONTRADICTION_THRESHOLD`` is the most precise point of the T24a sweep; the
-    measurement that produced it (and the reason the rule stays a diagnostic
-    rather than becoming a gate) is in ``docs/nli-validation-analysis.md`` §8.
+    ``CONTRADICTION_THRESHOLD`` is the middle of the flat region of the T24a sweep,
+    where recall on the planted defects is total and the count of rejected correct
+    claims is the same as at any neighbouring value; the measurement, its three
+    corrected defects and the open question of the gate are in
+    ``docs/nli-validation-analysis.md`` §8.
     """
-    assert CONTRADICTION_THRESHOLD == 0.85
+    assert CONTRADICTION_THRESHOLD == 0.60
     assert SUPPORT_THRESHOLD == 0.80
     assert CONTRADICTION_CHECK == "no_contradiction_with_source"

@@ -793,10 +793,12 @@ def test_the_nli_block_measures_without_touching_the_counts(
     output = capsys.readouterr().out
     assert "OK: invariants 10/10 (required 10)" in output
     assert "latency 8/8 within budget" in output
-    # Five summaries, eleven claims (three facts per day chunk, one weekly rollup),
-    # every one of them contradicted — and still the counts above did not move.
+    # Five summaries, eleven claims (three facts per day chunk, one weekly rollup).
+    # The judge condemns every pair, yet only the nine *propositional* claims — the
+    # day's facts — can be contradicted; the two weekly rollups are outside the
+    # rule's scope and land in the diagnostic column instead.
     assert "nli (measurement, not a gate): summaries 5, claims 11" in output
-    assert "contradictions 11, unsupported 0" in output
+    assert "contradictions 9, unsupported 2" in output
     assert "nli flagged contradictions: day-01-quiet-monday facts#1" in output
 
 
@@ -834,6 +836,39 @@ def test_a_missing_instrument_fails_the_run(
     assert "fetch-nli-model.sh" in output or 'pip install -e ".[nli]"' in output
     # Without the flag the same missing instrument is irrelevant, as designed.
     assert "traceback" not in output.lower()
+
+
+def test_a_run_that_verified_nothing_with_nli_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A requested check that checked nothing must not look like a green run.
+
+    The first review of T24a found this hole: with a working instrument and a
+    selection that contains no summary chunk (an STT chunk has no claims), the
+    block was simply absent and the run exited zero — «nothing to check» reading as
+    «checked».
+    """
+    monkeypatch.setattr(harness, "nli_judge", _AllClaimsContradicted)
+    code = harness.main(["--chunk", "stt-01-colleague-call", "--nli"])
+    assert code == 1
+    output = capsys.readouterr().out
+    assert "the NLI check verified nothing" in output
+
+
+def test_an_unavailable_instrument_fails_even_without_summaries_in_scope(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The instrument is proved before the run, not lazily on the first claim."""
+    missing = OnnxNliJudge(
+        model_path=tmp_path / "model.onnx",
+        tokenizer_path=tmp_path / "tokenizer.json",
+        config_path=tmp_path / "config.json",
+    )
+    monkeypatch.setattr(harness, "nli_judge", lambda: missing)
+    assert harness.main(["--chunk", "stt-01-colleague-call", "--nli"]) == 1
+    output = capsys.readouterr().out
+    assert "FAILED: the NLI check could not run" in output
+    assert "verified nothing" not in output
 
 
 def test_a_judge_that_answers_the_wrong_shape_fails_the_run(

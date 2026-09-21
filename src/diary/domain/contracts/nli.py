@@ -42,20 +42,28 @@ judgement as provenance — indices, never text (AGENTS.md §7-8).
 
 **Two named rules, never one number** (the discipline of T18):
 
-* ``no_contradiction_with_source`` — a claim whose ``p_contradiction`` reaches
+* ``no_contradiction_with_source`` — a **propositional** claim (see
+  :data:`PROPOSITIONAL_FIELDS`) whose ``p_contradiction`` reaches
   :data:`CONTRADICTION_THRESHOLD`. Definite defect: inversion, negation, swapped
-  number or date.
+  number or date. Nominal labels — themes, open questions — are judged but never
+  condemned by it: a topic is not an assertion.
 * ``claim_supported_by_source`` — a claim whose ``p_entailment`` is below
   :data:`SUPPORT_THRESHOLD`. This mixes two very different situations, the source
   being silent and the source saying something else, which is why it is *not* a
   gate in T24a/T24b.
 
-**Premise discipline.** The premise is the canonical input the layer saw, reduced
-the way :func:`diary.domain.contracts.invariants.input_facts` reduces it; an
-empty premise is a **check error** (:class:`NliPremiseError`) and never a silent
+**Premise discipline.** The premise is the content of the canonical input the layer
+saw — the entry texts of a day, the day rollups of a week — not the fully reduced
+form of :func:`diary.domain.contracts.invariants.input_facts` (which additionally
+carries timestamps and lower-cases everything): the judge measures entailment of
+meaning, and metadata about a row is not an assertion to be entailed. An empty
+premise is a **check error** (:class:`NliPremiseError`) and never a silent
 «everything is neutral». That rule was paid for by measurement: a probe built its
-premise from the wrong field, and the resulting report was convincing and
-meaningless.
+premise from the wrong field and the resulting report was convincing and
+meaningless — and the same class of mistake later hid inside the calibration
+script itself (it compared claims against a single source sentence while the
+harness used all of them), which is why the calibration now takes the premise from
+the pairs the product actually asked about.
 
 **Privacy.** Metrics carry counts, probabilities and *claim coordinates*
 (``facts#2``), never claim text (AGENTS.md §7-8): a violation may quote a token
@@ -89,6 +97,7 @@ __all__ = [
     "NliJudgeError",
     "NliMetrics",
     "NliPremiseError",
+    "PROPOSITIONAL_FIELDS",
     "claims_for",
     "contradiction_judgements",
     "ensure_premise",
@@ -109,27 +118,28 @@ LABELS: tuple[str, str, str] = (ENTAILMENT, CONTRADICTION, NEUTRAL)
 #: Probability at which a claim counts as contradicting its source.
 #:
 #: Calibrated on the T24a corpus (``scripts/calibrate_nli.py``; tables in
-#: ``docs/nli-validation-analysis.md`` §8). On 18 live day summaries the sweep
-#: moved the two error rates together:
+#: ``docs/nli-validation-analysis.md`` §8). On 151 live day claims the sweep was
+#: flat exactly where it matters: at every threshold in 0.30-0.90 the rule caught
+#: all 34 planted number swaps and all 10 planted inversions and rejected the same
+#: 2 of 151 correct claims (both above 0.90), so a higher threshold buys nothing —
+#: it only loses recall on claims whose source is silent. 0.60 sits in the middle
+#: of that flat region, well above the model's noise and below the measured defects
+#: (0.96-1.00).
 #:
-#: * 0.30 — 6 of 6 planted number swaps caught, 16 of 28 correct claims flagged;
-#: * 0.60 — 5 of 6 caught, 11 of 28 flagged (39 %);
-#: * 0.85 — 2 of 6 caught, 4 of 28 flagged (14 %).
-#:
-#: No value makes the rule both useful and safe, so **this rule stays a
-#: diagnostic**: 0.85 is the most precise measured point, and even there one
-#: correct claim in seven is flagged. That measurement is the reason T24b (the
-#: runtime gate) is **not** justified with this instrument, and the number is
-#: recorded next to the constant so that nobody reads a flag as a verdict.
-CONTRADICTION_THRESHOLD = 0.85
+#: The first calibration pass reported 0.85 from a broken measurement (a premise of
+#: one sentence, repetitions discarded, the sweep reading an evidence row instead of
+#: the verdict) — the second review found it, and the analysis document records the
+#: correction rather than hiding it.
+CONTRADICTION_THRESHOLD = 0.60
 
 #: Probability below which a claim counts as unsupported by its source.
 #:
-#: Measured on the T24a corpus: 23 of 28 correct claims of live day summaries are
-#: not fully entailed by any single source sentence (an abstractive summary
-#: merges entries, generalises and names themes — none of which is an
-#: entailment). That is why this rule is a **diagnostic** and never a gate: it
-#: answers «did the source actually say this», not «is the summary wrong».
+#: Measured on the corrected T24a corpus: 21 of 151 correct claims of live day
+#: summaries are not fully entailed by any single source sentence (an abstractive
+#: summary merges entries, generalises and names themes — none of which is an
+#: entailment), and among the claims the rule can even judge (the 72 propositions)
+#: the share is 21 of 72. That is why this rule is a **diagnostic** and never a
+#: gate: it answers «did the source actually say this», not «is the summary wrong».
 SUPPORT_THRESHOLD = 0.80
 
 #: Check name of the contradiction rule (intended for the runtime gate, T24b).
@@ -155,6 +165,29 @@ SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+|\n+")
 CLAIM_FIELDS: dict[str, tuple[str, ...]] = {
     "daily_summary": ("facts", "themes", "open_questions"),
     "weekly_summary": ("rollup",),
+}
+
+
+#: Contract -> fields whose values are **propositions** about the source, i.e. the
+#: only ones the contradiction rule may judge.
+#:
+#: Measured reason (T24a, second review pass): the themes of a day summary are
+#: nominal labels («чтение», «обед с детьми»), and the judge reads such a label
+#: against a full sentence as a contradiction — «чтение» against «почитала книгу
+#: минут 40» scored ``p_contradiction`` 0.90 on a faithful summary, while the
+#: propositions of the same summaries scored entailment 0.97-0.99 with
+#: contradictions at 0.00-0.04. Label fields are still judged (the support
+#: diagnostics see everything), but they cannot condemn a summary: a topic is not
+#: an assertion, and a rule that treats it as one rejects correct work.
+#:
+#: The **weekly rollup is excluded too**, on its own measurement: a week summary is
+#: an abstraction over seven days, and the sentence-level rule condemned **all four**
+#: correct rollups of the corrected corpus at every threshold (4/4, artifact
+#: ``/tmp/nli-cal-week5.json``, documented in ``docs/nli-validation-analysis.md``
+#: §8.3.3). The rollup is an assertion in principle, so it stays out of this mapping
+#: only until the rule has a weekly formulation — the day layer is the scope today.
+PROPOSITIONAL_FIELDS: dict[str, tuple[str, ...]] = {
+    "daily_summary": ("facts",),
 }
 
 
@@ -194,6 +227,15 @@ class Claim:
         """Content-free address of the claim, safe for reports (``facts#2``)."""
         return f"{self.field}#{self.index}"
 
+    @property
+    def is_propositional(self) -> bool:
+        """Whether this claim is an assertion the contradiction rule may judge.
+
+        Label fields (themes, open questions) are topics, not assertions; the
+        measured reason they are exempt is in :data:`PROPOSITIONAL_FIELDS`.
+        """
+        return self.field in PROPOSITIONAL_FIELDS.get(self.contract, ())
+
 
 @dataclass(frozen=True)
 class Judgement:
@@ -211,6 +253,16 @@ class Judgement:
     contradicted: bool
     #: True when every sentence of the claim is entailed by some source sentence.
     supported: bool
+    #: Best entailment over the claim's sentences: the support evidence, decided by
+    #: :data:`SUPPORT_THRESHOLD` alone (so it does not move with the contradiction
+    #: threshold) and therefore the quantity a threshold sweep needs.
+    support_probability: float = 0.0
+    #: Strongest contradiction among the claim's *unsupported* sentences: the
+    #: contradiction evidence, and the quantity :data:`CONTRADICTION_THRESHOLD` is
+    #: compared with. Kept apart from ``probabilities`` because the evidence row of a
+    #: supported claim is its weakest sentence, whose contradiction probability says
+    #: nothing about the verdict (found in T24a's second review).
+    contradiction_probability: float = 0.0
     #: 1-based index of the source sentence the evidence rests on (provenance, no text).
     governing_sentence: int = 0
     #: 1-based index of the claim sentence the evidence rests on (0 = whole claim).
@@ -393,20 +445,19 @@ def judge_claims(
     cursor = 0
     judgements: list[Judgement] = []
     for claim, own in zip(claims, pieces, strict=True):
-        verdicts: list[tuple[Mapping[str, float], int, int | None]] = []
+        verdicts: list[tuple[Mapping[str, float], int, int | None, float, float]] = []
         for _piece in own:
             block = rows[cursor : cursor + width]
             cursor += width
             validated = [_validate(row, claim) for row in block]
             verdicts.append(_governing_row(validated))
-        judgement = _compose_judgement(claim, verdicts)
-        judgements.append(judgement)
+        judgements.append(_compose_judgement(claim, verdicts))
     return judgements
 
 
 def _governing_row(
     rows: Sequence[Mapping[str, float]],
-) -> tuple[Mapping[str, float], int, int | None]:
+) -> tuple[Mapping[str, float], int, int | None, float, float]:
     """Pick the source sentence that governs one claim sentence, and why.
 
     Support first: the artefact of comparing unrelated sentences (a verbatim
@@ -414,29 +465,58 @@ def _governing_row(
     day) must not be able to outvote a sentence that entails the claim. Only when
     no sentence supports the claim sentence does the strongest contradiction
     decide — the shape the runtime gate needs (T24b).
+
+    Returns the evidence row, its sentence index, the supporting index (``None``
+    when nothing supports the sentence), the best entailment of the piece and its
+    strongest contradiction. The last two are what a threshold sweep needs: support
+    and contradiction are decided by two different thresholds, and the evidence row
+    carries only one of them.
     """
     best_support = max(range(len(rows)), key=lambda index: rows[index][ENTAILMENT])
-    if rows[best_support][ENTAILMENT] >= SUPPORT_THRESHOLD:
-        return rows[best_support], best_support, best_support
     best_contradiction = max(range(len(rows)), key=lambda index: rows[index][CONTRADICTION])
-    if rows[best_contradiction][CONTRADICTION] >= CONTRADICTION_THRESHOLD:
-        return rows[best_contradiction], best_contradiction, None
-    return rows[best_support], best_support, None
+    best_entailment = rows[best_support][ENTAILMENT]
+    strongest_contradiction = rows[best_contradiction][CONTRADICTION]
+    if best_entailment >= SUPPORT_THRESHOLD:
+        return rows[best_support], best_support, best_support, best_entailment, 0.0
+    if strongest_contradiction >= CONTRADICTION_THRESHOLD:
+        return (
+            rows[best_contradiction],
+            best_contradiction,
+            None,
+            best_entailment,
+            strongest_contradiction,
+        )
+    return rows[best_support], best_support, None, best_entailment, strongest_contradiction
 
 
 def _compose_judgement(
-    claim: Claim, verdicts: Sequence[tuple[Mapping[str, float], int, int | None]]
+    claim: Claim,
+    verdicts: Sequence[tuple[Mapping[str, float], int, int | None, float, float]],
 ) -> Judgement:
     """Compose the per-sentence verdicts of one claim into the claim's verdict.
 
-    Evidence for the report is the first contradicted sentence; if none is
-    contradicted, the weakest supported sentence (the one closest to the support
-    threshold) — that is where a claim is most likely to be over-reaching.
+    The two aggregates are computed here and reported beside the flags: support is
+    the best entailment over the claim's sentences (decided by
+    :data:`SUPPORT_THRESHOLD` alone, so it does not move with the contradiction
+    threshold), and contradiction is the strongest contradiction among the
+    sentences nothing supports — the quantity :data:`CONTRADICTION_THRESHOLD` is
+    compared with, and not the evidence row of a supported claim (whose weakest
+    sentence can carry a high contradiction probability and still be irrelevant to
+    the verdict). Evidence for the report is the first contradicted sentence; if
+    none is, the weakest sentence of the claim.
     """
+    support_probability = max(item[3] for item in verdicts)
+    unsupported = [item for item in verdicts if item[2] is None]
+    contradiction_probability = max((item[4] for item in unsupported), default=0.0)
     contradicted = [
         (row, index, position)
-        for position, (row, index, support) in enumerate(verdicts, 1)
-        if support is None and row[CONTRADICTION] >= CONTRADICTION_THRESHOLD
+        for position, (row, index, support, _entailment, _contradiction) in enumerate(verdicts, 1)
+        # The rule is applied to propositions only: a theme label judged against a
+        # sentence reads as a contradiction on faithful summaries (measured 0.90),
+        # so the exemption lives here, where the flag is decided, and nowhere else.
+        if claim.is_propositional
+        and support is None
+        and row[CONTRADICTION] >= CONTRADICTION_THRESHOLD
     ]
     if contradicted:
         row, index, position = contradicted[0]
@@ -445,16 +525,20 @@ def _compose_judgement(
             probabilities=row,
             contradicted=True,
             supported=False,
+            support_probability=support_probability,
+            contradiction_probability=contradiction_probability,
             governing_sentence=index + 1,
             governing_piece=position,
         )
-    weakest = min(range(len(verdicts)), key=lambda position: verdicts[position][0][ENTAILMENT])
-    row, index, support = verdicts[weakest]
+    weakest = min(range(len(verdicts)), key=lambda position: verdicts[position][3])
+    row, index, support, _entailment, _contradiction = verdicts[weakest]
     return Judgement(
         claim=claim,
         probabilities=row,
         contradicted=False,
         supported=support is not None,
+        support_probability=support_probability,
+        contradiction_probability=contradiction_probability,
         governing_sentence=index + 1,
         governing_piece=weakest + 1,
     )
@@ -482,8 +566,10 @@ def metrics_for(judgements: Sequence[Judgement]) -> NliMetrics:
         entailment=counts[ENTAILMENT],
         contradiction=counts[CONTRADICTION],
         neutral=counts[NEUTRAL],
-        max_contradiction=max(item.p_contradiction for item in judgements),
-        min_entailment=min(item.p_entailment for item in judgements),
+        # Claim-level aggregates, not evidence rows: a supported claim's evidence row
+        # is its weakest sentence, whose numbers say nothing about the verdict.
+        max_contradiction=max(item.contradiction_probability for item in judgements),
+        min_entailment=min(item.support_probability for item in judgements),
         contradicted_coordinates=tuple(
             item.claim.coordinate for item in contradiction_judgements(judgements)
         ),
