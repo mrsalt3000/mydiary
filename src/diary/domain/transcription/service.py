@@ -151,12 +151,16 @@ def request_transcription(
     """Queue a manual transcription for one voice message; return the job.
 
     Raises :class:`~diary.domain.audio.service.AudioNotFoundError` (→ HTTP 404)
-    when no audio-file row exists. When a job for the audio file is already in
-    flight the existing job is returned unchanged — no duplicate row, and STT
-    never runs inside the HTTP request.
+    when the audio cannot be resolved: no audio-file row exists, the message has
+    been deleted (ADR-011 / task T15 — a deleted message must not get a new
+    transcription job), or the stored ``storage_path`` is unusable. The check
+    goes through :func:`~diary.domain.audio.service.resolve_audio_file`, the
+    same resolver playback uses, so the route refuses with a 404 instead of
+    enqueuing a job that would only fail later. When a job for the audio file is
+    already in flight the existing job is returned unchanged — no duplicate row,
+    and STT never runs inside the HTTP request.
     """
-    if AudioFileRepository(session).get(audio_file_id) is None:
-        raise AudioNotFoundError("Audio file not found.")
+    resolve_audio_file(session, audio_file_id)
     active = find_active_transcription_job(session, audio_file_id)
     if active is not None:
         return active

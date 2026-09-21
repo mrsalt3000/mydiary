@@ -56,7 +56,7 @@ from diary.db.repositories import (
     MessageRepository,
     TranscriptionRepository,
 )
-from diary.domain.audio.service import resolve_audio_file
+from diary.domain.audio.service import AudioNotFoundError, resolve_audio_file
 
 #: Keyset pagination position: ``(created_at, id)`` of the oldest message of
 #: the page already returned; the next page consists of active messages
@@ -68,6 +68,21 @@ class MessageNotFoundError(Exception):
     """The message id does not exist or the message is already deleted.
 
     Carries no diary content; maps to HTTP 404 at the API boundary.
+    """
+
+
+class MessageAudioUnresolvableError(Exception):
+    """The message's stored audio cannot be resolved, so the deletion is refused.
+
+    Raised when :func:`delete_message` cannot resolve the audio file of a voice
+    message (an unusable ``storage_path``) *before* it writes the deletion mark.
+    The refusal changes nothing: the message stays visible and the transcription
+    texts stay intact.
+
+    Maps to HTTP **409** at the API boundary. A 404 would lie ("the message is
+    not there") about a message that is present and visible, while a 500 would
+    report a server bug where the truth is a stored-data inconsistency. The
+    message is fixed and content-free (AGENTS.md §8).
     """
 
 
@@ -118,6 +133,12 @@ def delete_message(session: Session, message_id: uuid.UUID) -> None:
     Idempotent by outcome: deleting a message that is already deleted changes
     nothing and raises :class:`MessageNotFoundError` (→ HTTP 404), which the
     clients read as "already deleted". Raises the same error for an unknown id.
+
+    When the message's stored audio cannot be resolved (a broken
+    ``storage_path``) the deletion is refused with
+    :class:`MessageAudioUnresolvableError` (→ HTTP 409): because the paths are
+    resolved before the mark is written, nothing changes — the message stays
+    visible and its text intact — instead of a half-done deletion.
     """
     repository = MessageRepository(session)
     message = repository.get(message_id)
@@ -130,7 +151,12 @@ def delete_message(session: Session, message_id: uuid.UUID) -> None:
     # with nothing changed, which is the safe direction.
     audio_paths: list[Path] = []
     for audio in audio_files:
-        path, _mime = resolve_audio_file(session, audio.id)
+        try:
+            path, _mime = resolve_audio_file(session, audio.id)
+        except AudioNotFoundError as exc:
+            raise MessageAudioUnresolvableError(
+                "Message not deleted: its audio file cannot be resolved."
+            ) from exc
         audio_paths.append(path)
 
     transcriptions = TranscriptionRepository(session)

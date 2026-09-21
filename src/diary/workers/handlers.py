@@ -52,6 +52,7 @@ import uuid
 from collections.abc import Callable
 from datetime import date
 from typing import Protocol
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
 
@@ -211,6 +212,38 @@ def _payload_run_days(job: Job) -> bool:
     return payload.get(PAYLOAD_RUN_DAYS) is True
 
 
+def _payload_local_tz(job: Job) -> str | None:
+    """The optional ``local_tz`` of a ``daily_summary`` payload, validated.
+
+    An absent or blank value means "use ``APP_TIMEZONE``". A present value that
+    is not an IANA timezone name is a deterministic input failure (retrying
+    cannot fix a typo), so it raises :class:`PermanentJobError` naming only the
+    payload key — otherwise the unknown zone would surface as a raw
+    ``ZoneInfoNotFoundError`` deep inside the chain and burn the retry budget
+    (AGENTS.md §8: no diary content in the message).
+    """
+    payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+    value = payload.get(PAYLOAD_LOCAL_TZ)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise PermanentJobError(
+            f"The daily_summary job payload has no valid {PAYLOAD_LOCAL_TZ!r} "
+            "(it must be an IANA timezone name)."
+        )
+    name = value.strip()
+    if not name:
+        return None
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise PermanentJobError(
+            f"The daily_summary job payload has no valid {PAYLOAD_LOCAL_TZ!r} "
+            "(it must be an IANA timezone name)."
+        ) from exc
+    return name
+
+
 def _skips_of(outcome: object) -> tuple[phase2_pipeline.SkippedStep, ...]:
     """The skipped steps of a phase-2 outcome, normalized to a tuple.
 
@@ -282,13 +315,20 @@ def _run_phase2_job(
 
     Deterministic failures (:class:`~diary.domain.pipelines.base.PipelinePermanentError`
     — an unusable payload, a message that no longer exists, a layer that was
-    never registered) become permanent job failures; transient LLM errors
-    propagate unchanged so the retry policy applies. Anything the layer wrote is
-    committed by the worker after a normal return.
+    never registered — and a missing/broken models configuration, as
+    :class:`~diary.core.models_config.ModelsConfigError`) become permanent job
+    failures; transient LLM errors propagate unchanged so the retry policy
+    applies. Anything the layer wrote is committed by the worker after a normal
+    return.
     """
     try:
         outcome = perform(session, job)
     except PipelinePermanentError as exc:
+        raise PermanentJobError(str(exc)) from exc
+    except ModelsConfigError as exc:
+        # The same convention ``_transcribe_audio``/``_run_pipeline_job`` use: a
+        # configuration that cannot be read can never be fixed by a retry, so it
+        # must not burn the retry budget (its message names no secret value).
         raise PermanentJobError(str(exc)) from exc
     skips = _skips_of(outcome)
     _require_layer_enabled(skips, layer=layer)
@@ -317,16 +357,15 @@ def _daily_summary_job(session: Session, job: Job) -> None:
     The day chain is the orchestrator's day unit — the day's messages through
     ``stt_fix`` (one run each) and then the day through ``sum_daily`` — so a day
     summary requested as a job gets exactly the run the CLI produces. The
-    payload names the day (``local_date``, optional ``local_tz``).
+    payload names the day (``local_date``, optional ``local_tz``); an invalid
+    ``local_tz`` is a permanent payload failure (``_payload_local_tz``).
     """
 
     def perform(current_session: Session, current_job: Job) -> object:
-        payload = current_job.payload_json if isinstance(current_job.payload_json, dict) else {}
-        local_tz = payload.get(PAYLOAD_LOCAL_TZ)
         return phase2_pipeline.run_day_chain(
             current_session,
             local_date=_payload_local_date(current_job),
-            local_tz=local_tz if isinstance(local_tz, str) and local_tz.strip() else None,
+            local_tz=_payload_local_tz(current_job),
             nli_judge=default_nli_judge(),
         )
 

@@ -9,7 +9,10 @@ Covers the deletion policy fixed in ADR-011 (which replaces the Task 05
 body text is erased, the stored audio bytes of a voice message are removed from
 disk, the raw transcription text is erased while the rows and their lineage
 stay, derived artifacts and traceability survive, a repeated delete is safe, and
-playback of a deleted voice message is a plain 404.
+playback of a deleted voice message is a plain 404. Task T30 adds two refusals
+that used to look like success: a transcription request for a deleted message is
+a 404 (no job is created), and a delete whose stored ``storage_path`` cannot be
+resolved is a 409 that changes nothing.
 """
 
 from __future__ import annotations
@@ -23,11 +26,12 @@ from pathlib import Path
 import pytest
 from _audio_samples import WAV_MIME, wav_bytes
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from diary.api.routes.messages import get_session
 from diary.core.settings import get_settings, reload_settings
-from diary.db.models import Artifact, ArtifactLayer, Message, MessageKind, TranscriptionStatus
+from diary.db.models import Artifact, ArtifactLayer, Job, Message, MessageKind, TranscriptionStatus
 from diary.db.repositories import (
     AudioFileRepository,
     MessageRepository,
@@ -276,6 +280,72 @@ def test_playback_of_a_deleted_voice_message_is_a_plain_404(
             resolve_audio_file(session, audio_file_id)
     finally:
         path.unlink(missing_ok=True)
+
+
+def test_transcription_request_for_a_deleted_voice_message_is_a_404(
+    api_client: TestClient, session: Session
+) -> None:
+    """A deleted message must not get a transcription job (T30).
+
+    The request goes through the same resolver playback uses, so the route
+    refuses with 404 and enqueues nothing — instead of a 202 whose job would
+    only fail later.
+    """
+    uploaded = _upload_wav(api_client)
+    message_id = uuid.UUID(uploaded["message_id"])
+    audio_file_id = uuid.UUID(uploaded["id"])
+    assert _delete(api_client, message_id).status_code == 204
+
+    response = api_client.post(f"{AUDIO_URL}/{audio_file_id}/transcribe")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Audio file not found."}
+    assert session.scalar(select(func.count()).select_from(Job)) == 0
+
+
+def test_delete_with_a_broken_storage_path_is_a_409_and_changes_nothing(
+    api_client: TestClient, session: Session
+) -> None:
+    """An unusable ``storage_path`` refuses the deletion instead of a 500 (T30).
+
+    The audio paths are resolved *before* the deletion mark is written, so the
+    refusal leaves the message visible, the transcription texts intact and the
+    stored bytes untouched.
+    """
+    uploaded = _upload_wav(api_client)
+    message_id = uuid.UUID(uploaded["message_id"])
+    audio_file_id = uuid.UUID(uploaded["id"])
+    audio = AudioFileRepository(session).get(audio_file_id)
+    assert audio is not None
+    path = _audio_path(audio.storage_path)
+    assert path.is_file()
+    TranscriptionRepository(session).create(
+        audio_file_id=audio_file_id,
+        raw_text=SYNTHETIC_TRANSCRIPTION,
+        status=TranscriptionStatus.succeeded,
+    )
+    # Corrupt the server-generated relative path so it escapes the audio root.
+    audio.storage_path = "../outside/escaped.wav"
+    session.commit()
+    session.expunge_all()
+
+    response = _delete(api_client, message_id)
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Message not deleted: its audio file cannot be resolved."}
+    # Nothing changed: the message is still visible, its text is intact and the
+    # stored bytes are still on disk.
+    session.expunge_all()
+    message = MessageRepository(session).get(message_id)
+    assert message is not None
+    assert message.deleted_at is None
+    assert [item["id"] for item in api_client.get(MESSAGES_URL).json()["items"]] == [
+        str(message_id)
+    ]
+    rows = TranscriptionRepository(session).list_by_audio_file(audio_file_id)
+    assert any(row.raw_text == SYNTHETIC_TRANSCRIPTION for row in rows)
+    assert path.is_file()
+    assert path.read_bytes() == wav_bytes()
 
 
 def test_deleting_a_message_keeps_artifacts_and_traceability(

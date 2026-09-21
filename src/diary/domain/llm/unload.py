@@ -31,20 +31,26 @@ phase-2 profiles alike. An external endpoint has nothing local to evict and is
 skipped: the veto is about this machine's VRAM, and diary content never leaves
 the machine in this step (no request body carries content).
 
-Failure policy (deliberately fail-safe, not fail-closed)
-========================================================
+Failure policy (fail-safe on "no server", fail-closed once it answers)
+======================================================================
 
 ``asr.run`` treats a **raised** unload failure as fatal (it refuses to start
-STT). Therefore "the model cannot be resident" must not be reported as a
-failure:
+STT). Only a model that *provably* cannot be resident may be reported as "not
+there":
 
-* the endpoint is unreachable → success (the process holding the model is not
-  running, so nothing occupies VRAM);
+* the connection cannot be **established** (``ConnectError`` /
+  ``ConnectTimeout``: nothing is listening) → success, logged as
+  ``result=unreachable`` — no process holds the model, so nothing occupies
+  VRAM;
 * the server answers ``4xx`` → success (an unknown model or an endpoint without
   the unload API: again nothing is resident under that name);
-* the server answers ``5xx`` or any other status → :class:`LlmUnloadFailedError`
-  (a reachable server did not confirm the unload, so proceeding would risk the
-  veto).
+* a connection **was established** but the unload is not confirmed — a
+  transport timeout *after* connecting (``ReadTimeout`` / ``WriteTimeout`` /
+  ``PoolTimeout``), any other transport failure after connecting, or the server
+  answers ``5xx`` or any other status → :class:`LlmUnloadFailedError`. A server
+  that answers but does not confirm the unload must not be passed off as "no
+  model": the behaviour matches the ``5xx`` rule, and a retry is safe because
+  speech-to-text has not been started yet.
 
 Privacy (AGENTS.md §7-8): only model names and endpoints are logged — both are
 configuration values. No prompt, no completion and no request body ever leaves
@@ -159,10 +165,11 @@ def unload_model(
 
     ``True`` means the server confirmed the unload request (``2xx``); ``False``
     means the model or the unload API is not there at all (``4xx``) or the
-    server does not answer — in both cases the model cannot be resident. A
-    reachable server answering anything else (``5xx``) raises
-    :class:`LlmUnloadFailedError`, so the caller never starts STT on an
-    unconfirmed unload.
+    connection could not be established (nothing is listening, so the model
+    cannot be resident). A server that answers but does not confirm the unload
+    — ``5xx``, a transport timeout after the connection was established, or any
+    other failure after connecting — raises :class:`LlmUnloadFailedError`, so
+    the caller never starts STT on an unconfirmed unload.
 
     ``transport`` is the test seam (``httpx.MockTransport``); production passes
     ``None`` and HTTPX uses its real network transport.
@@ -172,14 +179,31 @@ def unload_model(
     try:
         with httpx.Client(transport=transport, timeout=httpx.Timeout(timeout_s)) as client:
             response = client.post(url, json=payload)
-    except httpx.TransportError:
-        # Nothing is listening on that endpoint: no process can hold the model.
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        # The connection was never established: nothing is listening on that
+        # endpoint, so no process can hold the model.
         logger.info(
             "llm-unload endpoint=%s model=%s result=unreachable",
             endpoint.native_root,
             endpoint.model,
         )
         return False
+    except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as exc:
+        # The connection was established but the server did not confirm the
+        # unload in time: a reachable server is not "no model" (fail-closed).
+        raise LlmUnloadFailedError(
+            f"The local LLM server at {endpoint.native_root} did not confirm the "
+            f"unload of {endpoint.model!r} within the timeout."
+        ) from exc
+    except httpx.TransportError as exc:
+        # Any other transport failure happened after the connection was
+        # established (for example a broken protocol): the unload is still
+        # unconfirmed, so it must not be reported as "no model".
+        raise LlmUnloadFailedError(
+            f"The local LLM server at {endpoint.native_root} did not confirm the "
+            f"unload of {endpoint.model!r}: the connection failed after it was "
+            "established."
+        ) from exc
     if 200 <= response.status_code < 300:
         logger.info(
             "llm-unload endpoint=%s model=%s result=unloaded",

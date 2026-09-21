@@ -7,8 +7,9 @@ HTTP response. No business logic and no direct session/model access here.
 - ``POST /api/v1/messages``        — create a text message (201);
 - ``GET /api/v1/messages``         — cursor history, newest page first (200);
 - ``DELETE /api/v1/messages/{id}`` — delete a message: mark it, erase its text
-  and remove its audio bytes (204; 404 when unknown or already deleted; 422 for
-  a malformed UUID). Policy: ADR-011 / task T15.
+  and remove its audio bytes (204; 404 when unknown or already deleted; 409 when
+  its stored audio cannot be resolved; 422 for a malformed UUID). Policy:
+  ADR-011 / task T15.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from diary.api.schemas import MessageCreate, MessagePage, MessageRead, message_r
 from diary.core.settings import get_settings
 from diary.db.session import create_engine, create_session_factory
 from diary.domain.chat.service import (
+    MessageAudioUnresolvableError,
     MessageCursor,
     MessageNotFoundError,
     create_text_message,
@@ -126,11 +128,18 @@ def delete_message(
     """Delete a message: mark it, erase its text and remove its audio bytes.
 
     404 for an unknown id and for an already-deleted message (identical by
-    design — the client reads that as "already deleted"). Deletion policy is
-    documented in :mod:`diary.domain.chat.service` and in ADR-011.
+    design — the client reads that as "already deleted"). 409 when the message's
+    stored audio cannot be resolved, so the deletion is refused and nothing
+    changes (the message stays visible). Deletion policy is documented in
+    :mod:`diary.domain.chat.service` and in ADR-011.
     """
     try:
         delete_message_service(session, message_id)
     except MessageNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Message not found.") from exc
+    except MessageAudioUnresolvableError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Message not deleted: its audio file cannot be resolved.",
+        ) from exc
     return Response(status_code=204)

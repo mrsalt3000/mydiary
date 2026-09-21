@@ -11,10 +11,13 @@ pinned here:
 * the request is exactly the ``ollama stop`` operation server-side
   (``{"model": ..., "keep_alive": 0}``);
 * the failure policy that makes the veto hold without breaking the product:
-  a confirmed unload → success, ``4xx`` (unknown model / no unload API) and an
-  unreachable server → "nothing resident" (success), a reachable server
-  answering ``5xx`` → a loud :class:`LlmUnloadFailedError` so STT never starts
-  on an unconfirmed unload;
+  a confirmed unload → success, ``4xx`` (unknown model / no unload API) and a
+  server whose connection was never established (``ConnectError`` /
+  ``ConnectTimeout``) → "nothing resident" (success), while a reachable server
+  that does not confirm the unload — ``5xx``, a timeout *after* the connection
+  (``ReadTimeout`` / ``WriteTimeout`` / ``PoolTimeout``) or any other
+  post-connection transport failure — raises a loud
+  :class:`LlmUnloadFailedError` so STT never starts on an unconfirmed unload;
 * the callable reads the model configuration per call (a long-lived worker must
   unload what its *current* configuration describes).
 """
@@ -173,6 +176,57 @@ def test_an_unreachable_server_means_nothing_is_resident() -> None:
         [], error=httpx.ConnectError("synthetic: nothing is listening")
     )
     assert unload_module.unload_model(endpoint, transport=transport) is False
+
+
+def test_a_connect_timeout_is_treated_as_unreachable() -> None:
+    """Only a connection that was never established means "nothing resident".
+
+    A ``ConnectTimeout`` is the same case as a ``ConnectError``: the request
+    never reached a server, so no process can hold the model.
+    """
+    endpoint = unload_module.LocalLlmEndpoint(
+        native_root="http://127.0.0.1:11434", model="diary-stt"
+    )
+    transport = _recording_transport(
+        [], error=httpx.ConnectTimeout("synthetic: nothing is listening")
+    )
+    assert unload_module.unload_model(endpoint, transport=transport) is False
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout("synthetic: the server did not answer"),
+        httpx.WriteTimeout("synthetic: the server did not read the request"),
+        httpx.PoolTimeout("synthetic: no connection became available"),
+    ],
+    ids=["read", "write", "pool"],
+)
+def test_a_timeout_after_the_connection_is_loud(error: Exception) -> None:
+    """A server that stays silent after the connection must not pass for absent.
+
+    A transport timeout happens *after* the connection was established, so it is
+    not "the process is not running": the unload is unconfirmed and STT must not
+    start (fail-closed, the same rule as a ``5xx``).
+    """
+    endpoint = unload_module.LocalLlmEndpoint(
+        native_root="http://127.0.0.1:11434", model="diary-stt"
+    )
+    transport = _recording_transport([], error=error)
+    with pytest.raises(unload_module.LlmUnloadFailedError, match="did not confirm"):
+        unload_module.unload_model(endpoint, transport=transport)
+
+
+def test_a_transport_failure_after_connecting_is_loud() -> None:
+    """Any other post-connection transport failure is unconfirmed, not "absent"."""
+    endpoint = unload_module.LocalLlmEndpoint(
+        native_root="http://127.0.0.1:11434", model="diary-stt"
+    )
+    transport = _recording_transport(
+        [], error=httpx.RemoteProtocolError("synthetic: the connection broke mid-answer")
+    )
+    with pytest.raises(unload_module.LlmUnloadFailedError, match="did not confirm"):
+        unload_module.unload_model(endpoint, transport=transport)
 
 
 def test_server_errors_are_loud() -> None:

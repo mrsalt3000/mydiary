@@ -53,6 +53,7 @@ import sys
 from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
 
@@ -258,6 +259,32 @@ def _models_config(args: argparse.Namespace) -> ModelsConfig:
     return load_models_config(Path(path).expanduser() if path else None)
 
 
+def _normalize_timezone(value: str | None) -> str | None:
+    """The trimmed IANA timezone name, or ``None`` when the flag is absent/blank.
+
+    Mirrors :meth:`diary.core.settings.AppSettings._validate_timezone`: the zone
+    is normalized and validated **once** here, so the caller passes the very same
+    value into the chain and into its output — a padded ``--tz`` can never pass
+    this guard and then fail as a raw ``ZoneInfoNotFoundError`` downstream. An
+    absent or whitespace-only value means "use APP_TIMEZONE".
+
+    Raises :class:`ValueError` with the user-facing error line (without the
+    ``error:`` prefix) for a value that is not an IANA timezone name.
+    """
+    if value is None:
+        return None
+    name = value.strip()
+    if not name:
+        return None
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(
+            f"--tz must be an IANA timezone name (e.g. 'Europe/Moscow'), got {value!r}."
+        ) from exc
+    return name
+
+
 def _format_step(step: ChainStep) -> str:
     """One safe line per executed step: identifiers and provenance only."""
     return (
@@ -304,6 +331,11 @@ def _print_steps(steps: tuple[ChainStep, ...], skipped: tuple[SkippedStep, ...])
 def _run_day(args: argparse.Namespace) -> int:
     _register_phase2_layers()
     try:
+        local_tz = _normalize_timezone(args.tz)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return _EXIT_ERROR
+    try:
         local_date = date.fromisoformat(args.date)
     except ValueError as exc:
         print(f"error: --date must be an ISO date (YYYY-MM-DD): {exc}", file=sys.stderr)
@@ -314,10 +346,10 @@ def _run_day(args: argparse.Namespace) -> int:
             session,
             local_date=local_date,
             models_config=config,
-            local_tz=args.tz,
+            local_tz=local_tz,
             nli_judge=default_nli_judge(),
         )
-    print(f"day {outcome.local_date.isoformat()} tz={args.tz or get_settings().timezone}")
+    print(f"day {outcome.local_date.isoformat()} tz={local_tz or get_settings().timezone}")
     exit_code = _print_steps(outcome.steps, outcome.skipped)
     if outcome.summary is None:
         for skipped_step in outcome.skipped:
@@ -339,6 +371,11 @@ def _run_day(args: argparse.Namespace) -> int:
 
 def _run_week(args: argparse.Namespace) -> int:
     _register_phase2_layers()
+    try:
+        local_tz = _normalize_timezone(args.tz)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return _EXIT_ERROR
     week_id = args.week.strip()
     config = _models_config(args)
     with _open_session() as session:
@@ -348,7 +385,7 @@ def _run_week(args: argparse.Namespace) -> int:
             run_days=args.run_days,
             nli_judge=default_nli_judge(),
             models_config=config,
-            local_tz=args.tz,
+            local_tz=local_tz,
         )
     print(f"week {outcome.week_id} run_days={bool(args.run_days)}")
     exit_code = _print_steps(outcome.steps, outcome.skipped)

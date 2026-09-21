@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import pytest
 
+from diary.core.models_config import ModelsConfigError
 from diary.db.models import Job, JobType
+from diary.domain.pipelines import pipeline as phase2_pipeline
 from diary.workers import handlers
 
 
@@ -109,6 +111,59 @@ def test_phase2_handler_rejects_a_malformed_anchor(
     assert handler is not None
     job = Job(job_type=job_type, payload_json=payload)
     with pytest.raises(handlers.PermanentJobError, match="no valid"):
+        handler(session=None, job=job)  # type: ignore[arg-type]
+
+
+def test_daily_summary_handler_rejects_a_malformed_payload_timezone() -> None:
+    """An unusable ``local_tz`` is a permanent payload failure (T30).
+
+    Otherwise the unknown zone surfaces as a raw ``ZoneInfoNotFoundError`` from
+    deep inside the chain and the job burns its retry budget on a typo. The
+    anchor is valid, so the failure comes from the timezone check alone.
+    """
+    handler = handlers.get_handler(JobType.daily_summary)
+    assert handler is not None
+    job = Job(
+        job_type=JobType.daily_summary,
+        payload_json={"local_date": "2026-09-14", "local_tz": "Nowhere/Land"},
+    )
+    with pytest.raises(handlers.PermanentJobError, match="local_tz"):
+        handler(session=None, job=job)  # type: ignore[arg-type]
+
+
+def test_daily_summary_handler_rejects_a_non_string_payload_timezone() -> None:
+    """A present-but-not-a-string ``local_tz`` is deterministic too."""
+    handler = handlers.get_handler(JobType.daily_summary)
+    assert handler is not None
+    job = Job(
+        job_type=JobType.daily_summary,
+        payload_json={"local_date": "2026-09-14", "local_tz": 3},
+    )
+    with pytest.raises(handlers.PermanentJobError, match="local_tz"):
+        handler(session=None, job=job)  # type: ignore[arg-type]
+
+
+def test_phase2_handler_maps_a_broken_models_config_to_a_permanent_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing/broken models configuration fails the job for good (T30).
+
+    The phase-2 handler catches only ``PipelinePermanentError`` before T30, so
+    ``ModelsConfigError`` escaped as a transient error and the job kept being
+    retried. It must instead be a permanent failure (the convention
+    ``_transcribe_audio``/``_run_pipeline_job`` already follow). The anchor is
+    valid and the configuration load is the first thing the chain does, so the
+    test needs no session.
+    """
+
+    def _boom(path=None):  # type: ignore[no-untyped-def]
+        raise ModelsConfigError("synthetic: the models configuration is unreadable")
+
+    monkeypatch.setattr(phase2_pipeline, "load_models_config", _boom)
+    handler = handlers.get_handler(JobType.daily_summary)
+    assert handler is not None
+    job = Job(job_type=JobType.daily_summary, payload_json={"local_date": "2026-09-14"})
+    with pytest.raises(handlers.PermanentJobError, match="configuration"):
         handler(session=None, job=job)  # type: ignore[arg-type]
 
 

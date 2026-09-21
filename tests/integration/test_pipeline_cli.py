@@ -295,6 +295,96 @@ def test_day_command_rejects_a_malformed_date(
     assert "ISO date" in capsys.readouterr().err
 
 
+def test_day_command_rejects_an_unknown_timezone(
+    migrated_settings: object,
+    layer_providers: dict[str, FakeLayerProvider],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--tz`` is validated up front: a clear error, not a raw traceback (T30)."""
+    exit_code = main(["day", "--date", DAY.isoformat(), "--tz", "Nowhere/Land"])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "--tz" in captured.err
+    assert "IANA timezone name" in captured.err
+    assert "Nowhere/Land" in captured.err
+    assert "Traceback" not in captured.err
+    assert _stored(ArtifactLayer.daily_summary) == []
+
+
+@pytest.mark.parametrize(
+    "tz",
+    ["Europe/Moscov", "not a zone", "UTC+3", "/etc/passwd"],
+)
+def test_day_command_rejects_other_invalid_timezones(
+    migrated_settings: object,
+    layer_providers: dict[str, FakeLayerProvider],
+    capsys: pytest.CaptureFixture[str],
+    tz: str,
+) -> None:
+    """Every invalid zone is refused the same way (T30 rework)."""
+    exit_code = main(["day", "--date", DAY.isoformat(), "--tz", tz])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "--tz" in captured.err and "IANA timezone name" in captured.err
+    assert "Traceback" not in captured.err
+    assert _stored(ArtifactLayer.daily_summary) == []
+
+
+@pytest.mark.parametrize(
+    ("raw_tz", "expected_tz"),
+    [
+        (" Europe/Moscow", "Europe/Moscow"),
+        ("Europe/Moscow ", "Europe/Moscow"),
+        ("\tUTC", "UTC"),
+    ],
+)
+def test_day_command_normalizes_a_padded_timezone(
+    migrated_settings: object,
+    layer_providers: dict[str, FakeLayerProvider],
+    capsys: pytest.CaptureFixture[str],
+    raw_tz: str,
+    expected_tz: str,
+) -> None:
+    """A padded ``--tz`` is trimmed once and the trimmed value drives the run.
+
+    The guard must validate the very value it hands to the chain: otherwise a
+    padded zone passes the check and then raises ``ZoneInfoNotFoundError`` deep
+    inside the chain (T30 rework). The day run therefore completes and the
+    report shows the trimmed zone.
+    """
+    _add_message()
+
+    exit_code = main(["day", "--date", DAY.isoformat(), "--tz", raw_tz])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert f"tz={expected_tz}" in out
+    assert f"tz={raw_tz}" not in out
+    assert len(_stored(ArtifactLayer.daily_summary)) == 1
+
+
+def test_day_command_treats_a_blank_timezone_as_absent(
+    migrated_settings: object,
+    layer_providers: dict[str, FakeLayerProvider],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Whitespace-only ``--tz`` means "use APP_TIMEZONE" (T30 rework).
+
+    Before the fix the guard accepted it (it stripped to empty) and the chain
+    raised on the raw blank string.
+    """
+    _add_message()
+
+    exit_code = main(["day", "--date", DAY.isoformat(), "--tz", "   "])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "tz=Europe/Moscow" in out  # the default APP_TIMEZONE
+    assert len(_stored(ArtifactLayer.daily_summary)) == 1
+
+
 # ---------------------------------------------------------------------------
 # week
 # ---------------------------------------------------------------------------
@@ -348,6 +438,38 @@ def test_week_command_without_day_summaries_is_a_noop_with_a_hint(
 
     assert exit_code == 0
     assert "--run-days" in capsys.readouterr().out
+
+
+def test_week_command_rejects_an_unknown_timezone(
+    migrated_settings: object,
+    layer_providers: dict[str, FakeLayerProvider],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--tz`` validation covers ``week`` as well as ``day`` (T30)."""
+    exit_code = main(["week", "--week", WEEK_ID, "--tz", "Nowhere/Land"])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "--tz" in captured.err
+    assert "IANA timezone name" in captured.err
+    assert "Traceback" not in captured.err
+    assert _stored(ArtifactLayer.weekly_summary) == []
+
+
+def test_week_command_normalizes_a_padded_timezone_with_run_days(
+    migrated_settings: object,
+    layer_providers: dict[str, FakeLayerProvider],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The week path normalizes ``--tz`` too, reachable through ``--run-days``."""
+    _add_message()
+
+    exit_code = main(["week", "--week", WEEK_ID, "--run-days", "--tz", "\tUTC"])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert len(_stored(ArtifactLayer.weekly_summary)) == 1
 
 
 # ---------------------------------------------------------------------------
