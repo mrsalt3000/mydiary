@@ -829,7 +829,9 @@ def test_a_missing_instrument_fails_the_run(
     assert harness.main(["--strict", "--nli"]) == 1
     output = capsys.readouterr().out
     assert "FAILED: the NLI check could not run" in output
-    assert "fetch-nli-model.sh" in output
+    # The message names whichever fix applies: the extra or the weights (CI has
+    # neither, a developer usually has the extra and lacks the 712 MB).
+    assert "fetch-nli-model.sh" in output or 'pip install -e ".[nli]"' in output
     # Without the flag the same missing instrument is irrelevant, as designed.
     assert "traceback" not in output.lower()
 
