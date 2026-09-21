@@ -25,6 +25,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 #: Default location of the private application-data directory.
 DEFAULT_DATA_ROOT = PROJECT_ROOT / "data"
 
+#: sha256 of the NLI cross-encoder weights the summary validation expects (T24).
+#:
+#: The same value is written into ``scripts/fetch-nli-model.sh`` (a shell script
+#: cannot import Python) and a test pins the two against each other; the measured
+#: values for both conversions are documented in
+#: ``docs/nli-validation-analysis.md`` §3.
+PINNED_NLI_MODEL_SHA256 = "ee870cefeddcc1b79ed1eaf8c9cf3ec331d92f0d984945ab6aa32d017aac6c2c"
+
 #: Mapping of settings field -> subdirectory name below the data root.
 _SUBDIR_FIELDS: dict[str, str] = {
     "db_dir": "db",
@@ -32,6 +40,7 @@ _SUBDIR_FIELDS: dict[str, str] = {
     "exports_dir": "exports",
     "temp_dir": "temp",
     "backups_dir": "backups",
+    "nli_model_dir": "models/nli",
 }
 
 #: Default MIME types accepted for voice-message uploads (Task 07).
@@ -129,6 +138,16 @@ class AppSettings(BaseSettings):
     temp_dir: Path = DEFAULT_DATA_ROOT / "temp"
     #: Backup archives directory.
     backups_dir: Path = DEFAULT_DATA_ROOT / "backups"
+    #: Directory holding the pinned NLI cross-encoder of the summary validation
+    #: (T24) — ``model.onnx``, ``tokenizer.json``, ``config.json``. The weights
+    #: are fetched once by ``scripts/fetch-nli-model.sh`` and never live in the
+    #: repository. Read from ``APP_NLI_MODEL_DIR``.
+    nli_model_dir: Path = DEFAULT_DATA_ROOT / "models" / "nli"
+    #: sha256 the NLI weights must match before they are used (T24). An empty
+    #: value disables the pin, which is only useful while measuring a different
+    #: conversion; the shipped default is the value measured and documented in
+    #: ``docs/nli-validation-analysis.md``.
+    nli_model_sha256: str = PINNED_NLI_MODEL_SHA256
 
     @field_validator("timezone")
     @classmethod

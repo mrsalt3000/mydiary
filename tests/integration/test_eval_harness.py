@@ -38,8 +38,10 @@ from diary.domain.contracts.golden import (
     DailyInvariants,
     GoldenChunk,
 )
+from diary.domain.contracts.nli import NliPremiseError
 from diary.domain.llm.errors import LLMStructuredOutputError
 from diary.domain.llm.service import resolve_phase2_profile
+from diary.domain.nli.onnx_judge import OnnxNliJudge
 from diary.domain.pipelines.coach.pipeline import PROFILE_NAME as COACH_PROFILE_NAME
 from diary.domain.pipelines.coach.pipeline import PROMPT_PATH as COACH_PROMPT_PATH
 from diary.domain.pipelines.stt_fix.pipeline import PROFILE_NAME as STT_PROFILE_NAME
@@ -85,12 +87,13 @@ def _chunk(chunk_id: str) -> GoldenChunk:
     return loaded[0]
 
 
-def _run(chunk: GoldenChunk, payload: dict[str, object], models_config) -> Any:
+def _run(chunk: GoldenChunk, payload: dict[str, object], models_config, judge: Any = None) -> Any:
     """Evaluate one chunk with a scripted provider answering ``payload``."""
     return harness.evaluate_chunk(
         chunk,
         provider=harness.ScriptedProvider(payload),
         models_config=models_config,
+        judge=judge,
     )
 
 
@@ -101,6 +104,22 @@ def _passing(chunk: GoldenChunk) -> dict[str, object]:
 
 def _checks(outcome: Any) -> set[str]:
     return set(outcome.failed_checks)
+
+
+class _AllClaimsContradicted:
+    """A scripted NLI judge: every claim of every summary contradicts its source.
+
+    Stateless on purpose — one judge instance serves the whole run, so a judge that
+    reacted to the first thing it saw would only affect the first chunk. Exactly
+    what the gate of T24b will have to catch, in the largest amount possible.
+    """
+
+    def __init__(self) -> None:
+        self.rows = 0
+
+    def __call__(self, pairs: Any) -> list[dict[str, float]]:
+        self.rows += len(pairs)
+        return [{"entailment": 0.03, "contradiction": 0.95, "neutral": 0.02} for _ in pairs]
 
 
 def _violations_of_a_payload(
@@ -743,6 +762,109 @@ def test_a_skipped_chunk_is_excluded_from_both_counts() -> None:
     assert summary.invariants_passed == 0
     assert summary.latency_measured == 0
     assert summary.fully_passed == 0
+
+
+# ---------------------------------------------------------------------------
+# T24a: the NLI measurement (--nli), the premise, and fail-closed availability
+# ---------------------------------------------------------------------------
+
+
+def test_the_nli_measurement_is_off_unless_it_is_requested(
+    chunks: list[GoldenChunk], models_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Nothing is judged, nothing is loaded, and the report says nothing."""
+    outcomes = harness.evaluate_all(
+        chunks, provider_factory=harness.ci_provider_factory, models_config=models_config
+    )
+    summary = harness.summarize(outcomes)
+    assert summary.nli_summaries == 0
+    assert summary.nli_claims == 0
+    assert "nli (" not in harness.format_report(outcomes, harness.golden_manifest())
+    assert harness.main(["--strict"]) == 0
+    assert "nli (" not in capsys.readouterr().out
+
+
+def test_the_nli_block_measures_without_touching_the_counts(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T24a is a measurement: the counters of T18 and T21 must not move."""
+    monkeypatch.setattr(harness, "nli_judge", _AllClaimsContradicted)
+    assert harness.main(["--strict", "--nli"]) == 0
+    output = capsys.readouterr().out
+    assert "OK: invariants 10/10 (required 10)" in output
+    assert "latency 8/8 within budget" in output
+    # Five summaries, eleven claims (three facts per day chunk, one weekly rollup),
+    # every one of them contradicted — and still the counts above did not move.
+    assert "nli (measurement, not a gate): summaries 5, claims 11" in output
+    assert "contradictions 11, unsupported 0" in output
+    assert "nli flagged contradictions: day-01-quiet-monday facts#1" in output
+
+
+def test_the_metrics_of_a_scripted_judge_land_in_the_outcome(models_config) -> None:
+    chunk = _chunk("day-01-quiet-monday")
+    outcome = _run(chunk, _passing(chunk), models_config, judge=_AllClaimsContradicted())
+    assert outcome.nli is not None
+    assert outcome.nli.claims == len(outcome.nli.contradicted_coordinates)
+    assert outcome.nli.contradicted_coordinates[0] == "facts#1"
+    assert outcome.nli.max_contradiction == pytest.approx(0.95)
+    # A chunk whose contract declares no claims is not judged at all.
+    stt = _chunk("stt-01-colleague-call")
+    assert _run(stt, _passing(stt), models_config, judge=_AllClaimsContradicted()).nli is None
+
+
+def test_a_missing_instrument_fails_the_run(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The owner's decision for T24: an unavailable instrument is a failed run.
+
+    A requested check that silently does nothing would let the report claim a
+    validation nobody performed, so the run stops and the message names the fix.
+    """
+    missing = OnnxNliJudge(
+        model_path=tmp_path / "model.onnx",
+        tokenizer_path=tmp_path / "tokenizer.json",
+        config_path=tmp_path / "config.json",
+    )
+    monkeypatch.setattr(harness, "nli_judge", lambda: missing)
+    assert harness.main(["--strict", "--nli"]) == 1
+    output = capsys.readouterr().out
+    assert "FAILED: the NLI check could not run" in output
+    assert "fetch-nli-model.sh" in output
+    # Without the flag the same missing instrument is irrelevant, as designed.
+    assert "traceback" not in output.lower()
+
+
+def test_a_judge_that_answers_the_wrong_shape_fails_the_run(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(harness, "nli_judge", lambda: lambda pairs: [])
+    assert harness.main(["--strict", "--nli"]) == 1
+    assert "FAILED: the NLI check could not run" in capsys.readouterr().out
+
+
+def test_the_nli_premise_is_the_content_of_the_layer_input(models_config) -> None:
+    """Only what the layer asserted about: entry texts, no ids, no paths."""
+    day = _chunk("day-01-quiet-monday")
+    premise = harness._nli_premise(day)
+    assert premise == "\n".join(entry.text for entry in day.input)
+    assert str(day.input[0].id) not in premise
+
+    week = _chunk("week-01-2026-w38")
+    assert harness._nli_premise(week) == "\n".join(
+        part
+        for summary in week.input
+        for part in (*summary.facts, *summary.themes, *summary.open_questions)
+    )
+
+
+def test_an_empty_premise_is_an_error_not_a_clean_result(models_config) -> None:
+    """The measurement that broke once: an empty source must not read as «neutral»."""
+    chunk = _chunk("day-01-quiet-monday")
+    blank = chunk.model_copy(
+        update={"input": [entry.model_copy(update={"text": ""}) for entry in chunk.input]}
+    )
+    with pytest.raises(NliPremiseError):
+        _run(blank, _passing(blank), models_config, judge=_AllClaimsContradicted())
 
 
 def test_the_report_names_the_measured_prompt_when_the_endpoint_reports_it(

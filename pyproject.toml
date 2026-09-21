@@ -35,6 +35,18 @@ dev = [
 stt = [
     "faster-whisper>=1.0",
 ]
+# Optional local NLI validation runtime (T24): a small Russian ONNX cross-encoder
+# that checks whether a summary claim is supported by the source it was written
+# from. Like the STT extra it is NOT installed by default or in CI — the rules run
+# with a scripted judge there, and the weights live outside the repository
+# (scripts/fetch-nli-model.sh). faster-whisper already pulls both packages
+# transitively; naming them here is what makes the dependency ours rather than
+# borrowed, and it is what the adapter reports when the extra is missing.
+# Analysis, measurements and the decision behind it: docs/nli-validation-analysis.md.
+nli = [
+    "onnxruntime>=1.14,<2",
+    "tokenizers>=0.13,<1",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -50,3 +62,10 @@ select = ["E", "F", "I"]
 [tool.mypy]
 python_version = "3.12"
 files = ["src"]
+
+# Optional extras (``stt``, ``nli``) are not installed in CI and ship no type
+# information: the adapters import them lazily and raise a typed error when the
+# extra is missing, so mypy is told not to look inside.
+[[tool.mypy.overrides]]
+module = ["onnxruntime", "onnxruntime.*", "tokenizers", "tokenizers.*"]
+ignore_missing_imports = true

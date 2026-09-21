@@ -171,10 +171,20 @@ from diary.domain.contracts.invariants import (
     numbers,
     proper_names,
 )
+from diary.domain.contracts.nli import (
+    CLAIM_FIELDS,
+    NliError,
+    NliJudge,
+    NliMetrics,
+    claims_for,
+    judge_claims,
+    metrics_for,
+)
 from diary.domain.llm.errors import LLMProviderUnavailableError
 from diary.domain.llm.models import LLMRequest, LLMResponse, LLMUsage
 from diary.domain.llm.providers import LLMProvider, create_llm_provider
 from diary.domain.llm.service import resolve_phase2_profile
+from diary.domain.nli.onnx_judge import OnnxNliJudge
 from diary.domain.pipelines.base import PipelineInvariantError
 from diary.domain.pipelines.coach.pipeline import (
     PROFILE_NAME as COACH_PROFILE_NAME,
@@ -392,6 +402,9 @@ class ChunkOutcome:
     diagnostics: list[str] = field(default_factory=list)
     requests: int = 0
     usage: LLMUsage | None = None
+    #: NLI metrics of a summary chunk when ``--nli`` asked for them (T24a); the
+    #: metrics are content-free (counts, probabilities, claim coordinates).
+    nli: NliMetrics | None = None
 
     @property
     def skipped(self) -> bool:
@@ -534,6 +547,60 @@ def _check_forbidden_lexemes(ctx: CheckContext) -> list[Violation]:
 def _chunk_facts(chunk: GoldenChunk) -> InputFacts:
     """The reduced source of a chunk, as the shared checks expect it (T17)."""
     return input_facts_from_models(chunk.input)
+
+
+#: Contracts whose claims the NLI instrument checks (T24a: summarisation only —
+#: the STT correction has no claims and the coaching note is out of this scope).
+NLI_CONTRACTS: frozenset[str] = frozenset(CLAIM_FIELDS)
+
+
+def nli_judge() -> NliJudge:
+    """The judge ``--nli`` uses: the pinned ONNX cross-encoder, built on demand.
+
+    A module-level hook, so tests install a scripted judge and so the instrument
+    is only built when the flag asks for it. An instrument that cannot be built
+    raises :class:`~diary.domain.nli.onnx_judge.NliUnavailableError`, which the
+    runner reports as a **failed run** rather than as an absent check — the
+    owner's decision for T24 («если NLI недоступен — Fail»): a requested check
+    that silently does nothing is worse than a loud failure.
+    """
+    return OnnxNliJudge.from_settings()
+
+
+def _nli_premise(chunk: GoldenChunk) -> str:
+    """The text a claim is compared against: the content of the layer's input.
+
+    A layer asserts about the *meaning* of what it was given, so the premise is
+    the entry texts of a day or the day rollups of a week — not row identifiers,
+    timestamps or file paths. That also keeps the pair inside the model's
+    512-token budget, where a truncation would silently hide the very claim the
+    check exists for. An empty result is a loud error, not «everything is
+    neutral» (T24a DoD 2).
+    """
+    items = chunk.input if isinstance(chunk.input, list) else [chunk.input]
+    parts: list[str] = []
+    for item in items:
+        if isinstance(item, RawEntry):
+            parts.append(item.text)
+        elif isinstance(item, DailySummary):
+            parts.extend(item.facts)
+            parts.extend(item.themes)
+            parts.extend(item.open_questions)
+        elif isinstance(item, WeeklySummary):
+            parts.append(item.rollup)
+        else:
+            raise HarnessError(f"chunk {chunk.id} carries an input the NLI premise cannot read")
+    return "\n".join(part.strip() for part in parts if part.strip())
+
+
+def _nli_metrics(
+    chunk: GoldenChunk, payload: Mapping[str, object], judge: NliJudge
+) -> NliMetrics | None:
+    """NLI metrics of a summary chunk, or ``None`` for contracts it does not cover."""
+    if chunk.contract not in NLI_CONTRACTS:
+        return None
+    claims = claims_for(chunk.contract, payload)
+    return metrics_for(judge_claims(_nli_premise(chunk), claims, judge))
 
 
 def _ctx_facts(ctx: CheckContext) -> InputFacts:
@@ -1019,6 +1086,7 @@ def evaluate_chunk(
     provider: LLMProvider,
     models_config: ModelsConfig,
     profile: OpenAICompatibleProfile | None = None,
+    judge: NliJudge | None = None,
 ) -> ChunkOutcome:
     """Run one chunk on a throwaway database and check it.
 
@@ -1027,6 +1095,12 @@ def evaluate_chunk(
     migrations are the real ones. Latency is measured around the layer call
     itself, without the database setup, and is compared with the manifest budget
     of the category.
+
+    ``judge`` is the NLI instrument of ``--nli`` (T24a): when it is given, the
+    claims of a summary chunk are checked against the canonical input the layer
+    saw, and the content-free metrics land in :attr:`ChunkOutcome.nli`. The
+    metrics never influence the invariant or latency counts — the instrument
+    measures, it does not (yet) gate.
     """
     if chunk.invariants.kind not in KIND_CHECKS:
         raise HarnessError(
@@ -1110,6 +1184,12 @@ def evaluate_chunk(
         for name in (*GENERIC_CHECKS, *KIND_CHECKS[chunk.invariants.kind]):
             outcome.violations.extend(CHECKERS[name](ctx))
         outcome.diagnostics = content_word_diagnostics(ctx)
+
+    if judge is not None:
+        # Judged for every chunk that produced a payload, including one whose
+        # contract check failed: an invalid shape and an unfaithful claim are
+        # different defects, and the second is worth measuring either way.
+        outcome.nli = _nli_metrics(chunk, payload, judge)
 
     _record_measurements(outcome, chunk, resolved_profile, provider)
     _apply_latency_budget(outcome)
@@ -1201,6 +1281,7 @@ def evaluate_all(
     *,
     provider_factory: Callable[[GoldenChunk], LLMProvider],
     models_config: ModelsConfig,
+    judge: NliJudge | None = None,
 ) -> list[ChunkOutcome]:
     """Evaluate the selected chunks, one isolated database per chunk.
 
@@ -1215,7 +1296,9 @@ def evaluate_all(
         except LLMProviderUnavailableError:
             outcomes.append(_skipped_outcome(chunk))
             continue
-        outcomes.append(evaluate_chunk(chunk, provider=provider, models_config=models_config))
+        outcomes.append(
+            evaluate_chunk(chunk, provider=provider, models_config=models_config, judge=judge)
+        )
     return outcomes
 
 
@@ -1347,6 +1430,14 @@ class Summary:
     max_latency_by_category: dict[str, float]
     latency_budgets: dict[str, float | None]
     diagnostics_total: int
+    #: NLI measurement block (T24a). Zeroed when ``--nli`` was not requested; the
+    #: counters are deliberately separate from the invariant and latency counts.
+    nli_summaries: int
+    nli_claims: int
+    nli_contradictions: int
+    nli_unsupported: int
+    nli_max_contradiction: float
+    nli_flagged: tuple[str, ...]
 
     @property
     def measured(self) -> int:
@@ -1375,6 +1466,14 @@ def summarize(outcomes: Sequence[ChunkOutcome]) -> Summary:
         budgets.setdefault(outcome.category, outcome.latency_budget_s)
     measured = [outcome for outcome in outcomes if not outcome.skipped]
     timed = [outcome for outcome in measured if outcome.latency_budget_s is not None]
+    judged = [outcome for outcome in measured if outcome.nli is not None]
+    metrics = [outcome.nli for outcome in judged if outcome.nli is not None]
+    flagged = tuple(
+        f"{outcome.chunk_id} {coordinate}"
+        for outcome in judged
+        if outcome.nli is not None
+        for coordinate in outcome.nli.contradicted_coordinates
+    )
     return Summary(
         total=len(outcomes),
         skipped=len(outcomes) - len(measured),
@@ -1386,6 +1485,12 @@ def summarize(outcomes: Sequence[ChunkOutcome]) -> Summary:
         max_latency_by_category=max_latency,
         latency_budgets=budgets,
         diagnostics_total=sum(len(outcome.diagnostics) for outcome in outcomes),
+        nli_summaries=len(judged),
+        nli_claims=sum(item.claims for item in metrics),
+        nli_contradictions=sum(item.contradiction for item in metrics),
+        nli_unsupported=sum(len(item.unsupported_coordinates) for item in metrics),
+        nli_max_contradiction=max((item.max_contradiction for item in metrics), default=0.0),
+        nli_flagged=flagged,
     )
 
 
@@ -1496,6 +1601,18 @@ def format_report(outcomes: Sequence[ChunkOutcome], manifest: GoldenManifest) ->
         f"diagnostics (informational, not a failure): {summary.diagnostics_total} token(s)"
     )
     lines.extend(_measured_usage_lines(outcomes))
+    if summary.nli_summaries:
+        # A measurement of its own (T24a): it must not be read as a pass
+        # criterion, and a contradiction here does not change the exit code until
+        # T24b promotes the rule to the runtime gate.
+        lines.append(
+            f"nli (measurement, not a gate): summaries {summary.nli_summaries}, "
+            f"claims {summary.nli_claims}, contradictions {summary.nli_contradictions}, "
+            f"unsupported {summary.nli_unsupported}, "
+            f"max p_contradiction {summary.nli_max_contradiction:.2f}"
+        )
+        if summary.nli_flagged:
+            lines.append(f"nli flagged contradictions: {', '.join(summary.nli_flagged)}")
     return "\n".join(lines)
 
 
@@ -1542,6 +1659,16 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "manifest threshold; a skipped chunk (layer switched off) fails a strict run"
         ),
     )
+    parser.add_argument(
+        "--nli",
+        action="store_true",
+        help=(
+            "also check the claims of every summary against the canonical input of its "
+            "layer with the local NLI instrument (T24a): a separate measurement block, "
+            "never part of the invariant or latency counts, and an unavailable "
+            "instrument fails the run"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -1561,7 +1688,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         factory = ci_provider_factory
         mode = "ci"
     print(f"mode: {mode}; chunks: {len(chunks)}; config: {config_path or '<default>'}")
-    outcomes = evaluate_all(chunks, provider_factory=factory, models_config=models_config)
+    judge: NliJudge | None = None
+    if args.nli:
+        try:
+            judge = nli_judge()
+            outcomes = evaluate_all(
+                chunks,
+                provider_factory=factory,
+                models_config=models_config,
+                judge=judge,
+            )
+        except NliError as exc:
+            # Fail-closed on the owner's decision for T24 («если NLI недоступен —
+            # Fail»): a requested check that cannot run is a failed run, never an
+            # absent one. The message names the fix (extra or fetch script), not
+            # any diary content.
+            print(f"FAILED: the NLI check could not run: {exc}")
+            return 1
+    else:
+        outcomes = evaluate_all(chunks, provider_factory=factory, models_config=models_config)
     print(format_report(outcomes, manifest))
     summary = summarize(outcomes)
     required = len(chunks) if (args.strict or args.chunk) else manifest.threshold.pass_count

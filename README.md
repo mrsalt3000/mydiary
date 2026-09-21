@@ -91,6 +91,26 @@ ln -sf /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so.13 \
 
 В `configs/models.yaml` профиль `transcription` по умолчанию: `device: cpu`, `compute_type: int8`, `language: ru` (см. `configs/models.example.yaml`). Кнопка «Расшифровать» у аудио-сообщения ставит задачу воркеру; модель скачивается в локальный кэш при первом использовании. Если extra не установлен — понятная ошибка, аудио не теряется. GPU/CUDA — опционально (`docs/wsl2-deployment-brief.md`): в GPU-режиме действует правило серийности STT и LLM. Точка входа для него — `asr.run()` (`src/diary/domain/transcription/asr.py`): она перед распознаванием выгружает LLM и после — Whisper. **Кнопка «Расшифровать» идёт через неё же (T11, ADR-010):** джоба `transcribe_audio` выполняется как `asr.run(..., unload_llm=…)`, а `unload_llm` — инъекция из `diary/domain/llm/unload.py` (для локального Ollama это `keep_alive: 0`, то есть `ollama stop <tag>`, по всем локальным профилям конфигурации). Поэтому `OLLAMA_KEEP_ALIVE=0` перестал быть условием veto; замеры и рекомендация по рантайму — в `docs/decisions/ADR-010-manual-stt-through-the-shared-gpu-slot.md`.
 
+## NLI-валидация сводок (опциональный инструмент)
+
+Проверка «следует ли утверждение сводки из источника» идёт отдельным инструментом —
+небольшим русским NLI-кросс-энкодером на ONNX Runtime (CPU, без torch, без VRAM).
+Extra не ставится по умолчанию/в CI (как и `stt`):
+
+```bash
+.venv/bin/pip install -e ".[nli]"
+scripts/fetch-nli-model.sh          # веса в $APP_NLI_MODEL_DIR (по умолчанию data/models/nli) + проверка sha256
+```
+
+Правила (пороги, классификация «противоречие / не подтверждено», разбор утверждений из
+контракта) живут в `src/diary/domain/contracts/nli.py` и тестируются без модели —
+scripted-судьёй; ONNX-сессия — в `src/diary/domain/nli/onnx_judge.py`. Харнесс включает
+измерение флагом `eval/run.py --nli` (по умолчанию выключено, отдельный блок отчёта, на
+счётчики инвариантов и латентности не влияет). **Если инструмент недоступен, а проверка
+запрошена, это ошибка, а не тихий пропуск** (решение пользователя: «если NLI недоступен —
+Fail»). Анализ, замеры и ограничения — `docs/nli-validation-analysis.md`; задача и DoD —
+`docs/tasklist-phase2.md` §15.
+
 ## Локальный LLM (Ollama) — фаза 2, T01/T02/T03
 
 Рантайм производных слоёв фазы 2 — базовая модель `qwen3.5:4b` под Ollama. Устанавливается в user space, root не нужен; бинарник, модели, лог и pidfile лежат вне репозитория (`~/.local/…`, `~/.ollama/models`):
