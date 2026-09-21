@@ -30,6 +30,7 @@ import uuid
 from datetime import date, datetime, timezone
 
 import pytest
+from _pipeline_fakes import supported_nli_judge
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -49,6 +50,7 @@ from diary.db.models import (
 from diary.db.repositories import JobRepository, MessageRepository, ProcessingRunRepository
 from diary.db.results import list_layer_results
 from diary.domain.llm.models import LLMRequest, LLMResponse, LLMUsage
+from diary.domain.pipelines import nli_guard
 from diary.domain.pipelines import pipeline as phase2_pipeline
 from diary.domain.pipelines import registry as pipeline_registry
 from diary.domain.pipelines.coach.registration import ensure_coach_pipeline_registered
@@ -223,6 +225,20 @@ def test_a_stt_corrected_job_corrects_exactly_one_message(
     # Exactly one message was corrected — a day chain would also summarize the day.
     assert len(layer_providers["fake-stt"].requests) == 1
     assert not list_layer_results(session, layer=ArtifactLayer.daily_summary)
+
+
+@pytest.fixture(autouse=True)
+def _scripted_nli_judge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ``daily_summary`` handler is a production entry, so it arms the NLI gate.
+
+    A double keeps these tests independent of the 712 MB instrument and of the
+    optional extra (absent in CI); the gate's own behaviour is tested where it lives
+    (``tests/unit/test_nli_guard.py`` and the day layer's storage tests, T24b).
+    """
+    monkeypatch.setattr(nli_guard, "default_nli_judge", supported_nli_judge)
+    monkeypatch.setattr(
+        "diary.workers.handlers.default_nli_judge", supported_nli_judge, raising=False
+    )
 
 
 def test_a_daily_summary_job_runs_the_day_chain(

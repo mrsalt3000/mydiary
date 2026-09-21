@@ -69,6 +69,7 @@ from diary.domain.backup import (
 )
 from diary.domain.pipelines import pipeline as phase2_pipeline
 from diary.domain.pipelines.base import PipelineError
+from diary.domain.pipelines.nli_guard import default_nli_judge
 from diary.domain.pipelines.pipeline import (
     SKIP_PROFILE_OFF,
     ChainStep,
@@ -314,6 +315,7 @@ def _run_day(args: argparse.Namespace) -> int:
             local_date=local_date,
             models_config=config,
             local_tz=args.tz,
+            nli_judge=default_nli_judge(),
         )
     print(f"day {outcome.local_date.isoformat()} tz={args.tz or get_settings().timezone}")
     exit_code = _print_steps(outcome.steps, outcome.skipped)
@@ -344,6 +346,7 @@ def _run_week(args: argparse.Namespace) -> int:
             session,
             week_id=week_id,
             run_days=args.run_days,
+            nli_judge=default_nli_judge(),
             models_config=config,
             local_tz=args.tz,
         )

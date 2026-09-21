@@ -409,3 +409,48 @@ def test_the_layer_declares_no_rendered_file_location() -> None:
     assert PROMPT_PATH.parent.name == "sum_daily"
     assert PROMPT_PATH.name == "v1.md"
     assert SumDailyPipeline.output_ext == ".md"
+
+
+def test_run_sum_daily_arms_the_nli_gate(monkeypatch) -> None:
+    """The convenience entry is a production entry, so it builds the instrument itself.
+
+    ``sum_daily`` keeps the gate optional (the documented seam for tests and for the
+    harness in CI), which means the arming has to happen *inside* this entry — and a
+    review of T24b proved that no test caught its removal. This one does: the builder
+    is recorded and the instrument is checked to reach the service.
+    """
+    from datetime import date as _date
+
+    from diary.domain.pipelines.sum_daily import service as sum_daily_service
+
+    class _Judge:
+        """A stand-in: this test checks the wiring, and the service is faked anyway."""
+
+        def load(self) -> None:
+            """Nothing to load."""
+
+        def __call__(self, pairs):  # pragma: no cover - never called here
+            return []
+
+    built: list[str] = []
+    judge = _Judge()
+
+    def _recorder() -> _Judge:
+        built.append("armed")
+        return judge
+
+    captured: dict[str, object] = {}
+
+    def _fake_sum_daily(session: object, **kwargs: object) -> str:
+        captured.update(kwargs)
+        return "stored"
+
+    monkeypatch.setattr(sum_daily_service, "default_nli_judge", _recorder)
+    monkeypatch.setattr(sum_daily_service, "sum_daily", _fake_sum_daily)
+    monkeypatch.setattr(sum_daily_service, "resolve_phase2_profile", lambda config, name: object())
+    monkeypatch.setattr(sum_daily_service, "create_llm_provider", lambda profile: object())
+
+    sum_daily_service.run_sum_daily(None, local_date=_date(2026, 9, 14), models_config=object())
+
+    assert built == ["armed"]
+    assert captured["judge"] is judge

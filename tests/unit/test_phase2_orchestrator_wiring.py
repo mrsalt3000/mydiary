@@ -90,6 +90,45 @@ def _referenced_names(func: object) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
+def test_the_day_gate_is_armed_by_the_production_entries() -> None:
+    """T24b: the NLI gate must not depend on a caller remembering to pass it.
+
+    ``sum_daily`` takes the instrument optionally (the documented seam for tests and
+    for the harness in CI, where neither the extra nor the weights exist), so the
+    arming has to happen at the production boundary — the CLI and the
+    ``daily_summary`` job handler — and it is pinned here by source, the way the
+    other wiring of this file is pinned.
+    """
+    root = PROJECT_ROOT / "src" / "diary"
+    cli = (root / "cli.py").read_text(encoding="utf-8")
+    handlers = (root / "workers" / "handlers.py").read_text(encoding="utf-8")
+    pipeline = (root / "domain" / "pipelines" / "pipeline.py").read_text(encoding="utf-8")
+    for name, source in (("cli.py", cli), ("handlers.py", handlers)):
+        assert "nli_judge=default_nli_judge()" in source, name
+
+    # Compare *lines*, not substrings: `"judge=nli_judge"` occurs inside
+    # `"nli_judge=nli_judge"`, so a substring test would keep passing after the day
+    # step stopped forwarding the instrument — the vacuous assertion a review of
+    # T24b caught, in the same class as the ungated path it caught before.
+    forwarded = {
+        line.strip().split(",")[0]
+        for line in pipeline.splitlines()
+        if line.strip().startswith(("judge=", "nli_judge="))
+    }
+    assert "judge=nli_judge" in forwarded  # the day step forwards what the entry armed
+    # The run_days refresh of the weekly chain is a second way to store a day
+    # summary, and it must be gated too (a review of T24b found it was not).
+    assert "nli_judge=nli_judge" in forwarded
+    assert pipeline.count("nli_judge=default_nli_judge()") == 0  # only entries arm it
+    assert cli.count("nli_judge=default_nli_judge()") == 2  # day and week commands
+    assert handlers.count("nli_judge=default_nli_judge()") == 2  # both phase-2 jobs
+    # The low-level service keeps the seam, and it is documented as such.
+    service = (root / "domain" / "pipelines" / "sum_daily" / "service.py").read_text(
+        encoding="utf-8"
+    )
+    assert "None`` means no gate" in service
+
+
 def test_the_day_and_week_chains_reference_no_coach_code() -> None:
     """Layer 5 is not reachable from the chains — structurally, not by a flag."""
     for func in (pipeline.run_day_chain, pipeline.run_week_chain):

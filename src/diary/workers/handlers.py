@@ -60,6 +60,7 @@ from diary.db.models import Job, JobType
 from diary.domain.pipelines import pipeline as phase2_pipeline
 from diary.domain.pipelines import service as pipeline_service
 from diary.domain.pipelines.base import PipelinePermanentError
+from diary.domain.pipelines.nli_guard import default_nli_judge
 from diary.domain.transcription import service as transcription_service
 from diary.domain.transcription.providers import ProviderUnavailableError
 
@@ -326,6 +327,7 @@ def _daily_summary_job(session: Session, job: Job) -> None:
             current_session,
             local_date=_payload_local_date(current_job),
             local_tz=local_tz if isinstance(local_tz, str) and local_tz.strip() else None,
+            nli_judge=default_nli_judge(),
         )
 
     _run_phase2_job(session, job, layer=JobType.daily_summary.value, perform=perform)
@@ -345,6 +347,7 @@ def _weekly_summary_job(session: Session, job: Job) -> None:
             current_session,
             week_id=_payload_anchor(current_job, PAYLOAD_WEEK_ID, kind="weekly_summary"),
             run_days=_payload_run_days(current_job),
+            nli_judge=default_nli_judge(),
         )
 
     _run_phase2_job(session, job, layer=JobType.weekly_summary.value, perform=perform)

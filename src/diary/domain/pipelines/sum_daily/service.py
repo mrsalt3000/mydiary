@@ -48,8 +48,10 @@ from diary.core.settings import get_settings
 from diary.db.models import Artifact, ArtifactLayer
 from diary.db.results import save_layer_result
 from diary.domain.contracts import DailySummary, RawEntry
+from diary.domain.contracts.nli import NliJudge
 from diary.domain.llm.providers import LLMProvider, create_llm_provider
 from diary.domain.llm.service import resolve_phase2_profile
+from diary.domain.pipelines.nli_guard import contradiction_guard, default_nli_judge
 from diary.domain.pipelines.quality import generate_with_invariants
 from diary.domain.pipelines.sum_daily.day_input import collect_day_entries
 from diary.domain.pipelines.sum_daily.pipeline import PROFILE_NAME, SumDailyPipeline
@@ -73,6 +75,7 @@ def sum_daily(
     entries: list[RawEntry] | None = None,
     processing_run_id: uuid.UUID | None = None,
     created_at: datetime | None = None,
+    judge: NliJudge | None = None,
 ) -> SumDailyOutcome:
     """Summarize one local day with ``provider`` and append the result (no commit).
 
@@ -88,6 +91,15 @@ def sum_daily(
     call. The result is anchored to the pair (``local_date``, ``local_tz``), and
     the version is computed by the store: a repeated run appends ``v+1`` and
     keeps the previous result (ADR-005).
+
+    ``judge`` arms the runtime NLI gate (T24b): when it is given, the day's facts
+    must not contradict their source, the completion is re-generated on a
+    contradiction and the run fails permanently if the contradiction persists. The
+    premise is the content of exactly what the layer sends (T24a: the premise must
+    be the input the layer saw). ``None`` means no gate — the documented seam for
+    callers that inject their own provider (tests, and the harness in its CI mode);
+    the production entries (the CLI, the ``daily_summary`` job handler and
+    :func:`run_sum_daily`) always pass one, and that is pinned by tests.
     """
     timezone_name = local_tz or get_settings().timezone
     day_entries = (
@@ -102,10 +114,16 @@ def sum_daily(
         response = provider.complete(request)
         return pipeline.parse_result(response, local_date=local_date)
 
+    guard = (
+        None
+        if judge is None
+        else contradiction_guard(source_texts=[entry.text for entry in day_entries], judge=judge)
+    )
     summary = generate_with_invariants(
         layer=ArtifactLayer.daily_summary.value,
         source=day_entries,
         generate=generate,
+        extra_checks=() if guard is None else (guard,),
     )
     artifact = save_layer_result(
         session,
@@ -129,6 +147,7 @@ def run_sum_daily(
     entries: list[RawEntry] | None = None,
     processing_run_id: uuid.UUID | None = None,
     created_at: datetime | None = None,
+    judge: NliJudge | None = None,
 ) -> SumDailyOutcome:
     """Resolve the ``diary_sum`` profile/provider and summarize one local day.
 
@@ -136,6 +155,12 @@ def run_sum_daily(
     :class:`~diary.domain.llm.errors.LLMProviderUnavailableError` (never
     retryable) before any request is sent. ``provider`` overrides the factory —
     tests inject a fake, and T09 may pass its own instance.
+
+    This is a production entry, so it arms the NLI gate (T24b) itself: ``judge``
+    defaults to the pinned instrument resolved from the settings, and there is no
+    way to leave the layer ungated through this function. An unusable instrument
+    is a permanent failure (the owner's decision for T24: «если NLI недоступен —
+    Fail»), never a silent pass.
     """
     config = models_config if models_config is not None else load_models_config()
     profile = resolve_phase2_profile(config, PROFILE_NAME)
@@ -143,6 +168,7 @@ def run_sum_daily(
     return sum_daily(
         session,
         local_date=local_date,
+        judge=judge if judge is not None else default_nli_judge(),
         profile=profile,
         provider=active_provider,
         local_tz=local_tz,

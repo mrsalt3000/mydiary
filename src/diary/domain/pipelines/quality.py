@@ -37,7 +37,7 @@ gate reports only :func:`~diary.domain.contracts.invariants.violation_summary`
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TypeVar
 
 from pydantic import BaseModel
@@ -70,6 +70,7 @@ def generate_with_invariants(
     layer: str,
     source: object,
     generate: Callable[[int], SchemaT],
+    extra_checks: Sequence[Callable[[BaseModel], Sequence[InvariantViolation]]] = (),
 ) -> SchemaT:
     """Generate once, checking the invariants; on violation generate again.
 
@@ -81,6 +82,11 @@ def generate_with_invariants(
     called with the 1-based attempt number so a layer may vary the request; every
     attempt is a fresh call, never a repaired result.
 
+    ``extra_checks`` are additional checks over the same attempt, sharing its
+    policy: the runtime NLI gate (T24b) arrives this way, so a contradicting
+    summary is re-generated and, if it persists, refused exactly like a violated
+    lexical invariant. A check builds its instrument when it is built, not here.
+
     Returns the first output that satisfies every invariant. Raises
     :class:`~diary.domain.pipelines.base.PipelineInvariantError` — permanent, so
     the job does not enter the worker's retry loop — when every attempt violates
@@ -91,6 +97,8 @@ def generate_with_invariants(
     for attempt in range(1, GENERATION_ATTEMPTS + 1):
         model = generate(attempt)
         violations = _violations_of(layer, model, facts)
+        for check in extra_checks:
+            violations.extend(check(model))
         if not violations:
             return model
         logger.warning(

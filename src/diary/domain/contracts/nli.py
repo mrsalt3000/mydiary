@@ -103,6 +103,7 @@ __all__ = [
     "ensure_premise",
     "judge_claims",
     "metrics_for",
+    "premise_from_texts",
     "premise_sentences",
     "split_sentences",
     "unsupported_judgements",
@@ -341,6 +342,17 @@ def ensure_premise(premise: str) -> str:
 def split_sentences(text: str) -> list[str]:
     """Split a source text into the sentences the judge compares claims against."""
     return [part.strip() for part in SENTENCE_SPLIT_RE.split(text) if part.strip()]
+
+
+def premise_from_texts(texts: Sequence[str]) -> str:
+    """Join the content texts of a layer's input into the premise of one run.
+
+    One implementation for both sides (the runtime guard and the harness), so the
+    premise of a run is built the same way wherever it is checked: the texts the
+    layer is about to summarize, joined by newlines. An empty result is a loud
+    error rather than an empty premise (see :func:`ensure_premise`).
+    """
+    return ensure_premise("\n".join(text.strip() for text in texts if text.strip()))
 
 
 def premise_sentences(premise: str) -> list[str]:

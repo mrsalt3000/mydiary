@@ -718,6 +718,7 @@ def run_day_chain(
     providers: Mapping[str, LLMProvider] | None = None,
     local_tz: str | None = None,
     created_at: datetime | None = None,
+    nli_judge: object | None = None,
 ) -> DayChainOutcome:
     """Run one local calendar day through ``stt_fix`` and then ``sum_daily``.
 
@@ -726,6 +727,11 @@ def run_day_chain(
     with the raw text of their newest succeeded transcription): the same
     ``raw_entry[]`` list is fed to the ``stt_fix`` steps and to the day step, so
     the correction and the summary always describe the same set of source rows.
+
+    ``nli_judge`` is forwarded to every ``run_days`` refresh, so the path that
+    rewrites a week's day summaries is gated exactly like ``cli day`` (the T24b
+    gate): a refresh from the weekly chain must not become the one ungated way to
+    store a day summary.
 
     ``providers`` is the injection seam (keyed by profile field name:
     ``diary_stt``, ``diary_sum``, ``diary_week``, ``diary_coach``); ``local_tz``
@@ -794,6 +800,7 @@ def run_day_chain(
                 entries=entries,
                 processing_run_id=run_id,
                 created_at=created_at,
+                judge=nli_judge,  # type: ignore[arg-type]
             )
             return _StepProduct(artifact=outcome.artifact, payload=outcome.summary)
 
@@ -834,6 +841,7 @@ def run_week_chain(
     providers: Mapping[str, LLMProvider] | None = None,
     local_tz: str | None = None,
     created_at: datetime | None = None,
+    nli_judge: object | None = None,
 ) -> WeekChainOutcome:
     """Run one ISO week through ``sum_weekly`` (optionally refreshing its days).
 
@@ -870,6 +878,7 @@ def run_week_chain(
                 providers=providers,
                 local_tz=timezone_name,
                 created_at=created_at,
+                nli_judge=nli_judge,
             )
             steps.extend(day_outcome.steps)
             skipped.extend(day_outcome.skipped)

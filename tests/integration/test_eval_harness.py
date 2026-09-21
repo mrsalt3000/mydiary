@@ -871,6 +871,27 @@ def test_an_unavailable_instrument_fails_even_without_summaries_in_scope(
     assert "verified nothing" not in output
 
 
+def test_the_harness_arms_the_layer_gate_when_asked(models_config) -> None:
+    """T24b: the gate judge reaches the layer, so a live run measures the gated layer.
+
+    A live harness run passes the instrument the product uses; the check below is
+    that the plumbing really gets there — a contradicting judge makes the *layer*
+    refuse, and the harness grades the refusal as the failure of that check.
+    """
+    chunk = _chunk("day-01-quiet-monday")
+    outcome = harness.evaluate_chunk(
+        chunk,
+        provider=harness.ScriptedProvider(_passing(chunk)),
+        models_config=models_config,
+        gate_judge=_AllClaimsContradicted(),
+    )
+    assert "no_contradiction_with_source" in outcome.failed_checks
+    assert outcome.requests >= 2  # the gate regenerated before refusing
+
+    # The same run without the gate judge stays clean: the seam is the caller's.
+    assert _run(chunk, _passing(chunk), models_config).failed_checks == []
+
+
 def test_a_judge_that_answers_the_wrong_shape_fails_the_run(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -50,7 +50,7 @@ from diary.db.repositories import (
 from diary.db.results import list_layer_results, trace_layer_result
 from diary.domain.llm.errors import LLMStructuredOutputError
 from diary.domain.llm.models import LLMRequest, LLMResponse
-from diary.domain.pipelines.base import PipelineInvariantError
+from diary.domain.pipelines.base import PipelineInvariantError, PipelinePermanentError
 from diary.domain.pipelines.quality import GENERATION_ATTEMPTS
 from diary.domain.pipelines.sum_daily.day_input import DayInputError
 from diary.domain.pipelines.sum_daily.pipeline import ENTRIES_HEADER
@@ -540,6 +540,113 @@ def test_a_completion_that_breaks_an_invariant_stores_nothing(
     assert len(provider.requests) == GENERATION_ATTEMPTS  # a bounded regeneration
     assert list_layer_results(session, layer=ArtifactLayer.daily_summary, local_date=DAY) == []
     assert _raw_state(session) == raw_before
+
+
+class _ContradictionOnce:
+    """A judge whose first answer set contradicts and whose later ones support.
+
+    The runtime NLI gate is stochastic-defect tolerant: a contradiction means
+    «generate again», not «fail», so the first attempt is expected to be re-asked.
+    """
+
+    def load(self) -> None:
+        """No weights here; the gate calls this to prove the instrument."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, pairs):
+        self.calls += 1
+        if self.calls == 1:
+            return [{"entailment": 0.02, "contradiction": 0.97, "neutral": 0.01} for _ in pairs]
+        return [{"entailment": 0.99, "contradiction": 0.005, "neutral": 0.005} for _ in pairs]
+
+
+def test_a_contradicting_summary_is_generated_again_and_the_clean_one_is_stored(
+    session: Session,
+) -> None:
+    """T24b: the gate shares the policy of T17b — regenerate, then refuse.
+
+    The premise is the day's own text, so a claim the source contradicts can be
+    re-asked like any other stochastic slip; the clean second attempt is stored.
+    """
+    _text_message(session, body=MORNING_TEXT, created_at=_utc("2026-09-13T22:00:00"))
+    session.commit()
+    provider = _FakeProvider(_payload())
+    judge = _ContradictionOnce()
+
+    outcome = sum_daily(
+        session,
+        local_date=DAY,
+        profile=_profile(),
+        provider=provider,
+        local_tz=LOCAL_TZ,
+        judge=judge,
+    )
+
+    assert judge.calls == 2  # one contradiction, then a clean generation
+    assert len(provider.requests) == 2
+    assert len(list_layer_results(session, layer=ArtifactLayer.daily_summary, local_date=DAY)) == 1
+    assert outcome.summary.facts == list(_payload()["facts"])
+
+
+def test_a_persistently_contradicting_summary_stores_nothing(session: Session) -> None:
+    """The refusal path of the runtime gate, with the check it names and no text."""
+    _text_message(session, body=MORNING_TEXT, created_at=_utc("2026-09-13T22:00:00"))
+    session.commit()
+    raw_before = _raw_state(session)
+    provider = _FakeProvider(_payload())
+
+    class _AlwaysContradicting:
+        def load(self) -> None:
+            """No weights here; the gate calls this to prove the instrument."""
+
+        def __call__(self, pairs):
+            return [{"entailment": 0.01, "contradiction": 0.98, "neutral": 0.01} for _ in pairs]
+
+    with pytest.raises(PipelineInvariantError) as error:
+        sum_daily(
+            session,
+            local_date=DAY,
+            profile=_profile(),
+            provider=provider,
+            local_tz=LOCAL_TZ,
+            judge=_AlwaysContradicting(),
+        )
+    # Checked before the rollback: nothing was written at all.
+    assert list_layer_results(session, layer=ArtifactLayer.daily_summary, local_date=DAY) == []
+    session.rollback()
+
+    assert error.value.checks == ("no_contradiction_with_source",)
+    assert len(provider.requests) == GENERATION_ATTEMPTS
+    assert list_layer_results(session, layer=ArtifactLayer.daily_summary, local_date=DAY) == []
+    assert _raw_state(session) == raw_before
+    # The failure message stays content-free (AGENTS.md §7-8).
+    assert "Плавал" not in str(error.value)
+
+
+def test_an_unavailable_instrument_fails_the_day_permanently(session: Session) -> None:
+    """The owner's decision for T24: an unavailable instrument never means «passed»."""
+    _text_message(session, body=MORNING_TEXT, created_at=_utc("2026-09-13T22:00:00"))
+    session.commit()
+
+    class _Unavailable:
+        def load(self) -> None:
+            from diary.domain.nli.onnx_judge import NliUnavailableError
+
+            raise NliUnavailableError("/nowhere/model.onnx is missing")
+
+    with pytest.raises(PipelinePermanentError):
+        sum_daily(
+            session,
+            local_date=DAY,
+            profile=_profile(),
+            provider=_FakeProvider(_payload()),
+            local_tz=LOCAL_TZ,
+            judge=_Unavailable(),
+        )
+    assert list_layer_results(session, layer=ArtifactLayer.daily_summary, local_date=DAY) == []
+    session.rollback()
 
 
 def test_the_result_carries_no_weekly_export_reference(session: Session) -> None:

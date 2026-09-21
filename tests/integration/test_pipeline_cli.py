@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 from _migrate import upgrade_database_file
+from _pipeline_fakes import supported_nli_judge
 from sqlalchemy.orm import Session
 
 from diary.cli import main
@@ -37,6 +38,7 @@ from diary.db.repositories import MessageRepository
 from diary.db.results import list_layer_results
 from diary.db.session import create_engine, create_session_factory
 from diary.domain.llm.models import LLMRequest, LLMResponse, LLMUsage
+from diary.domain.pipelines import nli_guard
 from diary.domain.pipelines import pipeline as phase2_pipeline
 from diary.domain.pipelines import registry as pipeline_registry
 from diary.domain.pipelines.coach.registration import ensure_coach_pipeline_registered
@@ -218,6 +220,18 @@ def _stored(layer: ArtifactLayer) -> list[object]:
 # ---------------------------------------------------------------------------
 # day
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _scripted_nli_judge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Arm the gate with a double: the CLI is a production entry and gates the day.
+
+    The gate itself is tested where it lives; here the CLI only has to prove it
+    arms one (T24b). Without this the CLI would need the real 712 MB instrument,
+    which CI has neither the weights nor the extra for.
+    """
+    monkeypatch.setattr(nli_guard, "default_nli_judge", supported_nli_judge)
+    monkeypatch.setattr("diary.cli.default_nli_judge", supported_nli_judge, raising=False)
 
 
 def test_day_command_runs_the_chain_and_reports_safe_metadata(

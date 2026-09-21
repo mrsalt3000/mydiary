@@ -193,6 +193,7 @@ from diary.domain.pipelines.coach.pipeline import (
     PROMPT_PATH as COACH_PROMPT_PATH,
 )
 from diary.domain.pipelines.coach.service import coach_note
+from diary.domain.pipelines.nli_guard import default_nli_judge
 from diary.domain.pipelines.stt_fix.pipeline import (
     PROFILE_NAME as STT_PROFILE_NAME,
 )
@@ -1007,6 +1008,7 @@ def _run_layer(
     *,
     profile: OpenAICompatibleProfile,
     provider: LLMProvider,
+    gate_judge: NliJudge | None = None,
 ) -> None:
     """Run one chunk through the service of its layer (the run itself)."""
     run = ProcessingRunRepository(session).create(
@@ -1028,6 +1030,7 @@ def _run_layer(
             profile=profile,
             provider=provider,
             processing_run_id=run_id,
+            judge=gate_judge,
         )
     elif chunk.category == "week":
         assert isinstance(chunk.invariants, WeekInvariants)
@@ -1087,6 +1090,7 @@ def evaluate_chunk(
     models_config: ModelsConfig,
     profile: OpenAICompatibleProfile | None = None,
     judge: NliJudge | None = None,
+    gate_judge: NliJudge | None = None,
 ) -> ChunkOutcome:
     """Run one chunk on a throwaway database and check it.
 
@@ -1099,8 +1103,14 @@ def evaluate_chunk(
     ``judge`` is the NLI instrument of ``--nli`` (T24a): when it is given, the
     claims of a summary chunk are checked against the canonical input the layer
     saw, and the content-free metrics land in :attr:`ChunkOutcome.nli`. The
-    metrics never influence the invariant or latency counts — the instrument
-    measures, it does not (yet) gate.
+    metrics never influence the invariant or latency counts — the measurement is a
+    measurement.
+
+    ``gate_judge`` arms the **layer's own** NLI gate (T24b). A live run passes the
+    instrument the product uses, so what the harness measures is the gated layer
+    rather than a layer nobody runs in production; the CI mode passes nothing,
+    because it has neither the optional extra nor the weights (documented in
+    ``docs/nli-validation-analysis.md`` §9).
     """
     if chunk.invariants.kind not in KIND_CHECKS:
         raise HarnessError(
@@ -1141,7 +1151,13 @@ def evaluate_chunk(
         started = time.perf_counter()
         refused: PipelineInvariantError | None = None
         try:
-            _run_layer(session, chunk, profile=resolved_profile, provider=provider)
+            _run_layer(
+                session,
+                chunk,
+                profile=resolved_profile,
+                provider=provider,
+                gate_judge=gate_judge,
+            )
         except PipelineInvariantError as exc:
             # The layer refused its own output (T17b): the gate found a violated
             # invariant and stored nothing. That is the production behaviour, so
@@ -1282,6 +1298,7 @@ def evaluate_all(
     provider_factory: Callable[[GoldenChunk], LLMProvider],
     models_config: ModelsConfig,
     judge: NliJudge | None = None,
+    gate_judge: NliJudge | None = None,
 ) -> list[ChunkOutcome]:
     """Evaluate the selected chunks, one isolated database per chunk.
 
@@ -1297,7 +1314,13 @@ def evaluate_all(
             outcomes.append(_skipped_outcome(chunk))
             continue
         outcomes.append(
-            evaluate_chunk(chunk, provider=provider, models_config=models_config, judge=judge)
+            evaluate_chunk(
+                chunk,
+                provider=provider,
+                models_config=models_config,
+                judge=judge,
+                gate_judge=gate_judge,
+            )
         )
     return outcomes
 
@@ -1688,6 +1711,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         factory = ci_provider_factory
         mode = "ci"
     print(f"mode: {mode}; chunks: {len(chunks)}; config: {config_path or '<default>'}")
+    # A live run measures the layer as production runs it: with the NLI gate armed
+    # (T24b). The CI mode has neither the extra nor the weights and passes nothing.
+    gate_judge: NliJudge | None = None if mode == "ci" else default_nli_judge()
     judge: NliJudge | None = None
     if args.nli:
         try:
@@ -1704,6 +1730,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 provider_factory=factory,
                 models_config=models_config,
                 judge=judge,
+                gate_judge=gate_judge,
             )
         except NliError as exc:
             # Fail-closed on the owner's decision for T24 («если NLI недоступен —
@@ -1713,7 +1740,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"FAILED: the NLI check could not run: {exc}")
             return 1
     else:
-        outcomes = evaluate_all(chunks, provider_factory=factory, models_config=models_config)
+        outcomes = evaluate_all(
+            chunks,
+            provider_factory=factory,
+            models_config=models_config,
+            gate_judge=gate_judge,
+        )
     print(format_report(outcomes, manifest))
     summary = summarize(outcomes)
     required = len(chunks) if (args.strict or args.chunk) else manifest.threshold.pass_count

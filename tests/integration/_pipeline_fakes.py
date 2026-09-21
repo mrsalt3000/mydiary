@@ -144,3 +144,46 @@ def install_fake_llm(monkeypatch, provider: FakeLLMProvider) -> None:
     service (module-level hooks, like the Task-09 STT fakes)."""
     monkeypatch.setattr(pipeline_service, "_load_models_config", lambda: fake_models_config())
     monkeypatch.setattr(pipeline_service, "create_llm_provider", lambda profile: provider)
+
+
+class ScriptedNliJudge:
+    """A judge that answers from a table, for tests that run a gated layer.
+
+    The runtime NLI gate (T24b) is armed by the production entries, which means a
+    test that goes through the CLI or a job handler would otherwise need the real
+    712 MB instrument — and CI has neither it nor the optional extra. Tests install
+    this double instead, exactly as they install a scripted provider: the gate's own
+    behaviour is tested where it lives (``tests/unit/test_nli_guard.py`` and the day
+    layer's storage tests), and the entries' wiring is pinned by a separate test.
+
+    ``entailment`` is what every pair is answered with, so a test can choose between
+    «the source supports every claim» (the default) and «nothing is supported».
+    """
+
+    def __init__(self, entailment: float = 0.99, contradiction: float = 0.005) -> None:
+        self.entailment = entailment
+        self.contradiction = contradiction
+
+    def load(self) -> None:
+        """The double needs no weights; the gate calls this to prove the instrument."""
+
+    def __call__(self, pairs):
+        neutral = max(0.0, 1.0 - self.entailment - self.contradiction)
+        return [
+            {
+                "entailment": self.entailment,
+                "contradiction": self.contradiction,
+                "neutral": neutral,
+            }
+            for _ in pairs
+        ]
+
+
+def supported_nli_judge() -> ScriptedNliJudge:
+    """The gate-armed entries in tests: everything is supported by its source."""
+    return ScriptedNliJudge()
+
+
+def contradicting_nli_judge() -> ScriptedNliJudge:
+    """A source that contradicts every claim (used to exercise a refusal)."""
+    return ScriptedNliJudge(entailment=0.01, contradiction=0.98)

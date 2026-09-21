@@ -68,7 +68,7 @@ from diary.domain.contracts import COACH_DISCLAIMER
 from diary.domain.llm.errors import LLMStructuredOutputError
 from diary.domain.llm.models import LLMRequest, LLMResponse, LLMUsage
 from diary.domain.pipelines import registry as pipeline_registry
-from diary.domain.pipelines.base import PipelineInputError
+from diary.domain.pipelines.base import PipelineInputError, PipelineInvariantError
 from diary.domain.pipelines.coach.coach_input import CoachInputError
 from diary.domain.pipelines.coach.pipeline import PROMPT_VERSION as COACH_PROMPT_VERSION
 from diary.domain.pipelines.coach.pipeline import SUMMARY_HEADER
@@ -742,6 +742,101 @@ def test_an_injected_providers_mapping_missing_a_layer_fails_loudly(
     # before it are already committed.
     assert [run.pipeline_type for run in _runs(session)] == [PipelineType.stt_corrected]
     assert list_layer_results(session, layer=ArtifactLayer.daily_summary) == []
+
+
+def test_the_day_chain_gate_refuses_a_contradicting_summary(
+    session: Session, providers: dict[str, FakeLayerProvider]
+) -> None:
+    """T24b, behavioural: the instrument the entry armed really acts inside the chain.
+
+    Reviews of T24b found two ways for this wiring to rot quietly — an ungated path
+    (the ``run_days`` refresh) and a vacuous source assertion — so the forwarding is
+    pinned by behaviour as well: a contradicting judge must make the day step fail
+    and store nothing, while a supporting one lets the same chain pass.
+    """
+    from _pipeline_fakes import contradicting_nli_judge
+
+    _text_message(session, body=MORNING_TEXT, created_at=DAY_MORNING_UTC)
+    session.commit()
+
+    with pytest.raises(PipelineInvariantError) as error:
+        run_day_chain(
+            session,
+            local_date=DAY,
+            models_config=_models_config(),
+            providers=providers,
+            local_tz=LOCAL_TZ,
+            nli_judge=contradicting_nli_judge(),
+        )
+
+    # The refusal is loud and permanent (ADR-012): the chain does not swallow it,
+    # the worker maps the permanent error to a failed job, and nothing is stored.
+    assert error.value.checks == ("no_contradiction_with_source",)
+    assert list_layer_results(session, layer=ArtifactLayer.daily_summary, local_date=DAY) == []
+
+
+def test_the_day_chain_gate_lets_a_supported_summary_through(
+    session: Session, providers: dict[str, FakeLayerProvider]
+) -> None:
+    """The control for the test above: with a supporting judge the same chain stores."""
+    from _pipeline_fakes import supported_nli_judge
+
+    _text_message(session, body=MORNING_TEXT, created_at=DAY_MORNING_UTC)
+    session.commit()
+
+    outcome = run_day_chain(
+        session,
+        local_date=DAY,
+        models_config=_models_config(),
+        providers=providers,
+        local_tz=LOCAL_TZ,
+        nli_judge=supported_nli_judge(),
+    )
+
+    assert outcome.summary is not None
+    assert len(list_layer_results(session, layer=ArtifactLayer.daily_summary, local_date=DAY)) == 1
+
+
+def test_the_week_refresh_forwards_the_nli_gate_to_every_day(
+    session: Session, providers: dict[str, FakeLayerProvider]
+) -> None:
+    """T24b review: the ``run_days`` path is a second way to store a day summary.
+
+    The arming of the weekly entries used to rest on a source-text test alone, which
+    the review called out: the gate could be dropped from the refresh while the test
+    stayed green. This one proves the instrument actually reaches every refreshed day
+    — the days are faked, the forwarding is real, and the week part is switched off
+    by the configuration so nothing else runs.
+    """
+    import types
+
+    from diary.domain.pipelines import pipeline as phase2_pipeline
+
+    sentinel = object()
+    seen: list[object] = []
+
+    def _fake_run_day_chain(session: object, *, local_date: object, **kwargs: object):
+        seen.append(kwargs.get("nli_judge"))
+        return types.SimpleNamespace(steps=[], skipped=[])
+
+    original = phase2_pipeline.run_day_chain
+    phase2_pipeline.run_day_chain = _fake_run_day_chain
+    try:
+        outcome = run_week_chain(
+            session,
+            week_id=WEEK_ID,
+            run_days=True,
+            models_config=_models_config(stt=False, day=False, week=False, coach=False),
+            providers=providers,
+            local_tz=LOCAL_TZ,
+            nli_judge=sentinel,
+        )
+    finally:
+        phase2_pipeline.run_day_chain = original
+
+    assert len(seen) == 7  # Monday through Sunday of the ISO week
+    assert all(item is sentinel for item in seen)
+    assert outcome.steps == ()  # the week layer is off in this configuration
 
 
 def test_a_layer_without_a_profile_is_switched_off_not_an_error(
