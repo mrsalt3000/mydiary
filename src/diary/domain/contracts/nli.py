@@ -181,12 +181,29 @@ CLAIM_FIELDS: dict[str, tuple[str, ...]] = {
 #: diagnostics see everything), but they cannot condemn a summary: a topic is not
 #: an assertion, and a rule that treats it as one rejects correct work.
 #:
-#: The **weekly rollup is excluded too**, on its own measurement: a week summary is
-#: an abstraction over seven days, and the sentence-level rule condemned **all four**
-#: correct rollups of the corrected corpus at every threshold (4/4, artifact
-#: ``/tmp/nli-cal-week5.json``, documented in ``docs/nli-validation-analysis.md``
-#: §8.3.3). The rollup is an assertion in principle, so it stays out of this mapping
-#: only until the rule has a weekly formulation — the day layer is the scope today.
+#: The **weekly rollup stays excluded after its own formulation was measured** (T26,
+#: ``docs/nli-validation-analysis.md`` §10, ``ADR-015``). Two measurements say the same
+#: thing from two directions. T24a judged the whole rollup as one claim and the
+#: sentence-level conjunction condemned **all four** correct rollups at every
+#: threshold (4/4, artifact ``/tmp/nli-cal-week5.json``, §8.3.3). T26 then split the
+#: rollup into its own sentences and judged them individually — the natural next
+#: formulation — and restricted them to the sentences that name a number, a quantity
+#: or a name. Four independent runs of ten live week summaries each say the same
+#: (``/tmp/nli-cal-t26.json`` is the shipped script's artifact that carries the refusal
+#: count; §10.1 names all four): **40–67 %** of those
+#: sentences and **53–78 %** of the narrative ones were condemned at the 0.60
+#: threshold, and at the level of the layer the formulation would have refused **every
+#: one of the ten summaries** in each of the four runs — the refusal is derived from the
+#: logs of the three earlier ones and read from the artifact field of the last, where it
+#: also holds at every threshold of the 0.30–0.90 sweep (§10.1).
+#: The mechanism is measured too: the rollup is a *re-rendering* of the week, and the
+#: instrument reads its week-level anchors as contradiction — the same sentence scores
+#: entailment 0.97 against its own source sentence, and adding a week-level anchor
+#: («В субботу …», «В первый день …») drops that support to 0.01 and makes the pair a
+#: contradiction instead (0.99 and 0.97 respectively, §10.2) — and 50–74 % of the
+#: measurable sentences are not entailed by the days at all, so the rule's contradiction
+#: fallback governs them. A rule that refuses every summary is not a gate, so the week is judged
+#: by the deterministic invariants and the grounding checks, not by this one.
 PROPOSITIONAL_FIELDS: dict[str, tuple[str, ...]] = {
     "daily_summary": ("facts",),
 }

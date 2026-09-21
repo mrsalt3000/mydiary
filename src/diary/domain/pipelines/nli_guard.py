@@ -9,10 +9,12 @@ sentence entails is safe whatever the others would say, and a claim nothing supp
 is judged by its strongest contradiction against :data:`CONTRADICTION_THRESHOLD`.
 
 **Scope is deliberate and narrow.** Nominal labels are exempt (a theme read as a
-contradiction scores 0.90 on a faithful summary), the weekly rollup is exempt until
-it has its own formulation (T26), and the coaching note was never in scope: the
-gate covers what was measured, and the measurement is named next to each exemption
-in :mod:`diary.domain.contracts.nli`.
+contradiction scores 0.90 on a faithful summary), the weekly rollup stays exempt because
+its own formulation was measured and rejected (T26, ``docs/nli-validation-analysis.md``
+§10, ``ADR-015``: 40–67 % of correct measurable sentences condemned, every one of ten
+summaries refused), and the coaching note
+was never in scope: the gate covers what was measured, and the measurement is named next
+to each exemption in :mod:`diary.domain.contracts.nli`.
 
 **Policy: fail closed, and refuse rather than annotate** (ADR-012 and the owner's
 decision for T24: «если NLI недоступен — Fail»). Two things follow:
@@ -61,7 +63,8 @@ __all__ = [
 ]
 
 #: The contract the gate is written for today: the day summary (T24a measured its
-#: ``facts``; the weekly rollup waits for T26, the coach note is out of scope).
+#: ``facts``; the week's ``rollup`` was measured and rejected in T26 — see
+#: ``docs/nli-validation-analysis.md`` §10 — and the coach note is out of scope).
 GUARDED_CONTRACT = "daily_summary"
 
 #: Fixed, content-free failure when the instrument cannot be used (AGENTS.md §8).

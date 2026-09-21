@@ -31,6 +31,7 @@ from diary.domain.contracts.nli import (
     CONTRADICTION_THRESHOLD,
     ENTAILMENT,
     NEUTRAL,
+    PROPOSITIONAL_FIELDS,
     SUPPORT_THRESHOLD,
     Claim,
     NliError,
@@ -97,6 +98,23 @@ def test_an_unknown_contract_is_an_error_not_an_empty_check() -> None:
 def test_the_weekly_rollup_is_one_claim() -> None:
     claims = claims_for("weekly_summary", {"rollup": "Отправила отчёт раньше срока."})
     assert [claim.coordinate for claim in claims] == ["rollup#1"]
+
+
+def test_the_week_stays_out_of_the_contradiction_rule_after_its_own_measurement() -> None:
+    """T26: the week's formulation was measured and rejected — the scope is the day.
+
+    This test pins a *decision*, not an oversight. Two formulations were measured
+    against live week summaries: the whole rollup as one claim (T24a: 4 of 4 correct
+    rollups condemned) and the rollup's own sentences, restricted to the measurable
+    ones (T26, four independent runs: 40–67 % of the correct measurable sentences
+    condemned, and **every one of the ten summaries refused in each of the four runs** —
+    ``docs/nli-validation-analysis.md`` §10.1, ``ADR-015``). Since a formulation that
+    refuses every summary cannot gate anything, widening the scope back is a change of
+    decision and must come with its own measurement.
+    """
+    assert set(PROPOSITIONAL_FIELDS) == {"daily_summary"}
+    rollup = Claim(contract="weekly_summary", field="rollup", index=1, text="Спал 40 минут.")
+    assert rollup.is_propositional is False
 
 
 def test_sentences_split_on_punctuation_and_lines() -> None:
@@ -235,9 +253,11 @@ def test_the_weekly_rollup_is_judged_but_not_condemned() -> None:
 
     A week summary is an abstraction over seven days: the sentence-level rule
     condemned **all four** correct rollups of the corrected corpus at every
-    threshold (``docs/nli-validation-analysis.md`` §8.3.3). The rollup is still
-    judged (the support diagnostics see it), but it cannot be condemned until the
-    rule has a weekly formulation.
+    threshold (``docs/nli-validation-analysis.md`` §8.3.3), and the weekly
+    formulation that followed was measured and rejected as well — it would have
+    condemned half of the rollup's correct measurable sentences (T26, §10,
+    ``ADR-015``). The rollup is still judged (the support diagnostics see it), but it
+    cannot be condemned.
     """
     judge = scripted(
         {("Плавал в бассейне сорок минут.", "Ходила в бассейн ежедневно."): _row(0.05, 0.95, 0.0)}
