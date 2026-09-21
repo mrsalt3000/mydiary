@@ -110,9 +110,33 @@ def sum_daily(
     pipeline = SumDailyPipeline()
 
     def generate(_attempt: int) -> DailySummary:
-        request = pipeline.build_request(entries=day_entries)
-        response = provider.complete(request)
-        return pipeline.parse_result(response, local_date=local_date)
+        """Summarize the day, splitting it by entries only when it does not fit.
+
+        The budget rule (T23) is the weekly layer's: prompt + entries + the
+        generation cap must fit ``num_ctx``. A day that fits one window takes
+        exactly the single-call path it always took; a longer day is split into
+        ordered parts that each fit, every part is summarized with the *same*
+        prompt, and the partial summaries are folded back into one day by the
+        merge template. Nothing is dropped: the parts partition the entries in
+        order, and the merge is validated against the same contract, so the
+        stored artifact is still one :class:`DailySummary` — chunking cannot
+        change the shape of what is stored, only how the model got there.
+        """
+        parts = pipeline.chunk_entries(day_entries, profile=profile)
+        if len(parts) == 1:
+            request = pipeline.build_request(entries=day_entries)
+            response = provider.complete(request)
+            return pipeline.parse_result(response, local_date=local_date)
+        partials = [
+            pipeline.parse_result(
+                provider.complete(pipeline.build_request(entries=part)),
+                local_date=local_date,
+            )
+            for part in parts
+        ]
+        merge_request = pipeline.build_merge_request(partials, local_date=local_date)
+        pipeline.require_merge_fits(merge_request, profile=profile)
+        return pipeline.parse_result(provider.complete(merge_request), local_date=local_date)
 
     guard = (
         None

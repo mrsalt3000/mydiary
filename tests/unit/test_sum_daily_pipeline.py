@@ -41,10 +41,15 @@ from diary.domain.llm.errors import LLMStructuredOutputError
 from diary.domain.llm.models import LLMRequest, LLMResponse
 from diary.domain.pipelines import naming
 from diary.domain.pipelines import registry as pipeline_registry
+from diary.domain.pipelines.base import PipelinePermanentError
 from diary.domain.pipelines.sum_daily import service as sum_daily_service
 from diary.domain.pipelines.sum_daily.day_input import DayInputError
 from diary.domain.pipelines.sum_daily.pipeline import (
     ENTRIES_HEADER,
+    MERGE_PROMPT_PATH,
+    MERGE_PROMPT_VERSION,
+    NUM_CTX,
+    PARTS_HEADER,
     PROMPT_PATH,
     PROMPT_VERSION,
     SumDailyPipeline,
@@ -454,3 +459,252 @@ def test_run_sum_daily_arms_the_nli_gate(monkeypatch) -> None:
 
     assert built == ["armed"]
     assert captured["judge"] is judge
+
+
+# ---------------------------------------------------------------------------
+# the context budget (T23): a day that fits is untouched, a longer day is split
+# ---------------------------------------------------------------------------
+
+#: A message long enough that a day of them cannot fit one window: with the
+#: prompt at ~2124 estimated tokens and the budget at 4096, twelve of these
+#: (400 + the JSON envelope) overflow, while each one alone fits with room.
+_LONG_TEXT = "Записала, как прошёл день, и что было сделано за это время. " * 7
+
+
+def _long_entries(count: int) -> list[RawEntry]:
+    return [
+        _entry(
+            text=f"{index:02d} {_LONG_TEXT}",
+            entry_id=uuid.UUID(f"{index:08d}-1111-4111-8111-111111111111"),
+        )
+        for index in range(1, count + 1)
+    ]
+
+
+def test_a_day_that_fits_one_window_is_one_part_and_one_request() -> None:
+    """The ordinary case must be exactly the single call it always was (T23 DoD 5)."""
+    pipeline = SumDailyPipeline()
+    entries = _entries()
+
+    parts = pipeline.chunk_entries(entries, profile=_profile())
+
+    assert parts == [entries]  # one part, the same objects in the same order
+    # ...and that part's request is byte-for-byte the request of the old path.
+    assert pipeline.build_request(entries=entries).messages[0].content == (
+        pipeline.build_request(entries=parts[0]).messages[0].content
+    )
+
+
+def test_a_long_day_is_split_without_losing_or_duplicating_a_message() -> None:
+    """The parts partition the day: same messages, same order, each part fits."""
+    pipeline = SumDailyPipeline()
+    entries = _long_entries(12)
+    profile = _profile()
+
+    parts = pipeline.chunk_entries(entries, profile=profile)
+
+    assert len(parts) > 1, "the fixture must exceed one window"
+    assert [entry.id for part in parts for entry in part] == [entry.id for entry in entries]
+    for part in parts:
+        request = pipeline.build_request(entries=part)
+        assert pipeline.request_fits(request, profile=profile), len(part)
+
+
+def test_the_budget_is_the_same_rule_as_the_weekly_layer() -> None:
+    """One rule, two layers (T23 DoD 3): no drift between them or with the harness."""
+    from diary.domain.pipelines.sum_weekly.pipeline import SumWeeklyPipeline
+
+    profile = _profile()
+    assert SumDailyPipeline.input_budget_tokens(profile) == NUM_CTX - profile.max_tokens
+    assert SumDailyPipeline.input_budget_tokens(profile) == SumWeeklyPipeline.input_budget_tokens(
+        profile
+    )
+
+
+def test_a_message_that_cannot_fit_alone_fails_loudly() -> None:
+    """A day cannot be split through the middle of a message."""
+    pipeline = SumDailyPipeline()
+    huge = _entry(text="x" * 20_000)
+
+    with pytest.raises(PipelinePermanentError, match="does not fit the context window"):
+        pipeline.chunk_entries([huge], profile=_profile())
+
+
+def test_the_merge_request_carries_the_parts_content_fields_in_order() -> None:
+    pipeline = SumDailyPipeline()
+    parts = [
+        DailySummary(
+            date=DAY, facts=["Первое."], themes=["работа"], energy=None, open_questions=[]
+        ),
+        DailySummary(
+            date=DAY, facts=["Второе."], themes=[], energy="low", open_questions=["Вопрос?"]
+        ),
+    ]
+
+    request = pipeline.build_merge_request(parts, local_date=DAY)
+
+    assert request.prompt_version == MERGE_PROMPT_VERSION
+    content = request.messages[0].content
+    assert PARTS_HEADER in content
+    assert content.index("Первое.") < content.index("Второе.")
+    payload = json.loads(content.split(PARTS_HEADER, 1)[1].strip())
+    assert payload == [
+        {"facts": ["Первое."], "themes": ["работа"], "energy": None, "open_questions": []},
+        {"facts": ["Второе."], "themes": [], "energy": "low", "open_questions": ["Вопрос?"]},
+    ]
+    # The anchor is the backend's: the parts do not carry a date into the prompt.
+    assert "2026-09-14" not in content
+
+
+def test_a_part_of_another_day_cannot_be_folded_back() -> None:
+    pipeline = SumDailyPipeline()
+    foreign = DailySummary(date=date(2026, 9, 13), facts=["Чужой день."])
+
+    with pytest.raises(PipelinePermanentError, match="another day"):
+        pipeline.build_merge_request([foreign], local_date=DAY)
+
+
+def test_an_empty_part_list_fails_loudly() -> None:
+    with pytest.raises(PipelinePermanentError, match="no partial summaries"):
+        SumDailyPipeline().build_merge_request([], local_date=DAY)
+
+
+def test_a_merge_that_does_not_fit_fails_loudly() -> None:
+    """The merge input is bounded by the parts; an unfittable one is not sent."""
+    pipeline = SumDailyPipeline()
+    profile = _profile()
+    parts = [
+        DailySummary(date=DAY, facts=[_LONG_TEXT * 2], themes=[], energy=None, open_questions=[])
+        for _ in range(20)
+    ]
+
+    request = pipeline.build_merge_request(parts, local_date=DAY)
+
+    assert not pipeline.request_fits(request, profile=profile)
+    with pytest.raises(PipelinePermanentError, match="do not fit one context window"):
+        pipeline.require_merge_fits(request, profile=profile)
+
+
+def test_the_merge_prompt_is_v2_and_states_the_four_fields_and_energy_rule() -> None:
+    assert MERGE_PROMPT_VERSION == "v2"
+    assert MERGE_PROMPT_PATH.is_file()
+    text = MERGE_PROMPT_PATH.read_text(encoding="utf-8")
+    for field in ("facts", "themes", "energy", "open_questions"):
+        assert field in text
+    # The energy rule is the layer's veto, so the merge must restate it: null
+    # unless the parts name the level, and no indirect inference.
+    assert "null" in text
+    assert "энергии" in text
+    # The merge must not become a place where advice/сausality sneak in.
+    assert "совет" in text
+    assert "причин" in text
+
+
+class _ScriptedProvider:
+    """A provider answering call by call, so the chunked path is observable."""
+
+    def __init__(self, responses: list[LLMResponse]) -> None:
+        self._responses = list(responses)
+        self.requests: list[LLMRequest] = []
+
+    def complete(self, request: LLMRequest) -> LLMResponse:
+        self.requests.append(request)
+        if not self._responses:
+            raise AssertionError("the layer made more calls than the script provides")
+        return self._responses.pop(0)
+
+
+def test_a_long_day_is_summarized_in_parts_and_then_folded_back_once(
+    store: _RecordingStore,
+) -> None:
+    """End to end: parts get the day prompt, the merge gets the merge prompt.
+
+    What is stored is still one validated :class:`DailySummary` (T23 DoD 4): the
+    split changes how the model got there, not the shape or the anchor.
+    """
+    entries = _long_entries(12)
+    part_payload = {"facts": ["Часть дня."], "themes": [], "energy": None}
+    merged_payload = {
+        "facts": ["Первая часть дня.", "Вторая часть дня."],
+        "themes": ["день"],
+        "energy": None,
+    }
+    provider = _ScriptedProvider(
+        [
+            _json_response(part_payload),
+            _json_response(part_payload),
+            _json_response(merged_payload),
+        ]
+    )
+
+    outcome = sum_daily_service.sum_daily(
+        None,  # type: ignore[arg-type]
+        local_date=DAY,
+        profile=_profile(),
+        provider=provider,
+        local_tz=LOCAL_TZ,
+        entries=entries,
+    )
+
+    assert len(provider.requests) == 3, "two parts and one merge"
+    assert [request.prompt_version for request in provider.requests] == [
+        PROMPT_VERSION,
+        PROMPT_VERSION,
+        MERGE_PROMPT_VERSION,
+    ]
+    assert outcome.summary.facts == ["Первая часть дня.", "Вторая часть дня."]
+    assert outcome.summary.date == DAY
+    # One stored artifact, under the day anchor: chunking does not multiply rows.
+    assert len(store.calls) == 1
+    assert store.calls[0]["result"] is outcome.summary
+
+
+def test_an_unfittable_merge_is_refused_before_it_is_sent(store: _RecordingStore) -> None:
+    """The merge has its own budget check, and it must be the last call (T23 DoD 4).
+
+    The parts partition the day, so they fit by construction; what does not fit by
+    construction is their *folded* text, which is bounded only by the generation cap.
+    A review of T23 found this check pinned by no test: deleting it left the suite
+    green, so a day whose parts cannot be folded back would have been sent anyway and
+    silently truncated. Here the parts are large enough that the merge cannot fit —
+    the layer must fail loudly and make no merge call at all.
+    """
+    entries = _long_entries(12)
+    huge_part = {
+        "facts": ["Запись дня, перечисленная подробно." * 12 for _ in range(30)],
+        "themes": [],
+        "energy": None,
+    }
+    provider = _ScriptedProvider([_json_response(huge_part) for _ in range(8)])
+
+    with pytest.raises(PipelinePermanentError, match="do not fit one context window"):
+        sum_daily_service.sum_daily(
+            None,  # type: ignore[arg-type]
+            local_date=DAY,
+            profile=_profile(),
+            provider=provider,
+            local_tz=LOCAL_TZ,
+            entries=entries,
+        )
+
+    # Every part was summarized; the merge was refused *before* being sent, so the
+    # provider saw one call per part and nothing else.
+    assert len(provider.requests) > 1
+    assert all(request.prompt_version == PROMPT_VERSION for request in provider.requests)
+    assert store.calls == []
+
+
+def test_a_day_that_fits_still_makes_exactly_one_call(store: _RecordingStore) -> None:
+    provider = _ScriptedProvider([_json_response(_VALID_PAYLOAD)])
+
+    sum_daily_service.sum_daily(
+        None,  # type: ignore[arg-type]
+        local_date=DAY,
+        profile=_profile(),
+        provider=provider,
+        local_tz=LOCAL_TZ,
+        entries=_entries(),
+    )
+
+    assert len(provider.requests) == 1
+    assert provider.requests[0].prompt_version == PROMPT_VERSION

@@ -18,7 +18,12 @@ set of vetoes:
 * **no facts beyond the input** — numbers, names, events and motives come from
   the day's messages only;
 * **one day per run** — the input is the day's messages and nothing else; days
-  are never aggregated "while we are at it" (that is the weekly layer, T06).
+  are never aggregated "while we are at it" (that is the weekly layer, T06);
+* **never more than the context window** (T23) — prompt + entries + the
+  generation cap must fit ``num_ctx``, estimated with the eval contract's
+  coefficient. A day that fits one window is summarized in one call exactly as
+  before; a longer day is split by entries, each part is summarized with the same
+  prompt, and the parts are folded back into one day by the merge template.
 
 The day's messages are **immutable input**: the selector reads ``messages``,
 ``audio_files`` and ``transcriptions`` only, and the layer's single write path
@@ -53,6 +58,10 @@ from diary.domain.pipelines.sum_daily.day_input import (
 )
 from diary.domain.pipelines.sum_daily.pipeline import (
     ENTRIES_HEADER,
+    MERGE_PROMPT_PATH,
+    MERGE_PROMPT_VERSION,
+    NUM_CTX,
+    PARTS_HEADER,
     PROFILE_NAME,
     PROMPT_PATH,
     PROMPT_VERSION,
@@ -63,6 +72,10 @@ from diary.domain.pipelines.sum_daily.service import SumDailyOutcome, run_sum_da
 
 __all__ = [
     "ENTRIES_HEADER",
+    "MERGE_PROMPT_PATH",
+    "MERGE_PROMPT_VERSION",
+    "NUM_CTX",
+    "PARTS_HEADER",
     "PROFILE_NAME",
     "PROMPT_PATH",
     "PROMPT_VERSION",

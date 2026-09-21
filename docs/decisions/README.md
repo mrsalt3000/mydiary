@@ -48,3 +48,4 @@
 | [ADR-013](ADR-013-window-budget-is-prompt-plus-input-plus-cap.md) | Бюджет окна — обязательство: промпт + вход + лимит генерации ≤ `num_ctx`; оценка промпта из файла, гейт коуча, `max_tokens` коуча 2048 (T20/T21) | Accepted | 2026-09-20 |
 | [ADR-014](ADR-014-runtime-nli-gate-for-the-day-layer.md) | Слой дня отказывается писать сводку, противоречащую источнику (NLI-гейт в рантайме; T24b) | Accepted | 2026-09-21 |
 | [ADR-015](ADR-015-weekly-rollup-stays-out-of-the-contradiction-rule.md) | Недельный rollup остаётся вне правила противоречия: недельная формулировка измерена и отвергнута по числам (T26) | Proposed | 2026-09-21 |
+| [ADR-016](ADR-016-day-layer-context-budget.md) | Дневной слой считает бюджет окна и делит день по записям, а не отвергает его (T23; промпт сведения `sum_daily/v2.md`) | Proposed | 2026-09-21 |

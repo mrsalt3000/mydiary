@@ -153,10 +153,12 @@ neutral» плюс три ложных `no_new_facts`. NLI проверяет **
 
 ## 7. Воспроизведение
 
-Пробы и модель (не в репозитории): `/tmp/nli-probe` (683 МБ: `cases.json`,
+Пробы и модель жили вне репозитория, в `/tmp`: `/tmp/nli-probe` (683 МБ: `cases.json`,
 `judge_probe.py`, `judge_probe2.py`, `nli_probe.py`, `real_summary_probe.py`,
 `model/{model.onnx,tokenizer.json,config.json}`) и `/tmp/nli-venv` (157 МБ:
-`tokenizers` + `onnxruntime`). Проба B запускалась как
+`tokenizers` + `onnxruntime`). **Перезагрузка машины стёрла `/tmp` (tmpfs), поэтому проб сейчас нет** —
+воспроизводит штатный путь: `scripts/calibrate_nli.py` (веса — `scripts/fetch-nli-model.sh`, extra
+`nli`). Историческая команда пробы B:
 `OLLAMA_API_KEY=ollama .venv/bin/python /tmp/nli-probe/real_summary_probe.py day-03-family-saturday`
 (создаёт временную БД, живой вызов слоя дня, затем NLI по утверждениям; рабочая база не
 затрагивается). Вся проба — на синтетике golden-набора, реальных записей дневника в ней нет.
@@ -320,11 +322,12 @@ APP_NLI_MODEL_DIR=<dir> OLLAMA_API_KEY=ollama .venv/bin/python scripts/calibrate
 подделки синтетические (число +31, инверсии по
 курируемому списку), метка «чистый» означает «не пойман детерминированными проверками», а не
 «верен»; измерено на одной модели с одним набором параметров. Таблицы §8.2 воспроизводятся
-командой выше и лежат в `/tmp/nli-cal-day4.json`, недельные числа — в `/tmp/nli-cal-week5.json`
+командой выше и лежали в `/tmp/nli-cal-day4.json`, недельные числа — в `/tmp/nli-cal-week5.json`
 (формулировка до T26), числа T26 — в четырёх артефактах `/tmp/nli-cal-t26-intermediate.json`,
 `/tmp/nli-cal-t26-precounters.json`, `/tmp/nli-cal-t26-run3.json`, `/tmp/nli-cal-t26.json` и их логах
 (`/tmp/t26.log`, `/tmp/t26-run2-precounters.log`, `/tmp/t26-run3.log`, `/tmp/t26-final.log`) (§10.1),
-числа T25 — в `/tmp/t25.log`.
+числа T25 — в `/tmp/t25.log`. **Все эти артефакты стёрты перезагрузкой машины 2026-09-22**
+(`/tmp` — tmpfs, §7): воспроизводимость держат команды и записанные числа, а не файлы в `/tmp`.
 
 ## 9. NLI в рантайме: гейт слоя дня (T24b, `ADR-014`)
 
