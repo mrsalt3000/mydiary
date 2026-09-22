@@ -37,6 +37,7 @@ from diary.core.models_config import OpenAICompatibleProfile
 from diary.core.settings import get_settings
 from diary.db.models import ArtifactLayer, PipelineType
 from diary.domain.contracts import DailySummary, RawEntry
+from diary.domain.contracts.golden import estimate_request_tokens, estimate_tokens
 from diary.domain.llm.errors import LLMStructuredOutputError
 from diary.domain.llm.models import LLMRequest, LLMResponse
 from diary.domain.pipelines import naming
@@ -528,6 +529,76 @@ def test_a_message_that_cannot_fit_alone_fails_loudly() -> None:
 
     with pytest.raises(PipelinePermanentError, match="does not fit the context window"):
         pipeline.chunk_entries([huge], profile=_profile())
+
+
+#: A day of voice messages that are not transcribed yet — T39's worst realistic
+#: day. Every entry carries an empty ``text`` and the server-generated
+#: ``audio_path`` (a second UUID-shaped string), so its ``raw_entry`` is the most
+#: structural payload the layer can build.
+_UNTRANSCRIBED_VOICE_DAY = 20
+
+
+def _untranscribed_voice_entries(count: int = _UNTRANSCRIBED_VOICE_DAY) -> list[RawEntry]:
+    return [
+        RawEntry(
+            id=uuid.UUID(f"{index:08d}-2222-4222-8222-222222222222"),
+            ts=datetime(2026, 9, 14, 6, 0, tzinfo=timezone.utc),
+            source="voice",
+            text="",
+            audio_path=f"audio/2026/09/{index:08d}-2222-4222-8222-222222222222.webm",
+        )
+        for index in range(1, count + 1)
+    ]
+
+
+def test_the_gate_refuses_the_call_the_prose_estimate_let_through() -> None:
+    """T39: the prose coefficient accepted a call the endpoint measured over budget.
+
+    Measured on 2026-09-22 with the ``diary-sum`` tag of this machine (the
+    endpoint's own ``prompt_eval_count``; the payload and the whole call are the
+    very strings asserted below): this day's **payload** is 3640 characters and
+    measured **2602** tokens, its **call** is 9010 characters and measured
+    **4543**, and the prose estimate priced that call at **3604** against the 4096
+    budget — so the gate sent a request that could not fit the window
+    (4543 + 4096 > 8192), exactly the silent-truncation class T23 was built
+    against. The structural estimate prices the same call at **4981**, and the day
+    is split so that every call it makes fits.
+    """
+    pipeline = SumDailyPipeline()
+    profile = _profile()
+    entries = _untranscribed_voice_entries()
+    request = pipeline.build_request(entries=entries)
+    content = request.messages[0].content
+    payload = content.split(f"\n\n{ENTRIES_HEADER}\n", 1)[1]
+    budget = SumDailyPipeline.input_budget_tokens(profile)
+
+    assert len(payload) == 3640, "the measured payload"
+    assert len(content) == 9010, "the measured call"
+    assert estimate_request_tokens(payload) >= 2602  # above the measured payload cost
+    assert 4543 + profile.max_tokens > NUM_CTX  # the measured call did not fit the window
+    assert estimate_tokens(len(content)) == 3604 <= budget  # the old gate accepted it anyway
+    assert not pipeline.request_fits(request, profile=profile)  # the gate does not
+
+    parts = pipeline.chunk_entries(entries, profile=profile)
+    assert len(parts) > 1, "the oversized call must be split, not sent"
+    assert [entry.id for part in parts for entry in part] == [entry.id for entry in entries]
+    for part in parts:
+        assert pipeline.request_fits(pipeline.build_request(entries=part), profile=profile), len(
+            part
+        )
+
+
+def test_the_payload_markers_stay_out_of_the_prompt_templates() -> None:
+    """The structural split (T39) is exact only while the prompts stay out of the way.
+
+    The gate finds a request's JSON payload by the header line the layer itself
+    wrote, so a prompt carrying that line would be charged as JSON — and, worse,
+    split at the wrong place. Both versioned prompts are pinned here: the
+    assumption is a property of the files, not of a comment.
+    """
+    for prompt in (SumDailyPipeline().load_prompt(), SumDailyPipeline().load_merge_prompt()):
+        for header in (ENTRIES_HEADER, PARTS_HEADER):
+            assert header not in prompt
 
 
 def test_the_merge_request_carries_the_parts_content_fields_in_order() -> None:

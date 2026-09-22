@@ -40,7 +40,7 @@ from diary.core.models_config import ModelsConfig, OpenAICompatibleProfile, load
 from diary.core.settings import PROJECT_ROOT
 from diary.db.models import ArtifactLayer
 from diary.db.results import list_layer_results
-from diary.domain.contracts import DailySummary
+from diary.domain.contracts import DailySummary, RawEntry
 from diary.domain.contracts.golden import (
     DEFAULT_NUM_CTX,
     PROFILE_MAX_TOKENS,
@@ -217,13 +217,20 @@ def test_a_part_that_does_not_fit_the_window_is_named_as_a_context_budget_violat
 def test_a_declared_split_the_layer_does_not_make_is_a_violation(
     long_day: GoldenChunk, day_profile: OpenAICompatibleProfile
 ) -> None:
-    """A declaration is graded, not trusted: three declared parts, two really made."""
-    three = long_day.model_copy(
-        update={"budget": long_day.budget.model_copy(update={"chunks_planned": 3})}
+    """A declaration is graded, not trusted: one declared part more than the layer makes.
+
+    The real count belongs to the layer's own budget rule and moves with it (T39
+    closed the parts of this chunk earlier, so the count is no longer the two of
+    T35), and the declaration is built from that count instead of a number the
+    rule can outgrow.
+    """
+    real = len(_parts(long_day, day_profile))
+    declared = long_day.model_copy(
+        update={"budget": long_day.budget.model_copy(update={"chunks_planned": real + 1})}
     )
-    violations = harness.check_budget(three, profile=day_profile)
+    violations = harness.check_budget(declared, profile=day_profile)
     assert [violation.check for violation in violations] == [harness.PARTS_CHECK]
-    assert "3" in violations[0].detail
+    assert str(real + 1) in violations[0].detail
 
 
 def test_a_declared_split_that_cannot_be_made_is_a_violation(
@@ -274,6 +281,60 @@ def test_the_fold_back_carries_every_part_and_the_whole_day(
         body = json.loads(request.messages[0].content.rsplit(ENTRIES_HEADER, 1)[-1].strip())
         delivered.extend(entry["text"] for entry in body)
     assert delivered == texts
+
+
+def test_the_part_the_prose_estimate_accepted_is_refused_by_the_gate(
+    long_day: GoldenChunk, day_profile: OpenAICompatibleProfile
+) -> None:
+    """T39 as arithmetic on this chunk: the call the old gate let through was over budget.
+
+    The live run of 2026-09-22 measured **4493** input tokens for the biggest part
+    the prose estimate closed (``eval/golden/README.md``); ``4493 + 4096 > 8192``,
+    so that call could not fit the window, and the harness named it
+    (``measured_context_budget``). The regression is the same claim on the chunk's
+    own input: the part the prose rule accepts is under the budget by that rule,
+    over it by the layer's gate, and the day the gate splits has no such part.
+    """
+    pipeline = SumDailyPipeline()
+    budget = SumDailyPipeline.input_budget_tokens(day_profile)
+    accepted = _entries(long_day)[:22]  # the first part the prose rule closed
+    request = pipeline.build_request(entries=accepted)
+    content = request.messages[0].content
+
+    assert estimate_tokens(len(content)) <= budget  # the prose rule accepted the call
+    assert not pipeline.request_fits(request, profile=day_profile)  # the gate does not
+    # ...because the estimate is now above the endpoint's own count for it.
+    assert SumDailyPipeline.content_tokens(content) >= 4493
+
+    parts = _parts(long_day, day_profile)
+    assert len(parts) >= 3, "the gate closes the parts earlier than the prose rule did"
+    for part in parts:
+        assert pipeline.request_fits(pipeline.build_request(entries=part), profile=day_profile)
+
+
+def test_the_correction_does_not_split_a_golden_day_that_fits(
+    day_profile: OpenAICompatibleProfile,
+) -> None:
+    """T39 DoD 4 on the corpus: only the day that measured over the window changes.
+
+    The three short golden days (three entries each) are one call before and after
+    the correction — the coefficient must not start splitting a day that fits — and
+    the long day, whose biggest part measured 4493, is split further than the
+    declared two parts. The verdict per chunk is read from the layer's own chunker,
+    not assumed from the coefficient.
+    """
+    _manifest, chunks = harness.load_golden_set()
+    pipeline = SumDailyPipeline()
+    day_chunks = [chunk for chunk in chunks if chunk.category == "day"]
+    assert len(day_chunks) == 4  # three short days and the long one
+    for chunk in day_chunks:
+        entries = [item for item in chunk.input if isinstance(item, RawEntry)]
+        parts = pipeline.chunk_entries(entries, profile=day_profile)
+        if chunk.budget.chunks_planned == 1:
+            assert len(parts) == 1, chunk.id
+        else:
+            assert chunk.id == LONG_DAY
+            assert len(parts) >= 3, chunk.id
 
 
 def test_the_summary_of_the_parts_equals_the_summary_of_one_call(
@@ -333,40 +394,49 @@ def _outcome_with_usages(
 
 
 def test_the_measured_figure_is_the_largest_call_not_the_last(
-    long_day: GoldenChunk, models_config: ModelsConfig
+    long_day: GoldenChunk, day_profile: OpenAICompatibleProfile, models_config: ModelsConfig
 ) -> None:
-    """T35 DoD 2: the report names the largest part, not the fold-back."""
+    """T35 DoD 2: the report names the largest part, not the fold-back.
+
+    The number of calls is the layer's own (T39 made it larger for this chunk), so
+    the scripted usage follows the real count: a large first part, smaller parts,
+    and the smallest last call (the fold-back).
+    """
+    parts = len(_parts(long_day, day_profile))
     usages = [
         LLMUsage(input_tokens=3000, output_tokens=200),  # first part
-        LLMUsage(input_tokens=1200, output_tokens=200),  # second part
+        *[LLMUsage(input_tokens=1200, output_tokens=200) for _ in range(parts - 1)],
         LLMUsage(input_tokens=100, output_tokens=200),  # the fold-back
     ]
     outcome = _outcome_with_usages(long_day, usages, models_config)
-    assert outcome.requests == 3
+    assert outcome.requests == parts + 1
     assert outcome.usage is not None and outcome.usage.input_tokens == 3000
     report = harness.format_report([outcome], harness.golden_manifest())
     assert "max call per category: day 3000 (cap 4096)" in report
     # The row names the call count, so a split day is visible as one: the columns
     # are chunk, category, profile, latency, calls, result, failed checks.
     row = next(line for line in report.splitlines() if line.startswith(LONG_DAY))
-    assert row.split()[4] == "3"
+    assert row.split()[4] == str(parts + 1)
 
 
 def test_a_large_part_call_is_caught_by_the_measured_budget(
-    long_day: GoldenChunk, models_config: ModelsConfig
+    long_day: GoldenChunk, day_profile: OpenAICompatibleProfile, models_config: ModelsConfig
 ) -> None:
     """The defect itself: a huge first call used to hide behind a small last one.
 
     The window is a property of one call, so the check compares the **largest**
     measured call. With the fold-back small and a part over the window, the old code
-    (``last_usage``) stayed silent while a call really did overflow.
+    (``last_usage``) stayed silent while a call really did overflow. The call count
+    is the layer's own, as in the test above.
     """
     usages = [
         LLMUsage(input_tokens=8000, output_tokens=10),  # a part over the window
-        LLMUsage(input_tokens=50, output_tokens=10),
-        LLMUsage(input_tokens=50, output_tokens=10),
+        *[
+            LLMUsage(input_tokens=50, output_tokens=10)
+            for _ in range(len(_parts(long_day, day_profile)))
+        ],
     ]
     outcome = _outcome_with_usages(long_day, usages, models_config)
     assert outcome.failed_checks == ["measured_context_budget"]
     assert "8000" in outcome.violations[0].detail
-    assert "largest of 3 call(s)" in outcome.violations[0].detail
+    assert f"largest of {outcome.requests} call(s)" in outcome.violations[0].detail

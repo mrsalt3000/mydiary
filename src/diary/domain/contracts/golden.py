@@ -105,6 +105,46 @@ WEEKLY_SPLIT_NUM_CTX = 16384
 #: token. Deliberately a documented constant so the estimate is reproducible.
 CHARS_PER_TOKEN_EST = 2.5
 
+#: Characters per token of the **structural** characters of a layer request —
+#: JSON syntax, field names, identifiers, timestamps and digits. Deliberately
+#: lower than :data:`CHARS_PER_TOKEN_EST`: those characters do not merge the
+#: way Cyrillic prose does.
+#:
+#: Measurement (T39, 2026-09-22; ``diary-sum`` on this machine, the endpoint's
+#: own ``prompt_eval_count`` over the exact string — ``raw: true``
+#: ``/api/generate``, one generated token, ``OLLAMA_KEEP_ALIVE=0``):
+#:
+#: ================================  =========  =======  =============
+#: probe                             chars      tokens   chars/token
+#: ================================  =========  =======  =============
+#: UUID lines                        1109       1109     1.00
+#: ISO timestamps                    629        629      1.00
+#: ``raw_entry`` skeleton (text)     3209       2339     1.37
+#: ``raw_entry`` skeleton (voice)    3640       2602     1.40
+#: day prompt (``v1.md``)            5310       1923     2.76
+#: day payload, long day part 1      4853       2540     1.91
+#: synthetic Russian entry           1699       539      3.15
+#: ================================  =========  =======  =============
+#:
+#: The two skeletons are the worst payloads the product can build: an entry's
+#: ``id``/``ts``/``source``/``text`` wrapper with an empty text, and its voice
+#: twin, which adds the server-generated ``audio_path`` (a second UUID-shaped
+#: string) — i.e. a day whose messages are voice and not transcribed yet, as
+#: ``raw_entry`` allows. They measure 1.37 and 1.40 characters per token, so 1.25 is
+#: 8.8 % and 10.7 % *below* the measured ratio, which leaves the estimate 5.7 % and
+#: 8.9 % of headroom over the tightest realistic case (spaces are charged at the
+#: prose coefficient). The bare UUID and
+#: timestamp probes (1.00, one token per character) are degenerate shapes no
+#: ``raw_entry`` payload can take, because every entry also carries JSON syntax
+#: and field names; they bound the class from below, not the product.
+#:
+#: The earlier 2.5 was measured on Cyrillic prose (T20; there it stayed 4–24 %
+#: *above* the endpoint) and on the probes of T39 it measures 10–26 % *above* the
+#: endpoint; applied to a JSON-heavy payload it measured up to 45 % *below* the
+#: endpoint on the tightest structural probe, which is the T39 defect (see
+#: :func:`estimate_request_tokens` and ``ADR-016``).
+JSON_CHARS_PER_TOKEN_EST = 1.25
+
 #: Lexemes that must not appear in any generated text field of a golden
 #: output: diagnostic labels, treatment plans and prescriptive advice
 #: (AGENTS.md §16; ADR-006). The check excludes fixed constant fields.
@@ -826,6 +866,44 @@ def input_char_count(chunk: GoldenChunk) -> int:
 def estimate_tokens(char_count: int) -> int:
     """Token estimate of ``char_count`` characters of Russian text."""
     return math.ceil(char_count / CHARS_PER_TOKEN_EST)
+
+
+def is_cyrillic(char: str) -> bool:
+    """Whether ``char`` is a Cyrillic letter (``ё`` included)."""
+    return "а" <= char.lower() <= "я"
+
+
+def estimate_request_tokens(text: str) -> int:
+    """Conservative token estimate of a layer request's JSON-bearing part (T39).
+
+    Two classes, each with its own measured coefficient:
+
+    * **Cyrillic prose** — Cyrillic letters and whitespace — at
+      :data:`CHARS_PER_TOKEN_EST` (2.5). Measured on the day prompt (2.76) and on
+      synthetic Russian entries (3.15), so here the *estimate* stays 10–26 % above the
+      endpoint, exactly as T20 decided it should.
+    * **everything else** — Latin letters, digits, punctuation and JSON syntax —
+      at :data:`JSON_CHARS_PER_TOKEN_EST` (1.25), measured on the payloads the day
+      layer really sends (1.37 for an empty-text entry skeleton, 1.91 for the
+      long day's biggest part, 1.00 for a bare UUID or timestamp).
+
+    The single coefficient of :func:`estimate_tokens` is a *prose* coefficient:
+    the day layer applied it to a JSON payload, where it measured 9 % below the
+    endpoint on the long golden day (4090 estimated against 4493 measured) and up
+    to 45 % below it on the tightest realistic payload (1284 estimated against 2339
+    measured), and the request it let through did not fit the 8192 window once the
+    generation cap was added (4493 + 4096 > 8192). Charging the structural
+    characters separately
+    is what makes the same gate conservative again: the day is split so that every
+    call fits **by the endpoint's own count**, not by a prose coefficient applied
+    to JSON (the numbers are in ``ADR-016``, the table in the module constant).
+
+    Deliberately not a tokenizer: like every estimate in this module it is a
+    documented, reproducible upper bound, not the model's real count.
+    """
+    prose = sum(1 for char in text if is_cyrillic(char) or char.isspace())
+    structural = len(text) - prose
+    return math.ceil(prose / CHARS_PER_TOKEN_EST) + math.ceil(structural / JSON_CHARS_PER_TOKEN_EST)
 
 
 def coach_disclaimer() -> str:

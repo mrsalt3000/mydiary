@@ -16,7 +16,13 @@ Responsibilities
   versioned template (:meth:`~SumDailyPipeline.build_merge_request`). The budget
   is ``num_ctx - profile.max_tokens`` estimated with the eval contract's
   ``CHARS_PER_TOKEN_EST`` — the rule the weekly layer and the coach layer already
-  use, so no layer can drift from the harness.
+  use, so no layer can drift from the harness. The estimate prices the prompt
+  (Cyrillic prose) and the JSON payload separately (T39): the payload is charged
+  with the eval contract's structural coefficient, because the prose coefficient
+  measured 9 % **below** the endpoint on the long golden day and up to 45 % below
+  it on the tightest realistic payload, and the request it
+  accepted did not fit the window once the generation cap was added (``ADR-016``,
+  :meth:`SumDailyPipeline.content_tokens`).
 * Validate the completion against the T00 contract
   :class:`~diary.domain.contracts.DailySummary` through the shared strict
   bridge (:mod:`diary.domain.llm.structured`). The completion must be one JSON
@@ -55,7 +61,7 @@ from diary.core.models_config import OpenAICompatibleProfile
 from diary.core.settings import PROJECT_ROOT
 from diary.db.models import ArtifactLayer, PipelineType
 from diary.domain.contracts import DailySummary, RawEntry
-from diary.domain.contracts.golden import estimate_tokens
+from diary.domain.contracts.golden import estimate_request_tokens, estimate_tokens
 from diary.domain.llm.models import LLMRequest, LLMResponse
 from diary.domain.llm.structured import parse_contract_response
 from diary.domain.pipelines.base import PipelinePermanentError, SecondFamilyLayer
@@ -105,6 +111,25 @@ _MERGE_TOO_LARGE_MESSAGE = (
 _MERGE_PROMPT_MISSING_MESSAGE = "The sum_daily merge prompt template is unavailable."
 _EMPTY_PARTS_MESSAGE = "The day has no partial summaries to fold back."
 _PART_NOT_OF_DAY_MESSAGE = "A partial summary belongs to another day than the one being folded."
+
+#: Separator between the versioned prompt and the JSON payload of a request.
+_CONTENT_SEPARATOR = "\n\n"
+
+
+def _payload_of(content: str) -> str | None:
+    """The JSON payload of a request this layer built, or ``None`` otherwise.
+
+    Every request of the layer is ``prompt + "\\n\\n" + header + "\\n" + JSON``
+    (see :meth:`SumDailyPipeline.build_request` and
+    :meth:`SumDailyPipeline.build_merge_request`), so the split point is known
+    without heuristics. A content of another shape — a caller's own request, a
+    fixture — is estimated as one text instead of being split at a guess.
+    """
+    for header in (ENTRIES_HEADER, PARTS_HEADER):
+        marker = f"{_CONTENT_SEPARATOR}{header}\n"
+        if marker in content:
+            return content.split(marker, 1)[1]
+    return None
 
 
 class SumDailyPipeline(SecondFamilyLayer[DailySummary]):
@@ -170,11 +195,33 @@ class SumDailyPipeline(SecondFamilyLayer[DailySummary]):
         """
         return NUM_CTX - profile.max_tokens
 
+    @staticmethod
+    def content_tokens(content: str) -> int:
+        """Estimated tokens of one call's content, structurally (T39).
+
+        The two halves of a request are priced separately because the endpoint
+        prices them differently: the versioned prompt is Cyrillic prose (measured
+        2.76 characters per token, so the prose coefficient is conservative for
+        it, exactly as T20 decided), while the payload is JSON — identifiers,
+        timestamps, digits and syntax — which tokenizes at a measured 1.0–1.9
+        characters per token. Charging the whole content with the prose
+        coefficient is what let the long golden day send a 4493-token call into a
+        4096-token budget (4090 estimated; T39); charging the payload with
+        :func:`~diary.domain.contracts.golden.estimate_request_tokens` makes every
+        call this layer sends conservative again.
+
+        The estimate is deliberately an upper bound, not the model's count: the
+        layer never sees the endpoint's ``usage`` before it sends.
+        """
+        payload = _payload_of(content)
+        if payload is None:
+            return estimate_request_tokens(content)
+        prompt_chars = len(content) - len(payload)
+        return estimate_tokens(prompt_chars) + estimate_request_tokens(payload)
+
     def request_fits(self, request: LLMRequest, *, profile: OpenAICompatibleProfile) -> bool:
         """Whether one built request fits the input budget of ``profile``."""
-        return estimate_tokens(len(request.messages[0].content)) <= self.input_budget_tokens(
-            profile
-        )
+        return self.content_tokens(request.messages[0].content) <= self.input_budget_tokens(profile)
 
     def require_merge_fits(self, request: LLMRequest, *, profile: OpenAICompatibleProfile) -> None:
         """Fail loudly when the merge request does not fit the context budget.
@@ -199,7 +246,7 @@ class SumDailyPipeline(SecondFamilyLayer[DailySummary]):
             ensure_ascii=False,
         )
         content = f"{prompt}\n\n{ENTRIES_HEADER}\n{payload}"
-        return estimate_tokens(len(content)) <= self.input_budget_tokens(profile)
+        return self.content_tokens(content) <= self.input_budget_tokens(profile)
 
     def chunk_entries(
         self,

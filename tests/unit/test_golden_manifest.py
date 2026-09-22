@@ -13,6 +13,7 @@ skips when ``data/`` is absent, so the suite stays hermetic in CI.
 from __future__ import annotations
 
 import json
+import uuid
 from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
@@ -22,13 +23,16 @@ import pytest
 from diary.core.settings import PROJECT_ROOT
 from diary.domain.contracts.golden import (
     ALLOWED_ORIGINS,
+    CHARS_PER_TOKEN_EST,
     DEFAULT_FORBIDDEN_LEXEMES,
     DEFAULT_NUM_CTX,
     GOLDEN_DIR,
+    JSON_CHARS_PER_TOKEN_EST,
     WEEKLY_SPLIT_NUM_CTX,
     GoldenChunk,
     canonical_input_json,
     chunk_path,
+    estimate_request_tokens,
     estimate_tokens,
     input_char_count,
     input_payload,
@@ -194,6 +198,76 @@ def test_chunk_budget_matches_the_measured_input(
     assert chunk.budget.num_ctx in {DEFAULT_NUM_CTX, WEEKLY_SPLIT_NUM_CTX}
     assert chunk.budget.chunk_tokens_est <= chunk.budget.num_ctx
     assert len(json.dumps(json.loads(canonical_input_json(chunk.input)), ensure_ascii=False)) > 0
+
+
+#: Probes of the structural estimate (T39, 2026-09-22). Each text is exactly the
+#: string the endpoint was given, and the number beside it is the endpoint's own
+#: ``prompt_eval_count`` for that string (``diary-sum`` on this machine,
+#: ``raw: true`` ``/api/generate`` with one generated token; the running server
+#: keeps ``OLLAMA_KEEP_ALIVE=0``). One probe is reproduced by::
+#:
+#:     curl -s http://127.0.0.1:11434/api/generate -d \
+#:       '{"model":"diary-sum","prompt":"<the string>","raw":true,
+#:         "options":{"num_predict":1},"stream":false}'
+#:
+#: ``entry_skeleton`` is the cheapest payload the product can build — an entry's
+#: ``id``/``ts``/``source``/``text`` wrapper with an empty text — so it is the
+#: floor of what the day layer really sends; ``uuid_lines`` and ``iso_timestamps``
+#: are the degenerate shapes inside it, measured to show how far the structural
+#: class reaches.
+_STRUCTURAL_PROBES: dict[str, tuple[str, int]] = {
+    "uuid_lines": (
+        "\n".join(str(uuid.UUID(int=index)) for index in range(1, 31)),
+        1109,
+    ),
+    "iso_timestamps": (
+        "\n".join(f"2026-09-16T{n // 60:02d}:{n % 60:02d}:00Z" for n in range(30)),
+        629,
+    ),
+    "entry_skeleton": (
+        "\n".join(
+            json.dumps(
+                {
+                    "id": f"000000{index:02d}-9a3b-4d21-8f6b-0000000000{index:02d}",
+                    "ts": "2026-09-16T04:20:00Z",
+                    "source": "text",
+                    "text": "",
+                },
+                ensure_ascii=False,
+            )
+            for index in range(1, 31)
+        ),
+        2339,
+    ),
+}
+
+
+@pytest.mark.parametrize("probe", tuple(_STRUCTURAL_PROBES))
+def test_the_prose_coefficient_under_prices_a_json_payload(probe: str) -> None:
+    """T39: 2.5 characters per token was measured on Cyrillic prose, never on JSON.
+
+    Every probe of a request's structural text measures **worse** than the prose
+    coefficient assumes, which is exactly the coefficient the day layer applied to
+    its JSON payload.
+    """
+    text, measured = _STRUCTURAL_PROBES[probe]
+    assert len(text) / measured < CHARS_PER_TOKEN_EST
+
+
+def test_the_structural_coefficient_covers_the_payload_the_product_builds() -> None:
+    """The chosen coefficient stays below the measured cost of a real payload.
+
+    ``uuid_lines`` and ``iso_timestamps`` measure one character per token, i.e.
+    *below* the structural coefficient, but no ``raw_entry`` payload can be one of
+    them: every entry also carries JSON syntax and field names. The cheapest such
+    payload — the entry skeleton — measures 1.37 characters per token, and the
+    coefficient (1.25) stays under it, so the estimate for it is above the
+    endpoint's count instead of 45 % below it, as the prose coefficient was.
+    """
+    text, measured = _STRUCTURAL_PROBES["entry_skeleton"]
+    assert len(text) / measured > JSON_CHARS_PER_TOKEN_EST
+    assert estimate_request_tokens(text) >= measured
+    assert estimate_tokens(len(text)) < measured
 
 
 def test_split_weekly_chunks_get_the_larger_context() -> None:
