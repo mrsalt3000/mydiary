@@ -106,9 +106,13 @@ class InvariantViolation:
 class InputFacts:
     """The source content a grounding check compares against, reduced once.
 
-    ``text`` is the casefolded content text of the layer input (identifiers and
-    audio paths excluded); ``numbers`` are its digit tokens. Both are computed
-    once per layer call and reused across retries.
+    ``text`` is the casefolded **content** text of the layer input: identifiers,
+    audio paths and the moment/anchor fields (``ts``, ``date``, ``week_id``,
+    ``daily_ids``, … — see
+    :data:`~diary.domain.contracts.golden.NON_CONTENT_INPUT_KEYS`) are excluded,
+    because a timestamp is where a record sits in time rather than what the diary
+    says (T32). ``numbers`` are its digit tokens, again content only. Both are
+    computed once per layer call and reused across retries.
     """
 
     text: str
@@ -116,7 +120,13 @@ class InputFacts:
 
 
 def content_strings(value: object) -> Iterator[str]:
-    """String leaves of a payload, skipping non-content keys (ids, paths)."""
+    """String leaves of a payload that count as content (T32).
+
+    Identifiers, audio paths and moment/anchor fields are skipped: they are
+    bookkeeping (:data:`~diary.domain.contracts.golden.NON_CONTENT_INPUT_KEYS`),
+    and a number that occurs only inside a timestamp or an ISO date is not a fact
+    about the diary.
+    """
     if isinstance(value, str):
         yield value
     elif isinstance(value, Mapping):

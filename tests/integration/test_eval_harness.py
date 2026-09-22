@@ -42,10 +42,18 @@ from diary.domain.contracts.nli import NliPremiseError
 from diary.domain.llm.errors import LLMStructuredOutputError
 from diary.domain.llm.service import resolve_phase2_profile
 from diary.domain.nli.onnx_judge import OnnxNliJudge
+from diary.domain.pipelines.base import (
+    PipelineInputError,
+    PipelineNotRegisteredError,
+    PipelineOutputError,
+    PipelinePermanentError,
+    PipelineStorageError,
+)
 from diary.domain.pipelines.coach.pipeline import PROFILE_NAME as COACH_PROFILE_NAME
 from diary.domain.pipelines.coach.pipeline import PROMPT_PATH as COACH_PROMPT_PATH
 from diary.domain.pipelines.stt_fix.pipeline import PROFILE_NAME as STT_PROFILE_NAME
 from diary.domain.pipelines.stt_fix.pipeline import PROMPT_PATH as STT_PROMPT_PATH
+from diary.domain.pipelines.sum_daily.pipeline import NUM_CTX as SUM_DAILY_NUM_CTX
 from diary.domain.pipelines.sum_daily.pipeline import PROFILE_NAME as SUM_PROFILE_NAME
 from diary.domain.pipelines.sum_daily.pipeline import PROMPT_PATH as SUM_PROMPT_PATH
 from diary.domain.pipelines.sum_weekly.pipeline import PROFILE_NAME as WEEK_PROFILE_NAME
@@ -470,18 +478,20 @@ def test_invented_advice_in_a_correction_still_fails(models_config) -> None:
     assert "advice_and_judgement_absent" in _checks(outcome)
 
 
-def test_an_invalid_contract_shape_is_rejected_before_storage(models_config) -> None:
+def test_an_invalid_contract_shape_is_a_named_chunk_failure_not_a_dead_run(models_config) -> None:
     """AGENTS.md §15: an invalid completion never reaches the store.
 
-    The harness keeps its own ``output_contract`` check as a second line of
-    defence; through the real layers a wrong shape fails earlier, at the layer's
-    own validation, so the harness would never see such a payload.
+    The layer's own validation fails first, so the harness never sees such a
+    payload; since T32 that failure is a *chunk* failure named by its error
+    class and the run continues, instead of a traceback that costs the run every
+    chunk after this one. The harness keeps its own ``output_contract`` check as
+    a second line of defence for a stored payload.
     """
     chunk = _chunk("coach-01-low-energy-tuesday")
     payload = _passing(chunk)
     payload.pop("observations")
-    with pytest.raises(LLMStructuredOutputError):
-        _run(chunk, payload, models_config)
+    outcome = _run(chunk, payload, models_config)
+    assert _checks(outcome) == {f"pipeline_error:{LLMStructuredOutputError.__name__}"}
     # The harness-side check still bites when a malformed payload is inspected.
     _, violations = harness._validate_output(chunk, payload)
     assert [violation.check for violation in violations] == ["output_contract"]
@@ -934,3 +944,205 @@ def test_the_report_names_the_measured_prompt_when_the_endpoint_reports_it(
     outcome.usage = harness.LLMUsage(input_tokens=1871, output_tokens=214)
     report = harness.format_report([outcome], harness.golden_manifest())
     assert "measured input tokens (endpoint), max per category: day 1871 (cap 4096)" in report
+
+
+# ---------------------------------------------------------------------------
+# a deterministic layer failure is a failed chunk, not a dead run (T32)
+# ---------------------------------------------------------------------------
+
+
+def _raise(error: Exception):
+    """A stand-in layer that fails the way the real one can."""
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise error
+
+    return boom
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        PipelineInputError,
+        PipelineOutputError,
+        PipelinePermanentError,
+        PipelineNotRegisteredError,
+        PipelineStorageError,
+    ],
+)
+def test_every_permanent_layer_error_is_isolated_under_its_own_name(
+    error_type: type[PipelinePermanentError],
+    monkeypatch: pytest.MonkeyPatch,
+    models_config,
+) -> None:
+    """Every deterministic layer error names the chunk's failure, none ends the run.
+
+    The classes are the whole ``PipelinePermanentError`` family a phase-2 layer can
+    raise (``PipelineInvariantError`` has its own branch and its own test below).
+    """
+    chunk = _chunk("day-01-quiet-monday")
+    monkeypatch.setattr(harness, "sum_daily", _raise(error_type("synthetic permanent failure")))
+    outcome = _run(chunk, _passing(chunk), models_config)
+    assert not outcome.passed
+    assert _checks(outcome) == {f"{harness.PIPELINE_ERROR_CHECK}:{error_type.__name__}"}
+
+
+def test_a_day_that_cannot_be_split_is_isolated_as_a_named_chunk_failure(models_config) -> None:
+    """The T23 case: the day layer raises ``PipelinePermanentError`` on its budget.
+
+    A generation cap that leaves no input budget makes ``chunk_entries`` refuse
+    the day — the failure that used to end the run with a traceback the moment a
+    budget was broken.
+    """
+    chunk = _chunk("day-01-quiet-monday")
+    profile = resolve_phase2_profile(models_config, SUM_PROFILE_NAME)
+    no_room = profile.model_copy(update={"max_tokens": SUM_DAILY_NUM_CTX})
+    outcome = harness.evaluate_chunk(
+        chunk,
+        provider=harness.ScriptedProvider(_passing(chunk)),
+        models_config=models_config,
+        profile=no_room,
+    )
+    assert not outcome.passed
+    assert _checks(outcome) == {f"pipeline_error:{PipelinePermanentError.__name__}"}
+
+
+def test_a_permanent_failure_keeps_the_rest_of_the_grading(
+    monkeypatch: pytest.MonkeyPatch, models_config
+) -> None:
+    """The branch is not a shortcut: the latency budget is still applied to it."""
+    chunk = _chunk("day-01-quiet-monday")
+    monkeypatch.setattr(harness, "sum_daily", _raise(PipelineInputError("the day is unusable")))
+    monkeypatch.setattr(harness, "_latency_budget_for", lambda _chunk: -1.0)
+    outcome = _run(chunk, _passing(chunk), models_config)
+    assert _checks(outcome) == {
+        f"{harness.PIPELINE_ERROR_CHECK}:{PipelineInputError.__name__}",
+        harness.LATENCY_CHECK,
+    }
+
+
+def test_a_harness_error_stays_fatal(monkeypatch: pytest.MonkeyPatch, models_config) -> None:
+    """A broken *measurement* must not be graded as a broken chunk."""
+    chunk = _chunk("stt-01-colleague-call")
+    monkeypatch.setattr(
+        harness, "correct_stt", _raise(harness.HarnessError("the harness itself cannot run"))
+    )
+    with pytest.raises(harness.HarnessError):
+        _run(chunk, _passing(chunk), models_config)
+
+
+def test_a_permanent_error_does_not_take_the_remaining_chunks(
+    chunks: list[GoldenChunk], models_config
+) -> None:
+    """T32: the run keeps measuring after a chunk the layer cannot produce."""
+    broken = "day-02-long-tuesday"
+    broken_payload = _passing(_chunk(broken))
+    broken_payload.pop("facts")  # the contract requires a non-empty list
+
+    def factory(chunk: GoldenChunk) -> Any:
+        payload = broken_payload if chunk.id == broken else harness.ci_payload(chunk)
+        return harness.ScriptedProvider(payload)
+
+    outcomes = harness.evaluate_all(chunks, provider_factory=factory, models_config=models_config)
+    assert [outcome.chunk_id for outcome in outcomes] == [chunk.id for chunk in chunks]
+    failed = {outcome.chunk_id: _checks(outcome) for outcome in outcomes if not outcome.passed}
+    assert failed == {broken: {"pipeline_error:LLMStructuredOutputError"}}
+    assert harness.summarize(outcomes).invariants_passed == len(chunks) - 1
+
+
+def test_strict_counts_a_permanent_failure_as_a_failure_not_a_skip(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The DoD is explicit: ``--strict`` must read it as a failure, never a skip."""
+    monkeypatch.setattr(harness, "sum_daily", _raise(PipelineInputError("the day is unusable")))
+    assert harness.main(["--strict", "--chunk", "day-01-quiet-monday"]) == 1
+    output = capsys.readouterr().out
+    assert "pipeline_error:PipelineInputError" in output
+    assert "FAILED:" in output
+    assert "skipped" not in output
+
+
+def test_an_invariant_refusal_keeps_its_own_grading(models_config) -> None:
+    """The gate's refusal is not folded into the permanent-error bucket (T17b)."""
+    chunk = _chunk("day-01-quiet-monday")
+    payload = _passing(chunk)
+    payload["facts"] = ["Ты молодец, успела многое."]
+    outcome = _run(chunk, payload, models_config)
+    assert _checks(outcome) == {"advice_and_judgement_absent"}
+    assert not any(check.startswith("pipeline_error") for check in _checks(outcome))
+
+
+def test_the_report_names_the_error_without_carrying_its_message(
+    monkeypatch: pytest.MonkeyPatch, models_config
+) -> None:
+    """Privacy: the row names the class; the error text stays in ``detail``."""
+    chunk = _chunk("week-01-2026-w38")
+    monkeypatch.setattr(
+        harness, "sum_weekly", _raise(PipelineInputError("синтетическая строка из теста"))
+    )
+    outcome = _run(chunk, _passing(chunk), models_config)
+    row = harness.format_report([outcome], harness.golden_manifest())
+    assert "pipeline_error:PipelineInputError" in row
+    assert "синтетическая строка из теста" not in row
+
+
+# ---------------------------------------------------------------------------
+# grounding: a moment and an anchor are not facts about the diary (T32)
+# ---------------------------------------------------------------------------
+
+
+def _time_claim(chunk: GoldenChunk, hour: str) -> dict[str, object]:
+    payload = _passing(chunk)
+    payload["experiment_7d"] = f"В течение следующих 7 дней отмечать, что происходит в {hour}."
+    return payload
+
+
+def test_an_anchor_date_does_not_ground_a_number_of_the_output(models_config) -> None:
+    """T32: the date ``2026-09-23`` in ``daily_ids`` must not ground a claimed hour.
+
+    Before T32 the same invented «23» was refused on one week of the golden set
+    and accepted on another purely because the other contained the 23rd — the
+    weakening this check closes (numbers in §16 and ``ADR-012``).
+    """
+    chunk = _chunk("coach-02-new-project-load")
+    assert "2026-09-23" in chunk.input.daily_ids  # the anchor really carries the digit
+    outcome = _run(chunk, _time_claim(chunk, "23"), models_config)
+    assert _checks(outcome) == {"no_new_facts"}
+
+
+def test_an_entry_timestamp_does_not_ground_a_number_of_the_output(models_config) -> None:
+    """The same for a day chunk, whose entries carry the moment in ``ts``."""
+    chunk = _chunk("day-01-quiet-monday")
+    content = " ".join(entry.text for entry in chunk.input)
+    hours = {f"{entry.ts.hour:02d}" for entry in chunk.input} - harness.numbers(content)
+    assert hours, "the probe needs an hour the entries themselves never mention"
+    hour = sorted(hours)[0]
+    payload = _passing(chunk)
+    payload["facts"] = [*payload["facts"], f"В записях упомянуто время {hour}."]
+    outcome = _run(chunk, payload, models_config)
+    assert _checks(outcome) == {"no_new_facts"}
+
+
+def test_record_content_still_grounds_a_number_of_the_output(models_config) -> None:
+    """The narrowing must not touch numbers the entries really say."""
+    chunk = _chunk("coach-01-low-energy-tuesday")
+    payload = _passing(chunk)
+    payload["observations"] = [*payload["observations"][:2], "В сводке упомянуто 1 километр."]
+    outcome = _run(chunk, payload, models_config)
+    assert outcome.passed, outcome.violations
+
+
+def test_the_form_of_the_project_fixture_is_refused_on_both_weeks(models_config) -> None:
+    """T32 point 2, decided by measurement: the hour is invented, the refusal is right.
+
+    The literal form of ``tests/unit/test_contracts_schemas.py`` names a moment no
+    weekly rollup of the golden set states, so the gate refuses it — on the week
+    that contains the 23rd exactly as on the week that does not. Nothing is
+    weakened for it; the numbers are in ``ADR-012`` and §16.
+    """
+    for chunk_id in ("coach-01-low-energy-tuesday", "coach-02-new-project-load"):
+        chunk = _chunk(chunk_id)
+        payload = _passing(chunk)
+        payload["experiment_7d"] = "Попробовать 7 дней ложиться до 23:00."
+        outcome = _run(chunk, payload, models_config)
+        assert _checks(outcome) == {"no_new_facts"}, chunk_id

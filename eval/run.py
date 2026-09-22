@@ -69,6 +69,18 @@ phase-2 profile as «the layer is off» (§9.8), not as an error, and the harnes
 follows instead of aborting the run (T19). A run that measured nothing is still a
 failure: verifying nothing is not the same as verifying that everything is fine.
 
+A chunk whose layer fails **deterministically** — an unusable input, a structured
+completion that does not validate, a day that cannot be split into its context
+window — is reported as the failure of that error, named by its class
+(``pipeline_error:PipelineInputError``), and the run goes on to the remaining
+chunks (T32). Before that, the first such chunk ended the whole run with a
+traceback and every chunk after it went unmeasured. A refusal by the invariant
+gate is not folded into this bucket: it keeps grading the chunk by the checks the
+gate named (T17b). A ``HarnessError`` — the harness itself cannot run — stays
+fatal on purpose: it says the measurement is broken, not the layer. Transient
+provider failures (timeouts, 5xx) also stay fatal: they are properties of the
+moment, not of the chunk, so a run that met one is not comparable with another.
+
 Deliberate limits (stated, not hidden)
 ======================================
 
@@ -78,9 +90,12 @@ Deliberate limits (stated, not hidden)
   harness reports ungrounded long content tokens as *diagnostics* (a hint for a
   human), never as a pass/fail criterion — a fabricated "green" check would be
   worse than an honest gap.
-* Grounding compares against every content value of the input, timestamps and
-  anchors included (they are part of the input). A number that only occurs
-  inside a timestamp or an ISO date is therefore considered grounded.
+* Grounding compares against the **record content** of the input: entry texts,
+  ``facts``, ``themes``, ``open_questions``, ``rollup``. Identifiers, audio paths
+  and the moment/anchor fields (``ts``, ``date``, ``week_id``, ``daily_ids``,
+  ``summary_id``, ``local_date``, ``local_tz``, ``created_at``) are not facts
+  about the diary and do not ground a number of the output (T32; before that the
+  digits of ``2026-09-23`` grounded a claimed «до 23:00»).
 * The context reserve is an estimate (2.5 characters per token) plus the
   profile's generation cap; the live run reports the measured ``input_tokens``
   next to it so the estimate can be re-checked against reality.
@@ -180,12 +195,12 @@ from diary.domain.contracts.nli import (
     judge_claims,
     metrics_for,
 )
-from diary.domain.llm.errors import LLMProviderUnavailableError
+from diary.domain.llm.errors import LLMProviderUnavailableError, LLMStructuredOutputError
 from diary.domain.llm.models import LLMRequest, LLMResponse, LLMUsage
 from diary.domain.llm.providers import LLMProvider, create_llm_provider
 from diary.domain.llm.service import resolve_phase2_profile
 from diary.domain.nli.onnx_judge import OnnxNliJudge
-from diary.domain.pipelines.base import PipelineInvariantError
+from diary.domain.pipelines.base import PipelineInvariantError, PipelinePermanentError
 from diary.domain.pipelines.coach.pipeline import (
     PROFILE_NAME as COACH_PROFILE_NAME,
 )
@@ -370,6 +385,14 @@ _DIAGNOSTIC_STEM_LEN = 5
 
 class HarnessError(Exception):
     """The harness itself cannot run: unknown kind, unchecked invariant, bad set."""
+
+
+#: Check-name prefix the harness reports when a layer failed permanently without
+#: the invariant gate naming any check (T32). The class name of the error is
+#: appended — ``pipeline_error:PipelineInputError`` — so the report says *which*
+#: deterministic failure hit the chunk while the error's own message stays out of
+#: the report, exactly like every other ``Violation.detail``.
+PIPELINE_ERROR_CHECK = "pipeline_error"
 
 
 @dataclass(frozen=True)
@@ -1150,6 +1173,7 @@ def evaluate_chunk(
 
         started = time.perf_counter()
         refused: PipelineInvariantError | None = None
+        permanent: PipelinePermanentError | LLMStructuredOutputError | None = None
         try:
             _run_layer(
                 session,
@@ -1165,6 +1189,17 @@ def evaluate_chunk(
             # a stored artifact here instead would measure something production
             # can no longer produce, which is the drift finding F1 was about.
             refused = exc
+        except (PipelinePermanentError, LLMStructuredOutputError) as exc:
+            # Any *other* deterministic layer failure (T32): an unusable input,
+            # a structured completion that does not validate, a day that cannot
+            # be split into its context window. Before T32 the first such chunk
+            # ended the whole run with a traceback and the remaining chunks were
+            # never measured at all — the partially closed T10b finding. The
+            # chunk is graded as a failure of that error and the run continues.
+            # `HarnessError` is deliberately **not** caught here: it says the
+            # measurement itself is broken, which must not read as a defect of
+            # the layer.
+            permanent = exc
         outcome.latency_s = time.perf_counter() - started
         session.commit()
 
@@ -1172,6 +1207,16 @@ def evaluate_chunk(
             outcome.violations.append(
                 Violation("raw_rows_unchanged", "a raw source row changed during the run")
             )
+        if permanent is not None:
+            outcome.violations.append(
+                Violation(
+                    f"{PIPELINE_ERROR_CHECK}:{type(permanent).__name__}",
+                    "the layer failed permanently, so the chunk is graded as that failure",
+                )
+            )
+            _record_measurements(outcome, chunk, resolved_profile, provider)
+            _apply_latency_budget(outcome)
+            return outcome
         if refused is not None:
             # Fail-closed here too: a refusal that names no check still failed the
             # chunk. `quality.py` always fills `checks` from a non-empty violation

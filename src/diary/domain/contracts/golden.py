@@ -333,10 +333,31 @@ ASSERTIVE_TEXT_FIELDS: dict[str, tuple[str, ...]] = {
     "coach_note": ("observations", "hypotheses", "experiment_7d"),
 }
 
-#: Input fields whose values are bookkeeping rather than content: identifiers
-#: and server-generated audio paths are excluded from the text the
-#: ``no_new_facts`` grounding check compares against (a UUID is not a fact).
-NON_CONTENT_INPUT_KEYS: frozenset[str] = frozenset({"id", "audio_path"})
+#: Input fields whose values are bookkeeping rather than content, and therefore
+#: neither ground a number of the generated text nor count as source wording:
+#: identifiers and server-generated audio paths (a UUID is not a fact) and the
+#: **moment/anchor** fields — ``ts``, ``date``, ``week_id``, ``daily_ids``,
+#: ``summary_id``, ``local_date``, ``local_tz``, ``created_at``. A moment says
+#: *where a record sits in time*, not what the diary says: before T32 the digits
+#: of an entry's ``ts`` (or of a week's ``daily_ids``) grounded a number the
+#: source never mentions, so a claimed «ложиться до 23:00» passed on a week that
+#: merely contained the 23rd. T32 measured the class on the golden set (every
+#: chunk accepted such a number) and narrowed the source to record content; the
+#: numbers are in ``docs/tasklist-phase2.md`` §16 and ``ADR-012``.
+NON_CONTENT_INPUT_KEYS: frozenset[str] = frozenset(
+    {
+        "id",
+        "audio_path",
+        "ts",
+        "date",
+        "week_id",
+        "daily_ids",
+        "summary_id",
+        "local_date",
+        "local_tz",
+        "created_at",
+    }
+)
 
 #: Contracts whose generated text is a *correction of the input* rather than a
 #: newly written text (``stt_corrected``). For them the advice/causal lexeme

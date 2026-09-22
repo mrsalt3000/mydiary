@@ -74,6 +74,11 @@ VALID_PAYLOADS: dict[str, dict[str, Any]] = {
         "summary_id": "2026-W38",
         "observations": ["Наблюдение 1.", "Наблюдение 2.", "Наблюдение 3."],
         "hypotheses": ["Гипотеза 1.", "Гипотеза 2."],
+        # Contract-valid, and deliberately kept so: this fixture proves the
+        # *schema*, not the invariants. The hour is not grounded in a weekly
+        # rollup that never names it, so the runtime gate refuses this form —
+        # measured in T32 on both coaching chunks of the golden set (ADR-012,
+        # docs/tasklist-phase2.md §16); see the test that pins it.
         "experiment_7d": "Попробовать 7 дней ложиться до 23:00.",
         "disclaimer": COACH_DISCLAIMER,
     },

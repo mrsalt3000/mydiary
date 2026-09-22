@@ -235,3 +235,62 @@ def test_input_facts_skip_identifiers_and_audio_paths() -> None:
     facts = input_facts(payload)
     assert facts.numbers == frozenset()
     assert "98765" not in facts.text
+
+
+# ---------------------------------------------------------------------------
+# Grounding: a moment or an anchor is not a fact about the diary (T32)
+# ---------------------------------------------------------------------------
+
+
+def _coach_note(experiment: str, **overrides: object) -> dict[str, object]:
+    """A coaching payload whose only number is the one ``experiment`` carries."""
+    payload: dict[str, object] = {
+        "observations": ["Спала мало.", "Работала над отчётом.", "Вечером читала."],
+        "hypotheses": ["Возможно, нагрузка шла неравномерно.", "Похоже, темп менялся."],
+        "experiment_7d": experiment,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_a_timestamp_does_not_ground_a_number() -> None:
+    """Before T32 the digits of ``2026-09-23T21:00`` grounded a claimed «в 21»."""
+    source = {"ts": "2026-09-23T21:00:00+03:00", "text": "Лег спать раньше плана."}
+    note = _coach_note("Отмечать, во сколько получилось лечь: в наблюдениях называли 21.")
+    assert NEW_FACTS_CHECK in _checks(note, source=source)
+
+
+def test_an_anchor_date_does_not_ground_a_number() -> None:
+    """The week's own ``daily_ids`` are anchors, not what the diary says.
+
+    The measured case: «ложиться до 23:00» was accepted on the week containing
+    the 23rd and refused on the week that did not — the same invented hour, two
+    verdicts, decided only by the calendar (T32 point 2).
+    """
+    source = {"daily_ids": ["2026-09-22", "2026-09-23"], "rollup": "Спала плохо."}
+    note = _coach_note("Эксперимент на 7 дней: ложиться в 23.")
+    assert NEW_FACTS_CHECK in _checks(note, source=source)
+
+
+def test_record_content_still_grounds_a_number() -> None:
+    """The narrowing takes only the anchor away, never the record's own words."""
+    source = {"daily_ids": ["2026-09-23"], "rollup": "Лег спать в 23 часа."}
+    note = _coach_note("Эксперимент на 7 дней: ложиться в 23.")
+    assert _checks(note, source=source) == []
+
+
+def test_input_facts_read_anchors_as_no_facts_at_all() -> None:
+    """A moment, a week id, a date and an id contribute neither text nor numbers."""
+    payload = {
+        "ts": "2026-09-23T21:00:00+03:00",
+        "date": "2026-09-23",
+        "week_id": "2026-W39",
+        "daily_ids": ["2026-09-22", "2026-09-23"],
+        "summary_id": str(uuid.uuid4()),
+        "created_at": "2026-09-24T07:00:00+00:00",
+        "text": "День прошёл спокойно",
+    }
+    facts = input_facts(payload)
+    assert facts.numbers == frozenset()
+    assert "2026" not in facts.text
+    assert "день прошёл спокойно" in facts.text
