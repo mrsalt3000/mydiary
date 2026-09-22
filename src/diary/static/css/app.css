@@ -1130,6 +1130,15 @@ textarea {
   display: none;
 }
 
+/* A voice message whose ``audio_files`` row is missing (T31): the card states
+   the fact in words instead of drawing a player, a jump target and a button
+   that could not work (the same caption the processing panel shows). */
+.message__audio-missing {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  margin: 0.35rem 0 0;
+}
+
 .message__caption {
   color: var(--text-muted);
   font-size: 0.8rem;

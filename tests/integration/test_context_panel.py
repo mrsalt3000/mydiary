@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 import diary.api.routes.pages as pages_module
@@ -679,3 +680,81 @@ def test_other_templates_do_not_fill_the_panel() -> None:
         source = (TEMPLATES_DIR / name).read_text(encoding="utf-8")
         assert "context_panel" not in source, name
         assert "{% block context %}" not in source, name
+
+
+# ---------------------------------------------------------------------------
+# T31 — the day page reads a constant number of rows
+# ---------------------------------------------------------------------------
+
+#: SQL statements one render of the day page issues **after** T31, for a day
+#: that holds at least one voice message. The acceptance measured 17 for 1, 2
+#: and 3 voice messages and for a long mixed day, and 11 for a day with no voice
+#: message at all; this test pins the voice-message cases (the audio reads are
+#: skipped for a day without voice messages, not run with an empty result).
+#:
+#: Before T31 the same page issued ``11 + 6 * N`` — 17 / 23 / 29 for
+#: 1 / 2 / 3 voice messages: every card resolved its audio state with three
+#: single-message reads, and the panel repeated those three per voice row.
+#: The numbers are pinned on purpose: a future change that reintroduces a
+#: per-message read must fail here and be justified, not pass silently.
+DAY_PAGE_QUERY_COUNT = 17
+
+
+@contextmanager
+def _count_queries(engine) -> Iterator[dict[str, int]]:
+    """Count the SQL statements sent to the database inside the context.
+
+    ``before_cursor_execute`` fires once per statement, so the counter sees
+    every read the render performs. The listener is removed on exit, so a
+    failing test cannot leak it into the next one.
+    """
+    counter = {"statements": 0}
+
+    def _before(conn, cursor, statement, parameters, context, executemany) -> None:
+        counter["statements"] += 1
+
+    event.listen(engine, "before_cursor_execute", _before)
+    try:
+        yield counter
+    finally:
+        event.remove(engine, "before_cursor_execute", _before)
+
+
+def test_day_page_reads_a_constant_number_of_rows_whatever_the_voice_count(
+    engine, api_client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T31 DoD 2: the render cost does not grow with the number of recordings.
+
+    The same day rendered with 1, 2 and 3 voice messages sends the same number
+    of SQL statements (:data:`DAY_PAGE_QUERY_COUNT`); before T31 it grew by six
+    per voice message (three in the card, three in the panel). What the panel
+    *says* about those messages is checked by the tests above — this one only
+    counts reads, and it counts the whole request (panel and feed alike).
+
+    The long-day part keeps the same number with paging switched on: the
+    "older entries" fragment is a render of its own (its cost is constant too),
+    and the day page never re-reads a window it does not render.
+    """
+    counts: list[int] = []
+    for index in range(1, 4):
+        _create_voice(session, _at(9 + index))
+        session.commit()
+        with _count_queries(engine) as counter:
+            response = api_client.get(f"/?date={DAY.isoformat()}")
+        assert response.status_code == 200
+        counts.append(counter["statements"])
+    assert counts == [DAY_PAGE_QUERY_COUNT] * 3, counts
+
+    # A day longer than the feed window (paging on), half of it voice messages.
+    monkeypatch.setattr(pages_module, "PAGE_LIMIT", 3)
+    for minute in range(12):
+        if minute % 2:
+            _create_voice(session, _at_minute(minute))
+        else:
+            _create_text(session, f"запись-{minute}", _at_minute(minute))
+    session.commit()
+    with _count_queries(engine) as counter:
+        response = api_client.get(f"/?date={DAY.isoformat()}")
+    assert response.status_code == 200
+    assert "Показать более старые записи" in response.text
+    assert counter["statements"] == DAY_PAGE_QUERY_COUNT, counter["statements"]

@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 import diary.api.routes.pages as pages_module
 from diary.api.routes.messages import get_session
 from diary.core.settings import get_settings, reload_settings
-from diary.db.models import Message, MessageKind
+from diary.db.models import Message, MessageKind, TranscriptionStatus
 from diary.db.repositories import AudioFileRepository, MessageRepository
 from diary.main import app
 
@@ -109,6 +109,17 @@ def _create_voice(session: Session, created_at: datetime) -> Message:
         sha256="0" * 64,
     )
     return message
+
+
+def _card_of(html: str, message_id) -> str:
+    """The rendered ``<article>`` card of one message."""
+    match = re.search(
+        rf'<article class="message[^"]*" id="message-{message_id}">.*?</article>',
+        html,
+        re.DOTALL,
+    )
+    assert match is not None, f"no card rendered for message {message_id}"
+    return match.group(0)
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +546,161 @@ def test_voice_card_renders_no_duration_from_the_server(
     assert 'aria-hidden="true"' in bars
     assert bars.count("<i>") == 20
     assert re.search(r"\d", bars) is None, "the waveform must not carry numbers"
+
+
+# ---------------------------------------------------------------------------
+# a voice card whose audio row is missing (task T31)
+# ---------------------------------------------------------------------------
+
+
+def _create_voice_without_audio_row(session: Session, created_at: datetime):
+    """A ``kind=audio`` message with no ``audio_files`` row at all.
+
+    The state the T31 defect is about: the message row exists (and is
+    deletable), the audio linkage does not — the upload never completed, or the
+    row was lost. Nothing writes bytes in this test.
+    """
+    return MessageRepository(session).create(
+        kind=MessageKind.audio, body_text="", created_at=created_at
+    )
+
+
+def test_voice_card_without_an_audio_row_draws_no_dead_controls(
+    api_client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T31: such a card states the fact instead of drawing what cannot work.
+
+    Before T31 every audio key of this card was *undefined*, so Jinja2
+    rendered ``id="transcription-"`` (an anchor nothing can reach),
+    ``<audio src="">`` and a «Расшифровать» button with an empty caption: two
+    dead controls and a broken jump target. The card now carries the caption
+    the processing panel already uses for the very same state, and draws no
+    player, no transcription block and no button — while keeping its own
+    delete action (the record itself is a real, deletable message).
+
+    Both render paths are checked: the day page (its newest window) and the
+    "older entries" fragment, which renders the same card from the other
+    endpoint.
+    """
+    monkeypatch.setattr(pages_module, "PAGE_LIMIT", 1)
+    older = _create_voice_without_audio_row(session, _at(10))
+    newest = _create_voice_without_audio_row(session, _at(11))
+    session.commit()
+
+    html = api_client.get(_day_url(DAY)).text
+    newest_card = _card_of(html, newest.id)
+    assert pages_module.PANEL_AUDIO_FILE_MISSING in newest_card
+    # No player, no anchor, no trigger — anywhere on the page.
+    assert "transcription-" not in html
+    assert "<audio" not in html
+    assert 'data-action="transcribe"' not in html
+    # The card is still a card: its own actions are untouched.
+    assert f'data-action="delete-message" data-message-id="{newest.id}"' in newest_card
+
+    match = OLDER_CURSOR_RE.search(html)
+    assert match is not None, "the older control must be on the page"
+    fragment = api_client.get(
+        "/messages/fragments/older",
+        params={"cursor": urllib.parse.unquote(match.group(1)), "limit": "1"},
+    )
+    assert fragment.status_code == 200
+    older_card = _card_of(fragment.text, older.id)
+    assert pages_module.PANEL_AUDIO_FILE_MISSING in older_card
+    assert "transcription-" not in fragment.text
+    assert "<audio" not in fragment.text
+    assert 'data-action="transcribe"' not in fragment.text
+    assert f'data-action="delete-message" data-message-id="{older.id}"' in older_card
+
+
+def test_voice_context_without_an_audio_row_is_explicit_not_undefined(
+    session: Session,
+) -> None:
+    """T31: the missing state is carried as values, not as absent keys.
+
+    The rendered page cannot tell the two apart (Jinja2's default ``Undefined``
+    is falsy, so ``{% if message.audio_available %}`` would take the same
+    branch), which is exactly why the defect could hide. This test reads the
+    context the card is rendered from — the same mapping both render paths
+    build from (:func:`_audio_view` here, the batch loader on a page) — and
+    requires every audio key to be present with an explicit value.
+    """
+    message = _create_voice_without_audio_row(session, _at(10))
+    session.commit()
+    missing = pages_module._message_view(message, session)
+    assert missing["audio_available"] is False
+    assert missing["audio_file_id"] is None
+    assert missing["audio_url"] is None
+    assert missing["audio_mime"] is None
+    assert missing["transcription_raw"] is None
+    assert missing["transcription_button_label"] is None
+    assert missing["active_job_id"] is None
+    # The caption is the panel's, and the state is named (never a status value
+    # of the transcription table — no such row exists).
+    assert missing["transcription_label"] == pages_module.PANEL_AUDIO_FILE_MISSING
+    assert missing["transcription_status"] == pages_module.AUDIO_LINK_MISSING_STATE
+    assert missing["transcription_status"] not in {status.value for status in TranscriptionStatus}
+
+    # The same keys, explicitly present, for a voice message that does have its
+    # audio row — so the flag is a real state and not "the key is missing".
+    linked = _create_voice(session, _at(11))
+    session.commit()
+    available = pages_module._message_view(linked, session)
+    assert available["audio_available"] is True
+    assert set(available) >= set(missing)
+    assert available["audio_file_id"] is not None
+    assert available["audio_url"] is not None
+
+    # A text message carries none of the audio keys and is unaffected.
+    text = _create(session, "обычная запись", _at(12))
+    session.commit()
+    text_view = pages_module._message_view(text, session)
+    assert "audio_available" not in text_view
+    assert "audio_file_id" not in text_view
+
+
+def test_card_uses_the_newest_audio_row_exactly_as_the_single_message_path(
+    api_client: TestClient, session: Session
+) -> None:
+    """The batch path picks the same ``audio_files`` row as the single path.
+
+    Task 07 stores one row per voice message, but the schema does not forbid an
+    older second row. The day page renders through the batch path, so this pins
+    that both paths choose the **newest** row — same ``audio_file_id``, same
+    URL, same anchor, same transcription state.
+    """
+    message = MessageRepository(session).create(
+        kind=MessageKind.audio, body_text="", created_at=_at(9)
+    )
+    older = AudioFileRepository(session).create(
+        message_id=message.id,
+        original_mime="audio/webm",
+        storage_path="audio/2026/09/synthetic-first.webm",
+        size_bytes=1024,
+        sha256="0" * 64,
+        created_at=_at(10),
+    )
+    newer = AudioFileRepository(session).create(
+        message_id=message.id,
+        original_mime="audio/wav",
+        storage_path="audio/2026/09/synthetic-second.wav",
+        size_bytes=2048,
+        sha256="1" * 64,
+        created_at=_at(11),
+    )
+    session.commit()
+    assert [row.id for row in AudioFileRepository(session).get_by_message(message.id)] == [
+        older.id,
+        newer.id,
+    ]
+
+    single = pages_module._message_view(message, session)
+    batch = pages_module._message_views([message], session)[0]
+    assert batch == single
+    assert batch["audio_file_id"] == str(newer.id)
+
+    html = api_client.get(_day_url(DAY)).text
+    assert f'id="transcription-{newer.id}"' in html
+    assert str(older.id) not in html
 
 
 def test_waveform_is_decorative_and_hidden_from_assistive_technology() -> None:

@@ -724,7 +724,7 @@ DoD: [из таблицы]
 | Владелец | A1 (UI) |
 | Тип | корректность интерфейса |
 | Где | `templates/`, `src/diary/api/routes/`, тесты UI |
-| Основание | Наследие T07/T16b |
+| Основание | Наследие T07/T16b. **Сделано (2026-09-22):** карточка голосового без строки `audio_files` несёт явный `audio_available = False` и рисует подпись панели (`PANEL_AUDIO_FILE_MISSING`) вместо плеера, якоря `#transcription-…` и кнопки; панель дня и лента рендерятся пакетной загрузкой (`_audio_views_for_messages`/`_message_views` + `AudioFileRepository.list_by_messages`, `TranscriptionRepository.list_by_audio_files`, `find_active_transcription_jobs`) — страница дня читает **константные 17** запросов вместо `11 + 6N` (0/1/2/3 голосовых: было 11/17/23/29, стало 11/17/17/17) |
 
 **DoD:**
 1. Аудиосообщение без строки `audio_files` больше не рисует `id="transcription-None"` и кнопку «Расшифровать»: интерфейс честно сообщает, что расшифровки нет/недоступна.

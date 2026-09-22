@@ -18,6 +18,7 @@ transactions.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import date, datetime, timedelta
 from typing import Any, cast
 
@@ -220,6 +221,29 @@ class AudioFileRepository:
         )
         return list(self._session.scalars(statement))
 
+    def list_by_messages(self, message_ids: Collection[uuid.UUID]) -> list[AudioFile]:
+        """Audio-file rows of many messages in **one** query (task T31).
+
+        The batch counterpart of :meth:`get_by_message`, for pages that render
+        a whole day: rows are grouped by ``message_id`` in the same order
+        :meth:`get_by_message` returns one message's rows in (``created_at``,
+        then ``id``), so a caller that keeps the last row of a group sees
+        exactly the row the single-message path would pick. An empty
+        ``message_ids`` reads nothing at all.
+        """
+        if not message_ids:
+            return []
+        statement = (
+            select(AudioFile)
+            .where(AudioFile.message_id.in_(set(message_ids)))
+            .order_by(
+                AudioFile.message_id.asc(),
+                AudioFile.created_at.asc(),
+                AudioFile.id.asc(),
+            )
+        )
+        return list(self._session.scalars(statement))
+
 
 class TranscriptionRepository:
     """Persistence for raw STT results (:class:`Transcription`)."""
@@ -264,6 +288,27 @@ class TranscriptionRepository:
             select(Transcription)
             .where(Transcription.audio_file_id == audio_file_id)
             .order_by(Transcription.created_at.asc(), Transcription.id.asc())
+        )
+        return list(self._session.scalars(statement))
+
+    def list_by_audio_files(self, audio_file_ids: Collection[uuid.UUID]) -> list[Transcription]:
+        """Transcription rows of many audio files in **one** query (task T31).
+
+        The batch counterpart of :meth:`list_by_audio_file`: within one audio
+        file the rows keep the same order (``created_at``, then ``id``), so
+        "the newest row" is the same row in both paths. An empty
+        ``audio_file_ids`` reads nothing at all.
+        """
+        if not audio_file_ids:
+            return []
+        statement = (
+            select(Transcription)
+            .where(Transcription.audio_file_id.in_(set(audio_file_ids)))
+            .order_by(
+                Transcription.audio_file_id.asc(),
+                Transcription.created_at.asc(),
+                Transcription.id.asc(),
+            )
         )
         return list(self._session.scalars(statement))
 

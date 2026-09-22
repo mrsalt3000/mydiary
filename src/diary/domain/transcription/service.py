@@ -64,7 +64,7 @@ message (provider errors are sanitised inside the adapter boundary).
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 
 from sqlalchemy.orm import Session
 
@@ -127,6 +127,44 @@ def _default_llm_unloader() -> None:
     unload_local_llms()
 
 
+def find_active_transcription_jobs(
+    session: Session, audio_file_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, Job]:
+    """The in-flight ``transcribe_audio`` jobs of many audio files, in one query.
+
+    Batch counterpart of :func:`find_active_transcription_job` (task T31): the
+    whole day's worth of audio files is resolved with a single read of the
+    active ``transcribe_audio`` jobs instead of one read per file. The single
+    lookup delegates here, so the two can never disagree about which job is in
+    flight for a file.
+
+    An audio file with several in-flight jobs keeps the **oldest** one — the
+    same job :func:`find_active_transcription_job` returns, because both walk
+    the same queue order (``created_at``, then ``id``). Files without an
+    in-flight job are absent from the mapping; payloads of other job types and
+    malformed payloads are skipped.
+    """
+    wanted = {str(audio_file_id) for audio_file_id in audio_file_ids}
+    if not wanted:
+        return {}
+    active: dict[uuid.UUID, Job] = {}
+    for job in JobRepository(session).list_active_of_type(JobType.transcribe_audio):
+        payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+        # The very condition the single-file lookup uses (``str(payload) ==
+        # str(audio_file_id)``), so both paths match the same payloads.
+        raw = str(payload.get("audio_file_id", ""))
+        if raw not in wanted:
+            continue
+        try:
+            key = uuid.UUID(raw)
+        except ValueError:  # pragma: no cover - ``wanted`` holds canonical UUIDs
+            continue
+        # First match wins: the queue is oldest first, so the mapping agrees
+        # with the single-file lookup.
+        active.setdefault(key, job)
+    return active
+
+
 def find_active_transcription_job(session: Session, audio_file_id: uuid.UUID) -> Job | None:
     """The in-flight ``transcribe_audio`` job for ``audio_file_id``, if any.
 
@@ -134,12 +172,7 @@ def find_active_transcription_job(session: Session, audio_file_id: uuid.UUID) ->
     Terminal jobs do not count, so an explicit repeat request after a success
     or a failure starts a fresh run.
     """
-    target = str(audio_file_id)
-    for job in JobRepository(session).list_active_of_type(JobType.transcribe_audio):
-        payload = job.payload_json if isinstance(job.payload_json, dict) else {}
-        if str(payload.get("audio_file_id", "")) == target:
-            return job
-    return None
+    return find_active_transcription_jobs(session, (audio_file_id,)).get(audio_file_id)
 
 
 def request_transcription(
@@ -387,6 +420,7 @@ __all__ = [
     "TranscriptionPermanentError",
     "TranscriptionServiceError",
     "find_active_transcription_job",
+    "find_active_transcription_jobs",
     "list_transcription_history",
     "request_transcription",
     "run_transcription",

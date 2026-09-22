@@ -65,6 +65,7 @@ from diary.db.base import utc_now
 from diary.db.models import (
     Artifact,
     ArtifactLayer,
+    AudioFile,
     Job,
     JobStatus,
     JobType,
@@ -73,6 +74,7 @@ from diary.db.models import (
     PipelineType,
     ProcessingRun,
     RunStatus,
+    Transcription,
     TranscriptionStatus,
     WeeklyExport,
 )
@@ -99,7 +101,10 @@ from diary.domain.pipelines.wellbeing.safety import (
     SafetyLevel,
     classify,
 )
-from diary.domain.transcription.service import find_active_transcription_job
+from diary.domain.transcription.service import (
+    find_active_transcription_job,
+    find_active_transcription_jobs,
+)
 
 #: This module lives at ``src/diary/api/routes/pages.py``.
 _PACKAGE_DIR = Path(__file__).resolve().parents[2]
@@ -167,6 +172,14 @@ TRANSCRIPTION_LABELS: dict[TranscriptionStatus, str] = {
     TranscriptionStatus.succeeded: "Расшифровано",
     TranscriptionStatus.failed: "Ошибка расшифровки",
 }
+
+#: UI-only state of a voice card whose ``audio_files`` row is missing (T31).
+#: Not a :class:`TranscriptionStatus` value: the row the status would describe
+#: does not exist. It is carried in the template context so the state is an
+#: explicit value rather than an undefined key, and it is never rendered as a
+#: ``data-transcription-state`` (no transcription block is rendered at all —
+#: the contract with ``static/js/app.js`` stays untouched).
+AUDIO_LINK_MISSING_STATE = "missing"
 
 # ---------------------------------------------------------------------------
 # Task 16 — labels shared by the exports/processing management templates
@@ -303,8 +316,12 @@ def _audio_view(session: Session, message_id: uuid.UUID) -> dict[str, Any] | Non
       rendered (escaped) below the audio player; history beyond the latest
       version is served by ``GET /api/v1/audio/{id}/transcriptions``.
 
-    Returns ``None`` for text messages or when the linkage is missing (the
-    template then renders the message body only).
+    This is the *single-message* path (one message, at most three reads); the
+    day page renders a whole window and uses the batch path
+    (:func:`_audio_views_for_messages`) instead, which produces the very same
+    fields. Returns ``None`` when the linkage is missing — text messages never
+    reach here — and the caller then uses
+    :func:`_missing_audio_fields` (task T31).
     """
     audio_files = AudioFileRepository(session).get_by_message(message_id)
     if not audio_files:
@@ -312,6 +329,23 @@ def _audio_view(session: Session, message_id: uuid.UUID) -> dict[str, Any] | Non
     audio = audio_files[-1]
     transcriptions = TranscriptionRepository(session).list_by_audio_file(audio.id)
     active_job = find_active_transcription_job(session, audio.id)
+    return _audio_fields(audio, transcriptions, active_job)
+
+
+def _audio_fields(
+    audio: AudioFile,
+    transcriptions: list[Transcription],
+    active_job: Job | None,
+) -> dict[str, Any]:
+    """Map one audio file + its transcription rows to template fields.
+
+    Pure mapping shared by :func:`_audio_view` (one card) and
+    :func:`_audio_views_for_messages` (a whole page window), so the two paths
+    cannot disagree about a status or a button label. ``transcriptions`` is the
+    file's history oldest first; the effective status is the in-flight job's
+    (it wins over the stored row — the page reload during processing must not
+    look idle), otherwise the newest row's.
+    """
     if active_job is not None:
         # pending/retrying → queued; running → running.
         status = (
@@ -326,6 +360,7 @@ def _audio_view(session: Session, message_id: uuid.UUID) -> dict[str, Any] | Non
         None,
     )
     return {
+        "audio_available": True,
         "audio_file_id": str(audio.id),
         "audio_url": f"/api/v1/audio/{audio.id}/file",
         "audio_mime": audio.original_mime,
@@ -339,12 +374,110 @@ def _audio_view(session: Session, message_id: uuid.UUID) -> dict[str, Any] | Non
     }
 
 
-def _message_view(record: Message, session: Session) -> dict[str, Any]:
-    """Map a message to template-ready fields in the application timezone.
+def _missing_audio_fields() -> dict[str, Any]:
+    """Template fields of a voice card whose ``audio_files`` row is missing.
 
-    Audio messages additionally carry a server-generated ``audio_url`` and the
-    transcription-state caption; all values originate from the database, never
-    from user input, and are escaped by Jinja2 at render time.
+    Task T31: an audio message without its audio-file row used to leave every
+    audio key undefined, so the card rendered ``id="transcription-"`` (an
+    empty anchor), ``<audio src="">`` and a «Расшифровать» button with an empty
+    caption — dead controls and a broken jump target. The state is now stated
+    explicitly and the template renders the honest caption of the panel
+    (:data:`PANEL_AUDIO_FILE_MISSING`) instead of a player and a button.
+
+    Every key the available state carries is present here with an explicit
+    ``None``/``False``, so the template always reads a defined value
+    (``audio_available`` is the one flag it branches on).
+    """
+    return {
+        "audio_available": False,
+        "audio_file_id": None,
+        "audio_url": None,
+        "audio_mime": None,
+        # UI-only state of a missing linkage; it is never rendered as a
+        # ``data-transcription-state`` value (no transcription block exists).
+        "transcription_status": AUDIO_LINK_MISSING_STATE,
+        "transcription_label": PANEL_AUDIO_FILE_MISSING,
+        "transcription_raw": None,
+        "transcription_button_label": None,
+        "active_job_id": None,
+    }
+
+
+def _audio_views_for_messages(
+    session: Session, message_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, dict[str, Any]]:
+    """Card audio state of many messages in a constant number of reads (T31).
+
+    The batch path of :func:`_audio_view`, used by the day page and by the
+    "older" fragment: one read of the ``audio_files`` rows of every message,
+    one of their ``transcriptions`` and one of the in-flight
+    ``transcribe_audio`` jobs — three reads for the whole window, whatever its
+    number of voice messages (before T31 it was three reads *per card*, and
+    the panel added three more per voice row).
+
+    The returned mapping holds an entry only for messages that have an
+    ``audio_files`` row; a voice message without one is absent, and its caller
+    uses :func:`_missing_audio_fields` (never ``None`` and never an undefined
+    key in the template context).
+    """
+    if not message_ids:
+        return {}
+    audio_by_message: dict[uuid.UUID, AudioFile] = {}
+    for audio in AudioFileRepository(session).list_by_messages(message_ids):
+        # The repository groups a message's rows oldest first, so the last one
+        # is the row the single-message path picks.
+        audio_by_message[audio.message_id] = audio
+    if not audio_by_message:
+        return {}
+    transcriptions_by_audio: dict[uuid.UUID, list[Transcription]] = {}
+    for transcription in TranscriptionRepository(session).list_by_audio_files(
+        [audio.id for audio in audio_by_message.values()]
+    ):
+        transcriptions_by_audio.setdefault(transcription.audio_file_id, []).append(transcription)
+    active_jobs = find_active_transcription_jobs(
+        session, [audio.id for audio in audio_by_message.values()]
+    )
+    return {
+        message_id: _audio_fields(
+            audio,
+            transcriptions_by_audio.get(audio.id, []),
+            active_jobs.get(audio.id),
+        )
+        for message_id, audio in audio_by_message.items()
+    }
+
+
+def _message_views(records: Collection[Message], session: Session) -> list[dict[str, Any]]:
+    """Template fields of many messages — the batch render path (task T31).
+
+    Reads the audio linkage of the whole window with the constant number of
+    reads of :func:`_audio_views_for_messages` instead of once per card. The
+    produced fields are identical to :func:`_message_view` for every message,
+    voice messages without an ``audio_files`` row included (they get
+    :func:`_missing_audio_fields`).
+    """
+    records = list(records)
+    audio_views = _audio_views_for_messages(
+        session, [record.id for record in records if record.kind is MessageKind.audio]
+    )
+    return [
+        _message_fields(
+            record,
+            audio_views.get(record.id) if record.kind is MessageKind.audio else None,
+        )
+        for record in records
+    ]
+
+
+def _message_fields(record: Message, audio: dict[str, Any] | None) -> dict[str, Any]:
+    """Template-ready fields of one message in the application timezone.
+
+    ``audio`` is the resolved audio state for a voice message — a
+    :func:`_audio_fields` mapping when the ``audio_files`` row exists, ``None``
+    when it is missing (then :func:`_missing_audio_fields` states it honestly).
+    For text messages ``audio`` is ``None`` as well and is simply not used.
+    All values originate from the database, never from user input, and are
+    escaped by Jinja2 at render time.
     """
     settings = get_settings()
     created_local = record.created_at.astimezone(settings.tzinfo)
@@ -359,10 +492,27 @@ def _message_view(record: Message, session: Session) -> dict[str, Any]:
         "body": record.body_text,
     }
     if record.kind is MessageKind.audio:
-        audio = _audio_view(session, record.id)
-        if audio is not None:
-            view.update(audio)
+        view.update(_missing_audio_fields() if audio is None else audio)
     return view
+
+
+def _message_view(record: Message, session: Session) -> dict[str, Any]:
+    """Template fields of a single message — the one-message path (task T31).
+
+    The counterpart of the batch path :func:`_message_views` for a caller that
+    renders exactly one card: it resolves the audio state with the
+    single-message :func:`_audio_view` (at most three reads) and shares
+    :func:`_message_fields` with the batch path, so the two produce identical
+    fields. A voice message without an ``audio_files`` row gets the explicit
+    :func:`_missing_audio_fields` state here as well.
+
+    **No page calls this any more:** the day page and the older fragment render
+    through :func:`_message_views`. It stays as the oracle the parity test pins
+    the batch path against (which ``audio_files`` row and which in-flight job a
+    card must pick), so the two paths cannot silently drift apart.
+    """
+    audio = _audio_view(session, record.id) if record.kind is MessageKind.audio else None
+    return _message_fields(record, audio)
 
 
 def _nav_context(session: Session) -> dict[str, Any]:
@@ -431,7 +581,7 @@ def chat_page(
         request,
         "chat.html",
         {
-            "messages": [_message_view(message, session) for message in window],
+            "messages": _message_views(window, session),
             "has_more": next_cursor is not None,
             # Pre-quoted for the hx-get URL; Jinja never sees raw "+" or "|".
             "older_cursor": quote(older_cursor, safe="") if older_cursor else None,
@@ -754,10 +904,17 @@ def _day_voice_rows(
 
     Every audio message of the day gets one row: its wall-clock time, the
     transcription state as the card below words it (the caption and the button
-    label come from the very same :func:`_audio_view` the card is rendered
-    with — the state is never computed twice) and, when the transcription can
-    actually be started, a *link to that card's own button*
+    label come from the very same mapping the card is rendered with — the
+    state is never computed twice) and, when the transcription can actually be
+    started, a *link to that card's own button*
     (``#transcription-<audio file id>``).
+
+    The day's audio state is loaded through :func:`_audio_views_for_messages`
+    (task T31): three reads for the whole day instead of three per voice
+    message, and the same three fields the card path produces, so the panel
+    and the feed cannot drift apart. The effective status is unchanged: an
+    in-flight ``transcribe_audio`` job wins over the status of the newest
+    stored row.
 
     ``messages`` is the whole day while the feed renders only its newest
     window, so ``rendered_ids`` — the ids of the messages actually on the page
@@ -790,12 +947,20 @@ def _day_voice_rows(
         "failed": 0,
         "missing": 0,
     }
+    # Task T31: the whole day's audio state is read in a constant number of
+    # queries (they were three per voice message before), so the panel's cost
+    # no longer grows with the number of recordings. Every field below comes
+    # from the same mapping the cards are rendered from, so a row and its card
+    # can never disagree about a state or a button label.
+    audio_views = _audio_views_for_messages(
+        session, [message.id for message in messages if message.kind is MessageKind.audio]
+    )
     for message in messages:
         if message.kind is not MessageKind.audio:
             continue
         counters["voice"] += 1
         time_display = message.created_at.astimezone(settings.tzinfo).strftime(TIME_FORMAT)
-        audio = _audio_view(session, message.id)
+        audio = audio_views.get(message.id)
         if audio is None:
             counters["missing"] += 1
             rows.append(
@@ -1835,7 +2000,7 @@ def older_messages_fragment(
         request,
         "_older_messages.html",
         {
-            "messages": [_message_view(message, session) for message in window],
+            "messages": _message_views(window, session),
             "has_more": next_cursor is not None,
             "older_cursor": quote(older_cursor, safe="") if older_cursor else None,
         },

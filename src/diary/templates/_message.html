@@ -1,11 +1,21 @@
-{# One diary entry card — the day feed's unit (tasks 06/07/09, T16b).
+{# One diary entry card — the day feed's unit (tasks 06/07/09, T16b, T31).
 
    Reused by the day page (initial window) and by the "older" fragment.
    ``message`` is a template-facing dict: id / kind / created_at_iso /
    created_at_display / created_time_display / body, plus — for
-   ``kind == 'audio'`` — audio_file_id / audio_url / audio_mime / the effective
-   transcription status + label, the newest succeeded raw text, the transcribe
-   button label and the active job id when a job is in flight.
+   ``kind == 'audio'`` — the explicit ``audio_available`` flag and, when it is
+   true, audio_file_id / audio_url / audio_mime / the effective transcription
+   status + label, the newest succeeded raw text, the transcribe button label
+   and the active job id when a job is in flight.
+
+   A voice message whose ``audio_files`` row is missing (task T31) renders
+   neither a player nor a transcription block: the context carries
+   ``audio_available = False`` and the caption of the processing panel
+   (``PANEL_AUDIO_FILE_MISSING``), and the card says so in words. Before T31
+   those fields were simply absent, so Jinja2 rendered ``id="transcription-"``
+   (an empty jump target), ``<audio src="">`` and a «Расшифровать» button with
+   an empty caption — dead controls and a broken anchor. Nothing is drawn
+   instead of something that cannot work (AGENTS.md §19).
 
    Honest numbers only (task T16b):
    - the *duration* of a voice message is never rendered here. It is read in
@@ -25,7 +35,9 @@
      never from any user-supplied value (no user-controlled ``src``);
    - transcribe actions never run in a page request: they POST to the API and
      the job is polled by the client (Task 09).
-   - deletion (T15, ADR-011) is included for text and voice messages alike. #}
+   - deletion (T15, ADR-011) is included for text and voice messages alike, and
+     stays on the card even when the audio row is missing (the message record
+     itself is deletable). #}
 {% if message.kind == 'audio' %}
 <article class="message message--audio" id="message-{{ message.id }}">
   <header class="message__meta">
@@ -33,6 +45,7 @@
     <span class="message__kind">Голосовое сообщение</span>
     <time datetime="{{ message.created_at_iso }}">{{ message.created_time_display }}</time>
   </header>
+  {% if message.audio_available %}
   <div class="message__audio">
     {# The real player, with the browser's own controls: seeking, volume and
        keyboard operation come for free and stay accessible. #}
@@ -70,6 +83,12 @@
     </button>
     <p class="message__note" data-role="note" role="status" hidden></p>
   </div>
+  {% else %}
+  {# No audio-file row: no player, no transcription block, no button and no
+     anchor — only the caption the processing panel uses for the same state
+     (``PANEL_AUDIO_FILE_MISSING``). #}
+  <p class="message__audio-missing">{{ message.transcription_label }}</p>
+  {% endif %}
   <footer class="entry-footer">
     <p class="entry-footer__origin">Оригинал · локально</p>
     {% include "_message_actions.html" %}
