@@ -106,6 +106,47 @@ def test_the_settings_default_directory_is_where_the_fetch_script_writes() -> No
     )
 
 
+def test_the_judge_uses_an_explicitly_configured_directory(tmp_path: Path) -> None:
+    """T27/T38: a configured directory equal to the default is used, not rebased.
+
+    The value equals ``DEFAULT_DATA_ROOT / "models" / "nli"`` while the root is
+    somewhere else — exactly the case that used to send the judge to
+    ``<data_root>/models/nli`` and that the developer had to work around with a
+    symlink. No optional extra is needed: only the constructed paths are read.
+    """
+    from diary.core.settings import DEFAULT_DATA_ROOT, AppSettings
+
+    configured = DEFAULT_DATA_ROOT / "models" / "nli"
+    settings = AppSettings(
+        _env_file=None,  # type: ignore[call-arg]
+        data_root=tmp_path / "elsewhere",
+        nli_model_dir=configured,
+    )
+    judge = OnnxNliJudge.from_settings(settings)
+    assert Path(settings.data_root) / "models" / "nli" != configured
+    assert judge.model_path.parent == configured
+    assert judge.tokenizer_path.parent == configured
+    assert judge.config_path.parent == configured
+
+
+def test_a_missing_explicit_directory_is_named_in_the_error(tmp_path: Path) -> None:
+    """The error names the directory that was configured, not the default one."""
+    pytest.importorskip("onnxruntime")
+    pytest.importorskip("tokenizers")
+    from diary.core.settings import AppSettings
+
+    missing = tmp_path / "absent" / "nli"
+    settings = AppSettings(
+        _env_file=None,  # type: ignore[call-arg]
+        data_root=tmp_path / "elsewhere",
+        nli_model_dir=missing,
+    )
+    judge = OnnxNliJudge.from_settings(settings)
+    with pytest.raises(NliUnavailableError) as error:
+        judge.load()
+    assert str(missing / "model.onnx") in str(error.value)
+
+
 def test_a_corrupt_file_is_the_typed_failure_not_a_traceback(tmp_path: Path) -> None:
     """Whatever the loader throws, the caller sees NliUnavailableError.
 

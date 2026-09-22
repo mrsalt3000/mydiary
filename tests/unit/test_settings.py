@@ -9,6 +9,8 @@ import pytest
 from pydantic import ValidationError
 
 from diary.core.settings import (
+    _SUBDIR_FIELDS,
+    DEFAULT_DATA_ROOT,
     PROJECT_ROOT,
     AppSettings,
     get_settings,
@@ -23,6 +25,7 @@ _APP_ENV_VARS = (
     "APP_EXPORTS_DIR",
     "APP_TEMP_DIR",
     "APP_BACKUPS_DIR",
+    "APP_NLI_MODEL_DIR",
 )
 
 
@@ -36,6 +39,11 @@ def _isolate_app_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def _settings(**overrides: object) -> AppSettings:
     # _env_file=None disables dotenv so tests never depend on a real .env.
     return AppSettings(_env_file=None, **overrides)
+
+
+def _sibling_of(field_name: str) -> str:
+    """Another directory field, to check the root still reaches unset ones."""
+    return next(name for name in _SUBDIR_FIELDS if name != field_name)
 
 
 def test_default_values() -> None:
@@ -100,6 +108,60 @@ def test_relative_data_root_resolved_against_project() -> None:
     settings = _settings(data_root="data-rel")
     assert settings.data_root == PROJECT_ROOT / "data-rel"
     assert settings.db_dir == PROJECT_ROOT / "data-rel" / "db"
+
+
+@pytest.mark.parametrize(("field_name", "subdir"), sorted(_SUBDIR_FIELDS.items()))
+def test_explicit_directory_equal_to_the_default_is_kept_kwarg(
+    field_name: str, subdir: str
+) -> None:
+    """T38: a value a source sets is kept even when it equals the default.
+
+    The sibling directory is the discriminating half: unset directories still
+    follow the new root, so a passing assertion cannot come from "nothing was
+    rebased at all".
+    """
+    explicit = DEFAULT_DATA_ROOT / subdir
+    settings = _settings(data_root="/srv/diary", **{field_name: explicit})
+    sibling = _sibling_of(field_name)
+    assert getattr(settings, field_name) == explicit
+    assert getattr(settings, sibling) == Path("/srv/diary") / _SUBDIR_FIELDS[sibling]
+
+
+@pytest.mark.parametrize(("field_name", "subdir"), sorted(_SUBDIR_FIELDS.items()))
+def test_explicit_directory_equal_to_the_default_is_kept_env(
+    monkeypatch: pytest.MonkeyPatch, field_name: str, subdir: str
+) -> None:
+    """The same rule through the environment, which is how T27 hit it."""
+    monkeypatch.setenv("APP_DATA_ROOT", "/srv/diary")
+    monkeypatch.setenv(f"APP_{field_name.upper()}", str(DEFAULT_DATA_ROOT / subdir))
+    settings = AppSettings(_env_file=None)
+    sibling = _sibling_of(field_name)
+    assert getattr(settings, field_name) == DEFAULT_DATA_ROOT / subdir
+    assert getattr(settings, sibling) == Path("/srv/diary") / _SUBDIR_FIELDS[sibling]
+
+
+def test_default_directories_are_the_data_root_subdirs() -> None:
+    """Without any APP_* variable every directory is <repo>/data/<subdir>."""
+    settings = _settings()
+    assert settings.data_root == PROJECT_ROOT / "data"
+    for field_name, subdir in _SUBDIR_FIELDS.items():
+        assert getattr(settings, field_name) == DEFAULT_DATA_ROOT / subdir
+
+
+def test_relative_explicit_directory_resolves_against_project_root() -> None:
+    """An explicit relative directory keeps resolving against the repository root."""
+    settings = _settings(data_root="/srv/diary", db_dir="my/db")
+    assert settings.data_root == Path("/srv/diary")
+    assert settings.db_dir == PROJECT_ROOT / "my" / "db"
+    assert settings.audio_dir == Path("/srv/diary/audio")
+
+
+def test_a_directory_that_is_not_a_path_is_a_validation_error() -> None:
+    """A wrong type is reported by the field, not by a TypeError in the hook."""
+    with pytest.raises(ValidationError, match="db_dir"):
+        _settings(db_dir=123)
+    with pytest.raises(ValidationError, match="data_root"):
+        _settings(data_root=123)
 
 
 def test_get_settings_cache_and_reload(monkeypatch: pytest.MonkeyPatch) -> None:

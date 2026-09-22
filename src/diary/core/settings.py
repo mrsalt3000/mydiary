@@ -3,6 +3,10 @@
 Covers the application timezone and base storage paths. Values are read
 from ``APP_*`` environment variables and the repository-root ``.env`` file.
 
+Storage directories are subdirectories of ``APP_DATA_ROOT`` only while no
+source sets them: a directory a source set explicitly keeps exactly the value
+it was given, even when that value equals the compiled-in default (T38).
+
 Privacy: this module holds no secrets. Secrets are never part of
 ``AppSettings``; model profiles reference them by environment-variable name
 only (see ``diary.core.models_config`` and ``diary.core.profile_status``).
@@ -10,9 +14,10 @@ only (see ``diary.core.models_config`` and ``diary.core.profile_status``).
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Self
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, field_validator, model_validator
@@ -43,6 +48,17 @@ _SUBDIR_FIELDS: dict[str, str] = {
     "nli_model_dir": "models/nli",
 }
 
+
+def _absolute_path(value: Any) -> Path | None:
+    """Return ``value`` resolved to an absolute path, or ``None`` when it is
+    not a path at all (the field itself then reports the validation error)."""
+    try:
+        path = Path(os.fspath(value))
+    except TypeError:
+        return None
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
 #: Default MIME types accepted for voice-message uploads (Task 07).
 #: Mirrors what browsers emit for MediaRecorder recordings and plain file
 #: uploads (architecture brief §8.1). Only types with a built-in storage
@@ -61,9 +77,10 @@ class AppSettings(BaseSettings):
     """Application-wide settings loaded from the environment and ``.env``.
 
     Every value maps to an ``APP_*`` environment variable (for example
-    ``APP_TIMEZONE``, ``APP_DATA_ROOT``, ``APP_DB_DIR``). Storage directories
-    default to subdirectories of ``APP_DATA_ROOT`` unless overridden
-    individually.
+    ``APP_TIMEZONE``, ``APP_DATA_ROOT``, ``APP_DB_DIR``). A storage directory
+    that no source sets follows ``APP_DATA_ROOT``; a directory a source sets —
+    environment variable, ``.env`` or constructor argument — keeps exactly the
+    value it was given, even when that value equals the default.
     """
 
     model_config = SettingsConfigDict(
@@ -184,25 +201,46 @@ class AppSettings(BaseSettings):
             raise ValueError("At least one allowed audio MIME type is required.")
         return normalized
 
-    @model_validator(mode="after")
-    def _resolve_data_paths(self) -> Self:
-        """Make data paths absolute and rebase per-directory defaults.
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_data_paths(cls, data: Any) -> Any:
+        """Make data paths absolute and inherit the root only where it applies.
 
-        When ``APP_DATA_ROOT`` is changed, subdirectories that were not
-        overridden explicitly follow the new root. Relative overrides are
-        resolved against the repository root.
+        The hook runs *before* validation because a later one could no longer
+        tell a set directory from an unset one: an unset field then simply holds
+        its compiled-in default, which is exactly the value that must not be
+        read as "explicitly set" (T38). ``model_fields_set`` is no substitute
+        there, because assigning to a field marks it as set — the previous
+        ``mode="after"`` hook added the six directories and ``data_root`` to
+        that set through its own assignments. Here, by contrast, the dictionary
+        holds only the keys env, ``.env`` and constructor arguments supplied —
+        defaults are not applied yet.
+
+        So a directory present here keeps its value — even one equal to the
+        compiled-in default, which used to be silently replaced by
+        ``APP_DATA_ROOT/<subdir>`` (T38). Only directories absent here follow
+        the root, and relative values (of the root and of any directory) resolve
+        against the repository root. Values that are not paths are passed
+        through untouched for the field to reject.
         """
-        root = self.data_root
-        if not root.is_absolute():
-            root = PROJECT_ROOT / root
-        self.data_root = root
+        if not isinstance(data, dict):
+            return data
+        values = dict(data)
+        if "data_root" in values:
+            root = _absolute_path(values["data_root"])
+            if root is None:
+                return values
+            values["data_root"] = root
+        else:
+            root = DEFAULT_DATA_ROOT
         for field_name, subdir in _SUBDIR_FIELDS.items():
-            current = getattr(self, field_name)
-            if current == DEFAULT_DATA_ROOT / subdir:
-                setattr(self, field_name, root / subdir)
-            elif not current.is_absolute():
-                setattr(self, field_name, PROJECT_ROOT / current)
-        return self
+            if field_name not in values:
+                values[field_name] = root / subdir
+                continue
+            explicit = _absolute_path(values[field_name])
+            if explicit is not None:
+                values[field_name] = explicit
+        return values
 
     @property
     def tzinfo(self) -> ZoneInfo:

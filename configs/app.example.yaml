@@ -20,6 +20,10 @@ APP_DATA_ROOT: /path/to/local/diary-data
 # APP_EXPORTS_DIR: <APP_DATA_ROOT>/exports   # недельные выгрузки и производные слои
 # APP_TEMP_DIR:    <APP_DATA_ROOT>/temp      # временные файлы (очистка по политике)
 # APP_BACKUPS_DIR: <APP_DATA_ROOT>/backups   # архивы бэкапов
+#
+# Правило (T38): явно заданный каталог сохраняет ровно то значение, которое ему
+# дали, — даже если оно совпадает со значением по умолчанию; за APP_DATA_ROOT
+# следуют только незаданные каталоги.
 
 # Очистка временного каталога (Task 18): `python -m diary.cli backup
 # --clean-temp` удаляет файлы внутри APP_TEMP_DIR старше этого порога (сек).
