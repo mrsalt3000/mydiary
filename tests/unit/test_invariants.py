@@ -188,6 +188,118 @@ def test_causal_claim_is_allowed_in_doubt_not_assertion() -> None:
     assert CAUSAL_CHECK not in _checks(day, contract="daily_summary")
 
 
+def _day(facts: list[str]) -> dict[str, object]:
+    """A day payload that satisfies every other invariant as written."""
+    return {"facts": facts, "themes": ["Сон"], "open_questions": []}
+
+
+def test_subordinate_cause_verb_is_caught() -> None:
+    """The finding T34 closes: the T26 measurement read exactly this in a rollup.
+
+    «…, что вызвало трудности» passed every check: the lexicon carried «привело
+    к», «повлиял» and «влияние», but no form of «вызвать».
+    """
+    assert CAUSAL_CHECK in _checks(
+        _day(["Просыпалась ночью три раза, что вызвало трудности днём."]),
+        contract="daily_summary",
+    )
+
+
+def test_cause_verb_is_caught_on_the_layer_the_finding_was_measured_on() -> None:
+    """The weekly rollup is where T26 read it, so the tooth is pinned there too."""
+    weekly = {"rollup": "Неделя прошла в разъездах, что вызвало усталость к пятнице."}
+    assert CAUSAL_CHECK in _checks(weekly, contract="weekly_summary")
+
+
+def test_demonstrative_and_present_forms_of_the_cause_verb_are_caught() -> None:
+    """The two listed constructions carry the forms T34 names, present included."""
+    for claim in (
+        "Это вызвало трудности с концентрацией.",
+        "Это вызывает усталость к вечеру.",
+        "Вечерние разговоры, что вызывает раздражение.",
+    ):
+        assert CAUSAL_CHECK in _checks(_coach(observations=[claim])), claim
+
+
+def test_the_call_verb_is_not_a_cause() -> None:
+    """The false positive T34 measured, and why the bare verb is not in the list.
+
+    «Вызвала мастера» is a visit, not causality. The live day layer stored this
+    sentence verbatim in ``facts`` in **3 of 3** probe runs of the T34
+    measurement, and that summary passed the gate: a bare «вызв» entry would
+    have refused a faithful day summary twice over and stored nothing
+    (``docs/nli-validation-analysis.md`` §12).
+    """
+    assert CAUSAL_CHECK not in _checks(
+        _day(["Вызвала мастера по стиральной машине, он пришёл вечером и поменял насос."]),
+        contract="daily_summary",
+    )
+
+
+def test_a_cause_stated_before_its_subject_stays_uncaught() -> None:
+    """The residual T34 names rather than hides, pinned so it cannot drift.
+
+    Closing this word order (and the passive, and «может вызвать») needs the bare
+    verb — the very entry the measurement showed refusing faithful summaries, so
+    it is a decision for the owner of the rule and not a silent widening here.
+    """
+    assert CAUSAL_CHECK not in _checks(
+        _day(["Недосып вызвал усталость к вечеру."]), contract="daily_summary"
+    )
+
+
+def test_the_influence_verb_is_caught() -> None:
+    """The T34 follow-up: the prompts forbade «влияет/влияют», the lexicon did not.
+
+    ``sum_weekly/v2`` and ``coach_note/v3`` enumerate «повлияет», «влияет»,
+    «влияют», «влияния» among the words the layer must never write, while the
+    lexicon carried only «повлиял*» and the single form «влияние» — the gate was
+    laxer than the prompt's own list.
+    """
+    assert CAUSAL_CHECK in _checks(
+        _day(["Поздние созвоны плохо влияют на сон."]), contract="daily_summary"
+    )
+
+
+def test_the_influence_verb_is_caught_in_the_future_and_the_past() -> None:
+    """One entry per form family: «влияет» also covers «повлияет», «влиял» the past."""
+    for claim in (
+        "Смена графика повлияет на сон.",
+        "Осенью это влияло на планы.",
+        "Разговоры вечером влияют на засыпание.",
+    ):
+        assert CAUSAL_CHECK in _checks(_day([claim]), contract="daily_summary"), claim
+
+
+def test_the_influence_noun_and_the_infinitive_are_caught() -> None:
+    """The paradigm stem covers the oblique cases the single form «влияние» missed."""
+    for claim in (
+        "Погода почти не имела влияния на прогулки.",
+        "Речь шла о влиянии шума на сон.",
+        "Сон продолжает влиять на работу.",
+    ):
+        assert CAUSAL_CHECK in _checks(_day([claim]), contract="daily_summary"), claim
+
+
+def test_an_influential_person_is_not_a_cause() -> None:
+    """The two false positives the follow-up measured, and why no root is listed.
+
+    The live day layer stored «Обедала с влиятельным человеком…» verbatim in
+    ``facts`` in **3 of 3** probe runs; a bare «влия» refused every one of them
+    (3 runs, both attempts, nothing stored). The participle is the same class:
+    the stored theme «влияющие связи» is caught by «влияющ»/«влияю». Neither
+    reads a cause, so neither is in the list
+    (``docs/nli-validation-analysis.md`` §12.1).
+    """
+    assert CAUSAL_CHECK not in _checks(
+        _day(["Обедала с влиятельным человеком из отрасли."]), contract="daily_summary"
+    )
+    assert CAUSAL_CHECK not in _checks(
+        {"facts": ["День прошёл спокойно."], "themes": ["влияющие связи"], "open_questions": []},
+        contract="daily_summary",
+    )
+
+
 def test_correction_layer_may_keep_the_speakers_words() -> None:
     """``stt_corrected`` is faithful rewriting: the source's lexemes are not new."""
     source = [{"id": str(uuid.uuid4()), "text": "устал из-за дороги", "ts": "2026-09-14T18:00:00Z"}]

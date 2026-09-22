@@ -178,7 +178,48 @@ CAUSAL_CONNECTOR_LEXEMES: tuple[str, ...] = (
     "повлияла",
     "повлияло",
     "повлияли",
-    "влияние",
+    # The influence family (T34 follow-up, 2026-09-22). The prompts of the weekly
+    # and the coaching layer already enumerate «повлияет», «влияет», «влияют»,
+    # «влияния» among the forbidden words while the lexicon carried only
+    # «повлиял*» and the single form «влияние» — the gate was **laxer** than the
+    # prompt's own list. Five forms close it, and the «influential» homograph
+    # stays out of all of them: the bare root («влия») is measured to refuse a
+    # faithful day summary («Обедала с влиятельным человеком…» — 3 of 3 probe
+    # runs, 0 stored) and the participle forms («влияющ», «влияю») fire on a
+    # stored theme («влияющие связи»), so neither is listed. Between them the
+    # five carry more than they are named for: «влияет» also covers «повлияет»
+    # and «влияете», «влияют» also covers «повлияют», «влиял» covers
+    # «влияла/влияло/влияли», and «влияни» (the paradigm stem that replaces the
+    # single form «влияние») covers «влияния/влиянию/влиянием/влиянии».
+    # Measured: 0 added firings and 0 added false positives on every recorded
+    # corpus, while the owner's own transcriptions do carry «влияет» and
+    # «влиял» — the family is live in the source. Numbers, the excluded
+    # candidates and the judged (absent) firings: ``docs/nli-validation-
+    # analysis.md`` §12.1.
+    "влияет",
+    "влияют",
+    "влиял",
+    "влиять",
+    "влияни",
+    # The causal reading of «вызвать» (T34; the T26 measurement read
+    # «…, что вызвало трудности» in a live weekly rollup and nothing caught it).
+    # The **bare** verb is deliberately absent: «вызвала врача», «вызвала
+    # мастера» is the *call* verb, and T34 measured the cost of listing it — the
+    # live day layer stored a faithful summary «Вызвала мастера по стиральной
+    # машине…» in 3 of 3 probe runs, which a bare «вызв» would have refused
+    # (numbers and the refused variants: ``docs/nli-validation-analysis.md`` §12).
+    # Only the two constructions that *assert* a cause are listed here, and
+    # between them they carry every form T34 names: the subordinate clause
+    # («…, что вызвало/вызвал/вызвала/вызвали/вызвать …», «…, что вызывает …»)
+    # and the demonstrative subject («Это вызвало …», «Это вызывает …»). A cause
+    # stated before its subject («Недосып вызвал усталость»), the passive
+    # («было вызвано») and the modal («может вызвать») stay uncaught: closing
+    # them needs the bare verb, i.e. the measured false positive — a decision for
+    # the owner of the rule, and it is named as such in §12.
+    "что вызв",
+    "что вызыв",
+    "это вызв",
+    "это вызыв",
 )
 
 #: Cardinal numerals as words, mapped to their digit value. Used by the
