@@ -24,6 +24,7 @@
   "lang": "ru",
   "latency_budget_s": {
     "daily": 15,
+    "daily_merge": 25,
     "stt_fix": 5,
     "weekly": 180
   },

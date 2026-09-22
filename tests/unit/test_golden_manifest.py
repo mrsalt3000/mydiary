@@ -114,6 +114,14 @@ def test_manifest_identity() -> None:
     assert MANIFEST.budget_default.num_ctx == DEFAULT_NUM_CTX
     assert MANIFEST.latency_budget_s.stt_fix == 5
     assert MANIFEST.latency_budget_s.daily == 15
+    # T41: the fold-back call of a split day is graded by a budget of its own, and
+    # the number is a **decision** of the project owner (2026-09-22) with a ~27 %
+    # margin over the worst measured fold-back call (19.74 s, the run that caught an
+    # NLI-gate regeneration), not a measurement rounded up. The parts keep ``daily``
+    # above, and the other routes declare no fold-back budget at all, so pinning the
+    # numbers here is what keeps a «harmless» edit from moving a threshold.
+    assert MANIFEST.latency_budget_s.daily_merge == 25
+    assert MANIFEST.latency_budget_s.daily_merge > MANIFEST.latency_budget_s.daily
     # T21: the weekly rollup runs on the CPU twin, so it carries its own budget.
     assert MANIFEST.latency_budget_s.weekly == 180
 

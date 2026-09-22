@@ -60,7 +60,12 @@ lexeme lists, the numeral words and the budget reserve. The checks are:
   (T40: the budgets were calibrated on one call, so one call is the unit they are
   compared with; the calls of a layer that honestly splits its input are timed
   one by one, while the chunk's own total stays in the report, so the price of
-  splitting is visible instead of being absorbed by the budget).
+  splitting is visible instead of being absorbed by the budget). Inside the day
+  route the fold-back call of a split day is graded by a budget of its own (T41,
+  ``daily_merge`` = 25 s): it is a different call from a part — another template
+  and an output the size of the whole day — and the harness tells it from a part
+  by the prompt version the layer stamped on the request, never by the call's
+  position in the run (a regenerated day makes eight calls, not four).
 
 Two counts, never one (T18): a chunk can fail because its *content* broke an
 invariant or because it missed its latency budget, and the report names the two
@@ -227,6 +232,9 @@ from diary.domain.pipelines.sum_daily.pipeline import (
     ENTRIES_HEADER as SUM_ENTRIES_HEADER,
 )
 from diary.domain.pipelines.sum_daily.pipeline import (
+    MERGE_PROMPT_VERSION as SUM_MERGE_PROMPT_VERSION,
+)
+from diary.domain.pipelines.sum_daily.pipeline import (
     PARTS_HEADER as SUM_PARTS_HEADER,
 )
 from diary.domain.pipelines.sum_daily.pipeline import (
@@ -280,8 +288,30 @@ PROMPT_PATH_BY_CATEGORY: dict[str, Path] = {
 #: not a content check: T18 keeps the two counts apart, because a cold model load
 #: and a broken invariant are different events that used to share one number.
 #: Since T40 the figure compared with the budget is the **slowest single call**
-#: of the chunk, not the sum of its calls (see :func:`_apply_latency_budget`).
+#: of the chunk, not the sum of its calls (see :func:`_apply_latency_budget`);
+#: since T41 the day layer's fold-back call is compared with a budget of its own.
 LATENCY_CHECK = "latency_budget"
+
+#: Template version each layer stamps on its **fold-back** call (T41).
+#:
+#: A split day (T23, ``ADR-016``) is summarized part by part with the ordinary
+#: template and folded back with another one: the day layer's merge request is
+#: built by :meth:`~diary.domain.pipelines.sum_daily.pipeline.SumDailyPipeline.
+#: build_merge_request`, which stamps ``prompt_version`` with
+#: ``MERGE_PROMPT_VERSION`` ("v2", ``prompts/sum_daily/v2.md``), while its part
+#: requests carry ``PROMPT_VERSION`` ("v1"). The harness reads the **same
+#: constant the layer writes with**, so a version bump cannot leave the
+#: classification behind.
+#:
+#: Why the request and not its place in the run: a day whose facts the NLI gate
+#: rejects is regenerated (``generate_with_invariants``), and a regenerated day
+#: makes **eight** calls — parts, fold-back, parts, fold-back (measured live in
+#: T40: 8 calls, the slowest 17.20 and 19.74 s). «The last call» would then grade
+#: the second part's tail as if it were the fold-back and miss the first one
+#: entirely; «every N-th call» needs N *and* the assumption that no other step
+#: ever gets retried. The prompt version is set by construction, travels with the
+#: request, and is already recorded as provenance — one source, no heuristics.
+MERGE_PROMPT_VERSION_BY_CATEGORY: dict[str, str] = {"day": SUM_MERGE_PROMPT_VERSION}
 
 #: Pipeline type recorded on the processing run of each category.
 PIPELINE_TYPE_BY_CATEGORY: dict[str, PipelineType] = {
@@ -448,12 +478,23 @@ class ChunkOutcome:
     #: column, while the **budget** is compared with :attr:`slowest_call_s`.
     latency_s: float = 0.0
     latency_budget_s: float | None = None
+    #: Budget of the layer's **fold-back** call of this chunk, when its route
+    #: declares one (T41; only the day layer does — ``daily_merge``). ``None``
+    #: means every call of the chunk is graded by :attr:`latency_budget_s`, which
+    #: is the T40 behaviour and stays the rule for the other routes.
+    merge_budget_s: float | None = None
     #: Wall time of every ``complete`` call the layer made, in call order (T40).
     #: A day that the layer honestly splits (T23, ``ADR-016``) makes several calls;
     #: timing them one by one is what lets the route budget stay calibrated on one
     #: call. Empty when nothing was timed — a layer that failed before its first
     #: request — and then :attr:`slowest_call_s` falls back to the chunk's total.
     call_seconds: list[float] = field(default_factory=list)
+    #: ``prompt_version`` of each of those calls, in the same order (T41): the
+    #: field the layer stamps when it builds the request, which is how the harness
+    #: tells a part from the fold-back without guessing from the order. Shorter
+    #: than ``call_seconds`` only for a hand-built outcome, and a call without a
+    #: version is graded by the route budget like every other call.
+    call_prompt_versions: list[str | None] = field(default_factory=list)
     violations: list[Violation] = field(default_factory=list)
     diagnostics: list[str] = field(default_factory=list)
     #: Number of calls the layer made, as the harness counted them (T40 — the count
@@ -494,7 +535,7 @@ class ChunkOutcome:
 
     @property
     def slowest_call_s(self) -> float:
-        """The figure the route budget is compared with: the slowest single call (T40).
+        """The slowest single call of the chunk (T40) — the figure the row prints.
 
         The budgets of T21 (5/15/180 s) were calibrated on **one** call, so one call
         is the unit they are graded in: a layer that splits a long input into parts
@@ -503,8 +544,69 @@ class ChunkOutcome:
         request — the chunk's own wall time is the only measurement there is, and
         the fallback is deliberately the *total* rather than zero: an unmeasurable
         chunk must not read as a fast one.
+
+        Which budget that figure is graded with is decided per call, not here
+        (:meth:`call_budget_s`, T41): a chunk with a fold-back call prints the
+        slowest call of either kind, and the report names them separately.
         """
         return max(self.call_seconds) if self.call_seconds else self.latency_s
+
+    def call_is_merge(self, index: int) -> bool:
+        """Whether call ``index`` is the layer's **fold-back** call (T41).
+
+        The answer comes from the request itself: the layer stamps the template
+        version it built the request from, and the harness compares it with the
+        version the same layer uses for its fold-back template
+        (:data:`MERGE_PROMPT_VERSION_BY_CATEGORY`). Position in the run is
+        deliberately not consulted — a regenerated day interleaves parts and
+        fold-backs, so position is exactly the signal that lies here.
+        """
+        expected = MERGE_PROMPT_VERSION_BY_CATEGORY.get(self.category)
+        if expected is None or index >= len(self.call_prompt_versions):
+            return False
+        return self.call_prompt_versions[index] == expected
+
+    def call_budget_s(self, index: int) -> float | None:
+        """The latency budget call ``index`` is graded with (T41).
+
+        A fold-back call is compared with the fold-back budget of its route, every
+        other call with the route budget — the same number for the other routes,
+        whose layers declare no separate fold-back budget (``None`` falls back to
+        the route budget rather than exempting the call).
+        """
+        if self.call_is_merge(index) and self.merge_budget_s is not None:
+            return self.merge_budget_s
+        return self.latency_budget_s
+
+    @property
+    def merge_call_seconds(self) -> list[float]:
+        """Wall time of the fold-back calls of this chunk, in call order (T41)."""
+        return [
+            seconds for index, seconds in enumerate(self.call_seconds) if self.call_is_merge(index)
+        ]
+
+    @property
+    def part_call_seconds(self) -> list[float]:
+        """Wall time of the calls that are **not** fold-backs (T41).
+
+        For every chunk that splits nothing this is every call it made, so the
+        route budget keeps grading exactly what it graded in T40.
+        """
+        return [
+            seconds
+            for index, seconds in enumerate(self.call_seconds)
+            if not self.call_is_merge(index)
+        ]
+
+    @property
+    def slowest_part_call_s(self) -> float | None:
+        """The slowest non-fold-back call, or ``None`` when the chunk made none."""
+        return max(self.part_call_seconds) if self.part_call_seconds else None
+
+    @property
+    def slowest_merge_call_s(self) -> float | None:
+        """The slowest fold-back call, or ``None`` when the chunk made none."""
+        return max(self.merge_call_seconds) if self.merge_call_seconds else None
 
     @property
     def latency_within_budget(self) -> bool:
@@ -1254,11 +1356,18 @@ class TimedProvider:
     A call that raises is timed too: it cost the same wall time, and the layer may
     well retry it (``generate_with_invariants``) or turn it into a named failure.
     Metrics only — the request and the response are passed through untouched.
+
+    Beside the time, the ``prompt_version`` the layer stamped on the request is
+    recorded (T41): that is what tells a part from the fold-back without inferring
+    it from the order of the calls (see
+    :data:`MERGE_PROMPT_VERSION_BY_CATEGORY`). The version is provenance, not
+    content — it is the template's number, never anything the request carries.
     """
 
     def __init__(self, provider: LLMProvider) -> None:
         self._provider = provider
         self.call_seconds: list[float] = []
+        self.call_prompt_versions: list[str | None] = []
 
     def complete(self, request: LLMRequest) -> LLMResponse:
         started = _clock()
@@ -1266,6 +1375,7 @@ class TimedProvider:
             return self._provider.complete(request)
         finally:
             self.call_seconds.append(_clock() - started)
+            self.call_prompt_versions.append(request.prompt_version)
 
     @property
     def usages(self) -> list[LLMUsage] | None:
@@ -1340,6 +1450,7 @@ def evaluate_chunk(
         kind=chunk.invariants.kind,
         profile_name=PROFILE_NAME_BY_CATEGORY[chunk.category],
         latency_budget_s=_latency_budget_for(chunk),
+        merge_budget_s=_merge_latency_budget_for(chunk),
     )
     outcome.violations.extend(check_budget(chunk, profile=resolved_profile))
 
@@ -1384,6 +1495,10 @@ def evaluate_chunk(
             permanent = exc
         outcome.latency_s = _clock() - started
         outcome.call_seconds = list(timed.call_seconds)
+        # Which step each call was (T41): read from the request the layer built, so
+        # the fold-back is identified by what it is and not by where it happened to
+        # land in the run (a regenerated day interleaves parts and fold-backs).
+        outcome.call_prompt_versions = list(timed.call_prompt_versions)
         # The call count is the harness's own measurement (T40), not what a provider
         # chooses to report: one source for one number, and it counts a call that
         # raised like any other call the layer made.
@@ -1460,6 +1575,7 @@ def _skipped_outcome(chunk: GoldenChunk) -> ChunkOutcome:
         kind=chunk.invariants.kind,
         profile_name=profile,
         latency_budget_s=_latency_budget_for(chunk),
+        merge_budget_s=_merge_latency_budget_for(chunk),
         skipped_reason="profile_off",
     )
 
@@ -1474,6 +1590,9 @@ def _latency_budgets() -> dict[str, float]:
     is unreachable. A category without a declared budget (the coaching note,
     launched explicitly and rarely) stays at ``None`` and is reported as ``n/a``
     instead of being compared with a foreign number.
+
+    This is the budget of a **part** of the route; the day layer's fold-back call
+    has a budget of its own (:func:`_merge_latency_budgets`, T41).
     """
     budget = golden_manifest().latency_budget_s
     return {
@@ -1483,9 +1602,37 @@ def _latency_budgets() -> dict[str, float]:
     }
 
 
+@lru_cache(maxsize=1)
+def _merge_latency_budgets() -> dict[str, float]:
+    """Budget of the **fold-back** call of each category that declares one (T41).
+
+    Only the day route does. Its fold-back is not a part: it is built from another
+    template (``prompts/sum_daily/v2.md``) and returns the summary of the whole
+    day (924 output tokens against 65-524 for the parts in the live run of
+    2026-09-22), so the measured call is consistently slower than any part —
+    18.93 / 18.95 / 18.95 s in three live runs, 18.56 and 18.43 s in acceptance
+    runs, 19.74 s in the run that caught an NLI-gate regeneration (8 calls). 25 s
+    is the project owner's decision of 2026-09-22: the same 15 s would keep grading
+    a different call by the parts' number, and the margin over the worst measured
+    call is ~27 %. The routes that declare no entry here keep the behaviour of T40
+    (every call graded by the route budget), so no other threshold moves.
+
+    The keys must stay in step with :data:`MERGE_PROMPT_VERSION_BY_CATEGORY` — a
+    category the harness can recognise a fold-back in, but has no budget for, would
+    silently fall back to the part budget. A test pins that they agree.
+    """
+    budget = golden_manifest().latency_budget_s
+    return {"day": float(budget.daily_merge)}
+
+
 def _latency_budget_for(chunk: GoldenChunk) -> float | None:
-    """Latency budget of a category, or ``None`` when the manifest sets none."""
+    """Latency budget of the parts of a category, or ``None`` when it declares none."""
     return _latency_budgets().get(chunk.category)
+
+
+def _merge_latency_budget_for(chunk: GoldenChunk) -> float | None:
+    """Budget of the fold-back call of a category, or ``None`` when it declares none."""
+    return _merge_latency_budgets().get(chunk.category)
 
 
 def _record_measurements(
@@ -1534,48 +1681,80 @@ def _measured_usages(provider: LLMProvider) -> list[LLMUsage]:
     return [last] if isinstance(last, LLMUsage) else []
 
 
-def _apply_latency_budget(outcome: ChunkOutcome) -> None:
-    """Grade the chunk by its **slowest single call** against its route budget (T40).
+def _call_step_label(outcome: ChunkOutcome, index: int) -> str:
+    """How the violation and the report name the graded call (T41).
 
-    The budget stays what the user's decision made it (5/15/180 s per route, T21)
-    and stays compared with **one call** — that is the unit it was calibrated in.
-    What changed in T40 is only which figure of a chunk that is. Until then it was
-    the whole layer run, which on a day the layer honestly splits (T23, ``ADR-016``)
-    is the sum of its parts plus the fold-back: 17.76 s + 8.14 s + 18.77 s in the
-    T35 measurement. Any correctly split day was therefore red by construction,
-    however fast each call was, and the number said nothing about the layer.
-
-    Now every call the layer made is timed (:class:`TimedProvider`) and the budget
-    is applied to each of them — equivalently, to the slowest one. A chunk that makes
-    a single call is graded by that call rather than by the chunk total around it, so
-    the work outside a call (the store, the gate) leaves the budget: measured live on
-    the three short golden days that is 0.24–3.03 s out of 15 s. The number the budget
-    is compared with is still the calibrated one, the chunk total is printed next to
-    it, and the number of calls is never what fails a chunk: a split day with one slow
-    call is as red as a single-call day that is slow.
+    A fold-back call is named as such — it is the one call whose budget differs —
+    while the calls of a chunk that splits nothing keep the T40 wording (they are
+    simply "the chunk's call"), so an ordinary day's failure reads as it did before.
     """
-    budget = outcome.latency_budget_s
-    if budget is None:
+    if outcome.call_is_merge(index):
+        return "the fold-back call"
+    if len(outcome.call_seconds) == 1:
+        return "the chunk's only call"
+    return "a part call"
+
+
+def _apply_latency_budget(outcome: ChunkOutcome) -> None:
+    """Grade **every** call of the chunk against the budget of its step (T40, T41).
+
+    Two decisions are held here. The first is T40's: the budget is compared with
+    one **call**, not with the whole layer run. Until T40 the figure was the chunk,
+    which on a day the layer honestly splits (T23, ``ADR-016``) is the sum of its
+    parts plus the fold-back (17.76 s + 8.14 s + 18.77 s in the T35 measurement), so
+    any correctly split day was red by construction and the number said nothing
+    about the layer. Now every call is timed (:class:`TimedProvider`) and each of
+    them is graded — equivalently, the slowest one when they share a budget. The
+    work outside the calls (the store, the gate) leaves the budget; measured live
+    on the three short golden days that is 0.24-3.03 s out of 15 s. The chunk total
+    is still printed next to the graded figure, and the number of calls is never
+    what fails a chunk: a split day with one slow call is as red as a single-call
+    day that is slow.
+
+    The second is T41's: which budget a call is graded with follows from **what the
+    call is** (``call_budget_s`` — the layer's fold-back template against the
+    fold-back budget of the route, everything else against the route budget), not
+    from the call's position. The fold-back of a split day is a different call from
+    a part — another template, and an output the size of the whole day — and grading
+    it with the parts' number mixed two categories: measured live, the parts of the
+    long golden day land in 5.3-13.7 s while the fold-back lands in 18.43-19.74 s.
+    Every call over **its own** budget produces a violation, so a single slow part,
+    a single slow fold-back and a chunk with both are each named as what they are;
+    a route that declares no fold-back budget behaves exactly as in T40.
+    """
+    if outcome.latency_budget_s is None and outcome.merge_budget_s is None:
         return
-    slowest = outcome.slowest_call_s
-    if slowest <= budget:
+    if not outcome.call_seconds:
+        # Nothing was timed (the layer failed before its first request), so there is
+        # no call to grade: the chunk's own wall time is the only measurement there
+        # is, and it is compared with the route budget. Grading it as ``0.00s``
+        # would read as «fast».
+        budget = outcome.latency_budget_s
+        if budget is None or outcome.latency_s <= budget:
+            return
+        outcome.violations.append(
+            Violation(
+                LATENCY_CHECK,
+                f"{outcome.latency_s:.2f}s > {budget:.0f}s (the chunk — no call was timed; "
+                f"chunk total {outcome.latency_s:.2f}s, profile {outcome.profile_name}, "
+                f"category {outcome.category})",
+            )
+        )
         return
     calls = len(outcome.call_seconds)
-    if calls:
-        over = sum(1 for seconds in outcome.call_seconds if seconds > budget)
-        unit = f"slowest of {calls} call(s), {over} over budget"
-    else:
-        # Nothing was timed (the layer failed before its first request), so there is
-        # no call to blame and no «1 over budget» to report next to it.
-        unit = "the chunk — no call was timed"
-    outcome.violations.append(
-        Violation(
-            LATENCY_CHECK,
-            f"{slowest:.2f}s > {budget:.0f}s ({unit}; "
-            f"chunk total {outcome.latency_s:.2f}s, profile {outcome.profile_name}, "
-            f"category {outcome.category})",
+    for index, seconds in enumerate(outcome.call_seconds):
+        budget = outcome.call_budget_s(index)
+        if budget is None or seconds <= budget:
+            continue
+        step = _call_step_label(outcome, index)
+        outcome.violations.append(
+            Violation(
+                LATENCY_CHECK,
+                f"{seconds:.2f}s > {budget:.0f}s (call {index + 1}/{calls} — {step}; "
+                f"chunk total {outcome.latency_s:.2f}s, profile {outcome.profile_name}, "
+                f"category {outcome.category})",
+            )
         )
-    )
 
 
 def evaluate_all(
@@ -1809,9 +1988,9 @@ class Summary:
     number: ``invariants_passed`` is what the manifest threshold talks about,
     ``latency_within_budget`` counts the chunks that stayed inside their route's
     budget (out of ``latency_measured``; each chunk is graded by its **slowest
-    single call**, T40), and ``fully_passed`` is their intersection. The report
-    never blends them, because a gate refusal and a cold model load are different
-    events.
+    single call** of each kind, T40/T41), and ``fully_passed`` is their
+    intersection. The report never blends them, because a gate refusal and a cold
+    model load are different events.
     """
 
     total: int
@@ -1821,14 +2000,27 @@ class Summary:
     latency_measured: int
     latency_within_budget: int
     fully_passed: int
-    #: The slowest **single call** of each category (T40) — the figure the route
-    #: budget was compared with, and the one the report prints as ``slowest call``.
+    #: The slowest **single part call** of each category (T40) — the figure the
+    #: route budget was compared with, and the one the report prints as ``slowest
+    #: call`` (or as ``slowest part call`` where a fold-back figure is printed next
+    #: to it). A chunk that splits nothing contributes its only call here.
     max_call_by_category: dict[str, float]
+    #: The slowest **fold-back** call of each category that made one (T41), graded
+    #: with the fold-back budget of its route and printed with it. Separate from
+    #: ``max_call_by_category`` because the two figures answer two different
+    #: questions: how fast the parts are, and how long the summary of the whole day
+    #: takes.
+    max_merge_call_by_category: dict[str, float]
     #: The slowest **chunk total** of each category: every call of the layer plus
-    #: the work around them. Printed next to the call figure, so the price of
+    #: the work around them. Printed next to the call figures, so the price of
     #: splitting a day is visible in the summary as well as in the chunk row.
     max_latency_by_category: dict[str, float]
     latency_budgets: dict[str, float | None]
+    #: Fold-back budget of each category that declares one (T41): the number the
+    #: calls of :attr:`max_merge_call_by_category` were graded with. ``None`` for a
+    #: route whose layer makes no separate fold-back — there the route budget
+    #: grades every call.
+    merge_budgets: dict[str, float | None]
     diagnostics_total: int
     #: NLI measurement block (T24a). Zeroed when ``--nli`` was not requested; the
     #: counters are deliberately separate from the invariant and latency counts.
@@ -1855,7 +2047,9 @@ def summarize(outcomes: Sequence[ChunkOutcome]) -> Summary:
     """
     max_latency: dict[str, float] = {}
     max_call: dict[str, float] = {}
+    max_merge_call: dict[str, float] = {}
     budgets: dict[str, float | None] = {}
+    merge_budgets: dict[str, float | None] = {}
     skipped_categories: set[str] = set()
     for outcome in outcomes:
         if outcome.skipped:
@@ -1864,10 +2058,21 @@ def summarize(outcomes: Sequence[ChunkOutcome]) -> Summary:
         max_latency[outcome.category] = max(
             max_latency.get(outcome.category, 0.0), outcome.latency_s
         )
-        max_call[outcome.category] = max(
-            max_call.get(outcome.category, 0.0), outcome.slowest_call_s
-        )
+        # Two figures, two questions (T41): how fast the parts are, and how long the
+        # fold-back of the whole day takes. A chunk that splits nothing has no
+        # fold-back and contributes its only call to the part figure, exactly as in
+        # T40; the fold-back figure is absent rather than zeroed, so the report says
+        # «nothing of this kind was measured» instead of «it took no time».
+        part_call = outcome.slowest_part_call_s
+        if part_call is not None:
+            max_call[outcome.category] = max(max_call.get(outcome.category, 0.0), part_call)
+        merge_call = outcome.slowest_merge_call_s
+        if merge_call is not None:
+            max_merge_call[outcome.category] = max(
+                max_merge_call.get(outcome.category, 0.0), merge_call
+            )
         budgets.setdefault(outcome.category, outcome.latency_budget_s)
+        merge_budgets.setdefault(outcome.category, outcome.merge_budget_s)
     measured = [outcome for outcome in outcomes if not outcome.skipped]
     timed = [outcome for outcome in measured if outcome.latency_budget_s is not None]
     judged = [outcome for outcome in measured if outcome.nli is not None]
@@ -1887,8 +2092,10 @@ def summarize(outcomes: Sequence[ChunkOutcome]) -> Summary:
         latency_within_budget=sum(1 for outcome in timed if outcome.latency_within_budget),
         fully_passed=sum(1 for outcome in measured if outcome.passed),
         max_call_by_category=max_call,
+        max_merge_call_by_category=max_merge_call,
         max_latency_by_category=max_latency,
         latency_budgets=budgets,
+        merge_budgets=merge_budgets,
         diagnostics_total=sum(len(outcome.diagnostics) for outcome in outcomes),
         nli_summaries=len(judged),
         nli_claims=sum(item.claims for item in metrics),
@@ -1942,14 +2149,19 @@ def _measured_usage_lines(outcomes: Sequence[ChunkOutcome]) -> list[str]:
 
 
 def _per_call_latency_lines(outcomes: Sequence[ChunkOutcome]) -> list[str]:
-    """Name every call of a chunk that made several, and the chunk's total (T40).
+    """Name every call of a chunk that made several, each with **its** budget (T40/T41).
 
     The budget is graded per call, so the report has to show the calls: a reader who
     sees only the slowest one cannot tell a layer that made three fast calls from
     one that made a single slow call, and the T35 finding («any correctly split day
-    is red by construction») was exactly about that difference. Chunks with a single
-    call print nothing extra — their row already is the call. Metrics only, never
-    content (AGENTS.md §7-8).
+    is red by construction») was exactly about that difference. Since T41 the budget
+    of a call is printed next to the call rather than once per chunk, because the
+    calls of a split day are no longer all graded by the same number: a part is
+    graded by the route budget and the fold-back by the budget of the fold-back. A
+    reader must not have to infer which threshold a figure was compared with.
+
+    Chunks with a single call print nothing extra — their row already is the call.
+    Metrics only, never content (AGENTS.md §7-8).
     """
     several = [
         outcome for outcome in outcomes if not outcome.skipped and len(outcome.call_seconds) > 1
@@ -1958,19 +2170,32 @@ def _per_call_latency_lines(outcomes: Sequence[ChunkOutcome]) -> list[str]:
         return []
     lines = [
         "",
-        "per-call latency of the chunks that made more than one call "
-        "(the route budget is graded per call, T40):",
+        "per-call latency of the chunks that made more than one call (each call is "
+        "graded by the budget printed with it, T40/T41):",
     ]
     for outcome in several:
-        calls = ", ".join(f"{seconds:.2f}s" for seconds in outcome.call_seconds)
-        budget = outcome.latency_budget_s
-        verified = "n/a" if budget is None else f"< {budget:.0f}s"
+        calls = ", ".join(
+            f"{seconds:.2f}s ({_call_budget_label(outcome, index)})"
+            for index, seconds in enumerate(outcome.call_seconds)
+        )
         lines.append(
-            f"  {outcome.chunk_id} ({len(outcome.call_seconds)} call(s), budget {verified}): "
-            f"{calls} — slowest {outcome.slowest_call_s:.2f}s, "
-            f"chunk total {outcome.latency_s:.2f}s"
+            f"  {outcome.chunk_id} ({len(outcome.call_seconds)} call(s)): {calls} — "
+            f"slowest {outcome.slowest_call_s:.2f}s, chunk total {outcome.latency_s:.2f}s"
         )
     return lines
+
+
+def _call_budget_label(outcome: ChunkOutcome, index: int) -> str:
+    """``part < 15s`` / ``fold-back < 25s`` — the step and the number it is graded by.
+
+    One label for the report and one for nothing else: the step comes from
+    ``call_is_merge`` (the request's template version) and the number from
+    ``call_budget_s``, so what is printed is what was graded.
+    """
+    step = "fold-back" if outcome.call_is_merge(index) else "part"
+    budget = outcome.call_budget_s(index)
+    verified = "n/a" if budget is None else f"< {budget:.0f}s"
+    return f"{step} {verified}"
 
 
 def format_report(outcomes: Sequence[ChunkOutcome], manifest: GoldenManifest) -> str:
@@ -1982,8 +2207,11 @@ def format_report(outcomes: Sequence[ChunkOutcome], manifest: GoldenManifest) ->
     token maxima. Invariants and latency are reported as two separate counts
     (T18) — the threshold applies to the invariant count alone. Latency appears as
     two figures (T40): the chunk's **total** (``latency``, the price of splitting a
-    long day included) and the **slowest call** the route budget was graded with
-    (``slowest``), with the calls of a multi-call chunk listed under the table.
+    long day included) and the **slowest call** it was graded by (``slowest``),
+    with the calls of a multi-call chunk listed under the table. The category
+    summary names the slowest part call and the slowest fold-back call apart, each
+    with **its own** budget (T41), so which threshold graded which call is read off
+    the report rather than inferred.
     """
     lines: list[str] = []
     header = (
@@ -2027,8 +2255,14 @@ def format_report(outcomes: Sequence[ChunkOutcome], manifest: GoldenManifest) ->
     lines.append(f"invariants: {summary.invariants_passed}/{summary.measured} passed ({scope})")
     # The budgets named here are the manifest's declaration, not the run's scope:
     # they stay true even when a category was skipped and nothing was measured.
+    # The fold-back budget of the day route is listed with its owner (T41), so a
+    # reader of the summary line knows the day route is graded by two numbers.
     scopes = ", ".join(
-        f"{category} < {budget:.0f}s" for category, budget in sorted(_latency_budgets().items())
+        [f"{category} < {budget:.0f}s" for category, budget in sorted(_latency_budgets().items())]
+        + [
+            f"{category} fold-back < {budget:.0f}s"
+            for category, budget in sorted(_merge_latency_budgets().items())
+        ]
     )
     if summary.latency_measured:
         lines.append(
@@ -2051,9 +2285,26 @@ def format_report(outcomes: Sequence[ChunkOutcome], manifest: GoldenManifest) ->
         # Two figures on purpose (T40): the budget is compared with one call, and the
         # chunk's total — the price of splitting a long day into parts — is printed
         # next to it so a reader can see both without opening the chunk row.
+        fragments: list[str] = []
+        part_call = summary.max_call_by_category.get(category)
+        merge_call = summary.max_merge_call_by_category.get(category)
+        if part_call is not None:
+            # «part call» only where a fold-back figure stands next to it (T41):
+            # otherwise there is one kind of call and the old wording holds.
+            named = "slowest part call" if merge_call is not None else "slowest call"
+            fragments.append(f"{named} {part_call:.2f}s (budget {verified})")
+        if merge_call is not None:
+            merge_budget = summary.merge_budgets.get(category)
+            merge_verified = "n/a" if merge_budget is None else f"< {merge_budget:.0f}s"
+            fragments.append(f"slowest fold-back call {merge_call:.2f}s (budget {merge_verified})")
+        if not fragments:
+            # No call of this category was timed at all (the layers refused their
+            # input before their first request): the fallback figure is the chunk's
+            # own wall time, and that is what is named rather than a call that does
+            # not exist (T40).
+            fragments.append("no call was timed")
         lines.append(
-            f"latency {category}: slowest call {summary.max_call_by_category[category]:.2f}s "
-            f"(budget {verified}), slowest chunk total "
+            f"latency {category}: {', '.join(fragments)}, slowest chunk total "
             f"{summary.max_latency_by_category[category]:.2f}s"
         )
     lines.append(

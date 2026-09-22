@@ -51,7 +51,9 @@ from diary.domain.llm.models import LLMRequest, LLMResponse, LLMUsage
 from diary.domain.llm.service import resolve_phase2_profile
 from diary.domain.pipelines.sum_daily.pipeline import (
     ENTRIES_HEADER,
+    MERGE_PROMPT_VERSION,
     PARTS_HEADER,
+    PROMPT_VERSION,
     SumDailyPipeline,
 )
 from diary.domain.pipelines.sum_daily.pipeline import (
@@ -62,6 +64,12 @@ EVAL_RUN = PROJECT_ROOT / "eval" / "run.py"
 
 #: The chunk this task added: more messages than one call can carry.
 LONG_DAY = "day-04-long-wednesday"
+
+#: The template versions the day layer stamps on its two kinds of request (T41):
+#: the parts carry the ordinary template and the fold-back the merge template. The
+#: harness classifies a call by these numbers, so the tests name them once here.
+SUM_V1: str = PROMPT_VERSION
+SUM_V2: str = MERGE_PROMPT_VERSION
 
 
 def _load_harness() -> Any:
@@ -467,6 +475,19 @@ class _ScriptedClock:
         return value
 
 
+class _AllClaimsContradicted:
+    """A scripted NLI judge that condemns every claim of every summary (T41).
+
+    The same stateless instrument the harness tests use: it makes the **layer's**
+    gate regenerate once and then refuse, which is the only way to reach a run of
+    eight calls (parts, fold-back, parts, fold-back) without a live model. It is
+    defined here rather than imported so this file stays runnable on its own.
+    """
+
+    def __call__(self, pairs: Any) -> list[dict[str, float]]:
+        return [{"entailment": 0.03, "contradiction": 0.95, "neutral": 0.02} for _ in pairs]
+
+
 def _scripted_run(call_seconds: list[float], *, overhead: float = 0.0) -> _ScriptedClock:
     """A clock reading the run the harness measures: start, each call, end (T40).
 
@@ -511,7 +532,7 @@ def _run_with_clock(
 def test_a_split_day_is_graded_by_its_slowest_call_not_by_the_sum_of_them(
     long_day: GoldenChunk, day_profile: OpenAICompatibleProfile, models_config: ModelsConfig
 ) -> None:
-    """T40 DoD 1 and 2(a): the number of calls stops being a latency defect.
+    """T40 DoD 1 and 2(a), kept under T41: the number of calls is not a defect.
 
     The defect: the budget of 15 s was calibrated on **one** call (T21), while a
     correctly split day costs three or four (T35: 17.76 + 8.14 + 18.77 = 44.67 s of
@@ -519,6 +540,12 @@ def test_a_split_day_is_graded_by_its_slowest_call_not_by_the_sum_of_them(
     layer's own calls each stay inside the budget while their sum — the chunk total —
     is far above it: the chunk must pass, and the total must still be reported, so
     the price of splitting stays visible.
+
+    T41 changed which budget the **last** call of this run is graded by (it is the
+    fold-back, so it is compared with 25 s and not with 15 s), and not the claim of
+    this test: the calls are named one by one, each with the budget printed next to
+    it, and no number of calls can fail the chunk. Both calls here are far inside
+    their own budget, so the verdict is «green» either way.
     """
     parts = len(_parts(long_day, day_profile))
     calls = [6.0] * parts + [7.0]  # every call inside 15 s, the day far outside
@@ -538,22 +565,36 @@ def test_a_split_day_is_graded_by_its_slowest_call_not_by_the_sum_of_them(
     cells = row.split()
     assert cells[3] == f"{outcome.latency_s:.2f}s"  # the chunk's total stays printed
     assert cells[4] == str(len(calls))  # the call count (T35)
-    assert cells[5] == f"{outcome.slowest_call_s:.2f}s"  # the figure the budget grades
+    assert cells[5] == f"{outcome.slowest_call_s:.2f}s"  # the slowest call of the chunk
     assert "PASS" in cells
-    # Every call is named, not only the slowest, and the total is named next to them.
-    expected = ", ".join(f"{seconds:.2f}s" for seconds in calls)
-    assert f"{LONG_DAY} ({len(calls)} call(s), budget < 15s): {expected}" in report
+    # Every call is named with the budget it was graded by (T41), not only the
+    # slowest, and the total is named next to them.
+    expected = ", ".join(
+        [f"{seconds:.2f}s (part < 15s)" for seconds in calls[:parts]]
+        + [f"{calls[-1]:.2f}s (fold-back < 25s)"]
+    )
+    assert f"{LONG_DAY} ({len(calls)} call(s)): {expected}" in report
     assert f"chunk total {outcome.latency_s:.2f}s" in report
-    assert "latency day: slowest call 7.00s (budget < 15s), slowest chunk total" in report
+    assert (
+        "latency day: slowest part call 6.00s (budget < 15s), "
+        "slowest fold-back call 7.00s (budget < 25s), slowest chunk total" in report
+    )
 
 
 def test_a_single_call_chunk_over_its_budget_stays_red(models_config: ModelsConfig) -> None:
-    """T40 DoD 2(b): the unit change must not weaken an ordinary day.
+    """T40 DoD 2(b), kept under T41: the unit change must not weaken an ordinary day.
 
     A short day makes **one** call, so its call *is* its latency: the figure the
     budget grades was the chunk before T40 and is the call now, and the verdict must
     not move. 16 s against the day budget of 15 s is red, on the clock check alone
     and not as a content failure (T18).
+
+    T41 must not touch this case either: a one-call day has no fold-back at all, so
+    its call is graded by the route budget exactly as in T40 (``merge_budget_s`` is
+    set for the day route, but no call of this chunk carries the fold-back template
+    version, so ``call_budget_s`` returns 15 s). If the classification ever fell back
+    to «every call of the day route is the fold-back», this test would go green and
+    say so.
 
     «Almost» rather than «exactly», and this test is where the difference is visible:
     the chunk total is 16.4 s and the graded figure 16.0 s, because the work around
@@ -569,40 +610,171 @@ def test_a_single_call_chunk_over_its_budget_stays_red(models_config: ModelsConf
     assert len(outcome.call_seconds) == 1 and outcome.requests == 1
     assert outcome.slowest_call_s == pytest.approx(16.0)
     assert outcome.latency_s == pytest.approx(16.4)
+    assert outcome.call_budget_s(0) == pytest.approx(15.0)  # the route budget, not the fold-back
     assert outcome.failed_checks == [harness.LATENCY_CHECK]
+    assert "the chunk's only call" in outcome.violations[0].detail
     report = harness.format_report([outcome], harness.golden_manifest())
     assert "FAIL:latency" in report
     assert "invariants: 1/1 passed" in report
 
 
-def test_a_slow_call_of_a_split_day_is_still_red(
+def test_a_slow_part_call_of_a_split_day_is_still_red(
     long_day: GoldenChunk, day_profile: OpenAICompatibleProfile, models_config: ModelsConfig
 ) -> None:
-    """T40 DoD 2(b) for a chunk that splits: one slow call still fails the chunk.
+    """T40 DoD 2(b) / T41 DoD 4 for a chunk that splits: one slow **part** still fails it.
 
-    The other side of the same axis. The budget is applied to **every** call, so a
-    single call over it fails the chunk even though the *number* of calls is not what
-    failed it — the two cases are separate claims, and only this test holds the
-    second one. Without it a rule that quietly graded nothing but single-call chunks
-    (``if len(outcome.call_seconds) > 1: return``) would pass the whole suite: that
-    mutation was measured against the suite during the T40 acceptance and survived
-    every test but this one.
+    The budget is applied to **every** call, so a single part over it fails the chunk
+    even though the *number* of calls is not what failed it — the two cases are
+    separate claims, and only this test holds the second one. Without it a rule that
+    quietly graded nothing but single-call chunks (``if len(call_seconds) > 1:
+    return``) would pass the whole suite: that mutation was measured against the suite
+    during the T40 acceptance and survived every test but this one.
+
+    The overrun sits on the **first part** on purpose (T41): the last call of this
+    run is the fold-back, and a 20 s fold-back is legitimately inside *its* budget —
+    putting the slow figure there would test the new threshold instead of the old one
+    (that case is ``test_a_fold_back_call_inside_its_own_budget_does_not_fail_the_chunk``
+    and ``test_a_fold_back_call_over_its_own_budget_is_still_red``).
     """
     parts = len(_parts(long_day, day_profile))
-    calls = [6.0] * parts + [20.0]  # one call over the 15 s budget, the rest inside
+    calls = [20.0] + [6.0] * (parts - 1) + [7.0]  # one part over 15 s, the rest inside
     outcome = _run_with_clock(long_day, calls, overhead=1.5, models_config=models_config)
 
     assert outcome.requests == len(calls)
-    assert outcome.slowest_call_s == pytest.approx(20.0)
+    assert outcome.slowest_part_call_s == pytest.approx(20.0)
+    assert outcome.slowest_merge_call_s == pytest.approx(7.0)
     assert not outcome.latency_within_budget
     assert outcome.failed_checks == [harness.LATENCY_CHECK]
     assert outcome.content_violations == []
+    # The violation names the call that failed **and** the budget it was graded by, so
+    # «which threshold did this figure miss» is answered by the output (T41 DoD 3).
+    assert "a part call" in outcome.violations[0].detail
+    assert "20.00s > 15s" in outcome.violations[0].detail
+    assert "call 1/4" in outcome.violations[0].detail
     # The report names the slowest call in the row, so the failing figure is visible
     # without reading the violation detail.
     report = harness.format_report([outcome], harness.golden_manifest())
     row = next(line for line in report.splitlines() if line.startswith(LONG_DAY))
     assert row.split()[5] == "20.00s"
     assert "FAIL:latency" in report
+
+
+def test_a_fold_back_call_inside_its_own_budget_does_not_fail_the_chunk(
+    long_day: GoldenChunk, day_profile: OpenAICompatibleProfile, models_config: ModelsConfig
+) -> None:
+    """T41 DoD 1 and 3: the fold-back is graded by the fold-back budget, not the part one.
+
+    This is the live case the task was opened for, stated in numbers: the parts of
+    the long golden day land between 5.3 and 13.7 s while the fold-back — the call
+    that returns the summary of the whole day — lands at 18.4-19.7 s. Under T40 all
+    of them shared the 15 s route budget, so the chunk was red on a call that is not
+    a part of anything.
+
+    19 s here is inside the fold-back budget (25 s) and outside the part budget (15 s),
+    which is what makes the two readings distinguishable: this test passes only if the
+    fold-back call really is compared with 25 s. The part figure and the fold-back
+    figure are both named in the report, each with its own budget.
+    """
+    parts = len(_parts(long_day, day_profile))
+    calls = [6.0] * parts + [19.0]
+    outcome = _run_with_clock(long_day, calls, overhead=1.5, models_config=models_config)
+
+    assert outcome.latency_within_budget
+    assert outcome.violations == []
+    # Named apart, graded apart: 19 s is over the 15 s the parts are graded by.
+    assert outcome.slowest_part_call_s == pytest.approx(6.0)
+    assert outcome.slowest_merge_call_s == pytest.approx(19.0)
+    assert outcome.call_budget_s(parts) == pytest.approx(25.0)
+    assert outcome.call_budget_s(0) == pytest.approx(15.0)
+    assert outcome.merge_call_seconds == [19.0]
+    assert outcome.part_call_seconds == [6.0] * parts
+
+    report = harness.format_report([outcome], harness.golden_manifest())
+    assert (
+        "latency day: slowest part call 6.00s (budget < 15s), "
+        "slowest fold-back call 19.00s (budget < 25s)," in report
+    )
+    assert "19.00s (fold-back < 25s)" in report
+    assert "6.00s (part < 15s)" in report
+    assert "day fold-back < 25s" in report  # the declared scope names both thresholds
+    assert "PASS" in report
+
+
+def test_a_fold_back_call_over_its_own_budget_is_still_red(
+    long_day: GoldenChunk, day_profile: OpenAICompatibleProfile, models_config: ModelsConfig
+) -> None:
+    """T41 DoD 4, the other side: the new budget is a budget, not an exemption.
+
+    A separate budget for the fold-back must not read as «the fold-back is never
+    judged». A fold-back at 26 s is over its own 25 s and fails the chunk, on the
+    latency count alone, with the violation naming the fold-back and its number. The
+    two sides together (this test and the one above) are what a mutation that drops
+    the fold-back from grading — or that grades it with the route budget — has to
+    break.
+    """
+    parts = len(_parts(long_day, day_profile))
+    calls = [6.0] * parts + [26.0]
+    outcome = _run_with_clock(long_day, calls, overhead=1.5, models_config=models_config)
+
+    assert not outcome.latency_within_budget
+    assert outcome.failed_checks == [harness.LATENCY_CHECK]
+    assert outcome.content_violations == []
+    assert "the fold-back call" in outcome.violations[0].detail
+    assert "26.00s > 25s" in outcome.violations[0].detail
+    assert f"call {parts + 1}/{parts + 1}" in outcome.violations[0].detail
+    report = harness.format_report([outcome], harness.golden_manifest())
+    assert "FAIL:latency" in report
+    assert "slowest fold-back call 26.00s (budget < 25s)" in report
+
+
+def test_the_fold_back_is_recognised_by_its_prompt_version_not_by_its_place(
+    long_day: GoldenChunk, day_profile: OpenAICompatibleProfile, models_config: ModelsConfig
+) -> None:
+    """T41 DoD 2: a regenerated day makes eight calls, and both fold-backs are found.
+
+    The NLI gate regenerates a day whose facts contradict their source, so the run is
+    parts, fold-back, parts, fold-back — nothing about the *order* says which call is
+    the fold-back («the last one» would miss the first entirely, and it is the first
+    that the gate judged). The classification therefore reads the ``prompt_version``
+    the layer stamped on each request, and this test holds that on the real layer: the
+    layer's own eight requests are classified as 3 parts + 1 fold-back twice.
+
+    The chunk fails anyway — the scripted judge condemns every claim, so the gate
+    refuses the second completion — and that is the point of measuring it this way:
+    a refusal is a content verdict, and the latency of the calls that were made stays
+    separately readable (T18). Both fold-backs are inside their own budget here
+    (24 s and 19 s, two different figures on purpose), so the refusal is the *only*
+    failure; the calls are still graded one by one. Two different figures are what a
+    «the last call is the fold-back» rule trips over: it would grade the 24 s call of
+    the first attempt by the part budget and fail the chunk on the clock.
+    """
+    parts = len(_parts(long_day, day_profile))
+    calls = [6.0] * parts + [24.0] + [6.0] * parts + [19.0]  # two attempts, eight calls
+
+    original = harness._clock
+    harness._clock = _scripted_run(calls, overhead=1.5)
+    try:
+        outcome = harness.evaluate_chunk(
+            long_day,
+            provider=harness.ci_provider_factory(long_day),
+            models_config=models_config,
+            gate_judge=_AllClaimsContradicted(),
+        )
+    finally:
+        harness._clock = original
+
+    assert outcome.requests == 2 * (parts + 1)
+    assert outcome.call_prompt_versions == [SUM_V1] * parts + [SUM_V2] + [SUM_V1] * parts + [SUM_V2]
+    assert outcome.merge_call_seconds == [24.0, 19.0]
+    assert outcome.part_call_seconds == [6.0] * (2 * parts)
+    assert outcome.slowest_merge_call_s == pytest.approx(24.0)
+    # The latency verdict is green; the refusal is the failure, and the two are told
+    # apart in the report.
+    assert outcome.latency_within_budget
+    assert [check for check in outcome.failed_checks if check == harness.LATENCY_CHECK] == []
+    report = harness.format_report([outcome], harness.golden_manifest())
+    assert "FAIL:content" in report and "FAIL:latency" not in report
+    assert "24.00s (fold-back < 25s)" in report and "19.00s (fold-back < 25s)" in report
 
 
 def test_a_chunk_whose_call_was_never_timed_is_not_read_as_fast() -> None:
@@ -619,6 +791,7 @@ def test_a_chunk_whose_call_was_never_timed_is_not_read_as_fast() -> None:
         kind="daily_summary",
         latency_s=0.5,
         latency_budget_s=0.0,
+        merge_budget_s=25.0,
     )
     assert outcome.call_seconds == []
     assert outcome.slowest_call_s == pytest.approx(0.5)

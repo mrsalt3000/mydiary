@@ -53,6 +53,11 @@ from diary.domain.pipelines.coach.pipeline import PROFILE_NAME as COACH_PROFILE_
 from diary.domain.pipelines.coach.pipeline import PROMPT_PATH as COACH_PROMPT_PATH
 from diary.domain.pipelines.stt_fix.pipeline import PROFILE_NAME as STT_PROFILE_NAME
 from diary.domain.pipelines.stt_fix.pipeline import PROMPT_PATH as STT_PROMPT_PATH
+
+# T41: the two template versions the day layer stamps on its requests — the harness
+# classifies a call as the fold-back by the second of them, and the number has exactly
+# one source: the layer itself.
+from diary.domain.pipelines.sum_daily.pipeline import MERGE_PROMPT_VERSION, PROMPT_VERSION
 from diary.domain.pipelines.sum_daily.pipeline import NUM_CTX as SUM_DAILY_NUM_CTX
 from diary.domain.pipelines.sum_daily.pipeline import PROFILE_NAME as SUM_PROFILE_NAME
 from diary.domain.pipelines.sum_daily.pipeline import PROMPT_PATH as SUM_PROMPT_PATH
@@ -602,6 +607,31 @@ def test_report_lists_latency_and_pass_state(chunks: list[GoldenChunk], models_c
     # A subset run cannot meet the threshold of the whole set (T18).
     assert "invariants: 2/2 passed (threshold 8/11, 2/11 chunks measured)" in report
     assert "latency: 2/2 within budget" in report
+
+
+def test_the_fold_back_budget_belongs_to_a_route_the_harness_can_recognise() -> None:
+    """T41: a fold-back budget and a recognisable fold-back call must go together.
+
+    The classification has two halves — the template version the layer stamps on its
+    fold-back request (``MERGE_PROMPT_VERSION_BY_CATEGORY``) and the budget the
+    harness compares that call with (``_merge_latency_budgets``) — and a category
+    present in one and missing from the other degrades **silently**: a fold-back call
+    with no budget of its own falls back to the part budget, which is exactly the
+    defect T41 closes (and a budget with no classification would never be used at
+    all). The keys of the two declarations are pinned equal here for that reason.
+
+    Both versions are read from the layer's own constants, so a version bump moves
+    both sides at once; the two templates must also stay **distinct** — one version
+    for both would make the comparison in ``call_is_merge`` meaningless and quietly
+    restore the T40 behaviour.
+    """
+    assert harness._merge_latency_budgets() == {"day": 25.0}
+    assert set(harness._merge_latency_budgets()) == set(harness.MERGE_PROMPT_VERSION_BY_CATEGORY)
+    assert harness.MERGE_PROMPT_VERSION_BY_CATEGORY == {"day": MERGE_PROMPT_VERSION}
+    assert MERGE_PROMPT_VERSION != PROMPT_VERSION
+    # The fold-back budget is the day route's: every other route grades all its calls
+    # with its own route budget, as in T40.
+    assert set(harness._merge_latency_budgets()) & ({"stt_error", "week", "wellbeing"}) == set()
 
 
 # ---------------------------------------------------------------------------

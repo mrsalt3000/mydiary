@@ -553,6 +553,11 @@ class GoldenLatencyBudget(BaseModel):
     declared budget (the coaching note, which is launched explicitly and rarely)
     is measured and reported as ``n/a`` instead of being silently compared with
     a foreign number.
+
+    T41 added one more distinction: inside the day route the **fold-back** call of
+    a split day (``daily_merge``) carries its own budget, because it is a different
+    call from a part — another template and an output the size of the whole day.
+    Grading it with the part budget mixed two categories; the parts keep ``daily``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -562,6 +567,19 @@ class GoldenLatencyBudget(BaseModel):
 
     #: One day summary (GPU, ``diary-sum``).
     daily: int = Field(ge=1)
+
+    #: The day layer's **fold-back** call (GPU, ``diary-sum``, prompt
+    #: ``prompts/sum_daily/v2.md``): the one call that folds the parts of a split
+    #: day into the summary of the whole day. It is graded by its own budget
+    #: because it is a different call and not a part: its output is the whole day
+    #: (924 output tokens against 65-524 for the parts, live run of 2026-09-22),
+    #: and it pays the same 3.5-4.6 s cold load as every call in this runtime.
+    #: Measured live, three runs: 18.93 / 18.95 / 18.95 s, plus 18.56 s and
+    #: 18.43 s in acceptance runs and 19.74 s in the run that caught an NLI-gate
+    #: regeneration (8 calls instead of 4). 25 is a decision of the project owner
+    #: (2026-09-22): a ~27 % margin over the worst measured call, and not a
+    #: measurement rounded up. The parts stay at ``daily``.
+    daily_merge: int = Field(ge=1)
 
     #: One weekly rollup (CPU, ``diary-sum-cpu``). Deliberately much looser than
     #: the GPU budgets: the device-choice measurements put a CPU week at up to
