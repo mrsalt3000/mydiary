@@ -217,7 +217,7 @@ def test_unknown_chunk_id_is_a_harness_error() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ci_mode_passes_all_ten_chunks(chunks: list[GoldenChunk], models_config) -> None:
+def test_ci_mode_passes_every_chunk(chunks: list[GoldenChunk], models_config) -> None:
     outcomes = harness.evaluate_all(
         chunks, provider_factory=harness.ci_provider_factory, models_config=models_config
     )
@@ -229,12 +229,12 @@ def test_ci_mode_passes_all_ten_chunks(chunks: list[GoldenChunk], models_config)
         # The mock reports no usage, so the measured budget check stays silent.
         assert outcome.usage is None
     summary = harness.summarize(outcomes)
-    assert summary.invariants_passed == 10
-    assert summary.fully_passed == 10
-    # Eight chunks declare a latency budget (three STT, three days, two weeks);
+    assert summary.invariants_passed == 11
+    assert summary.fully_passed == 11
+    # Nine chunks declare a latency budget (three STT, four days, two weeks);
     # the coaching note declares none and is not counted as measured (T21).
-    assert summary.latency_measured == 8
-    assert summary.latency_within_budget == 8
+    assert summary.latency_measured == 9
+    assert summary.latency_within_budget == 9
 
 
 def test_selecting_chunks_keeps_the_manifest_order(chunks: list[GoldenChunk]) -> None:
@@ -249,15 +249,37 @@ def test_selecting_chunks_keeps_the_manifest_order(chunks: list[GoldenChunk]) ->
 # ---------------------------------------------------------------------------
 
 
-def test_declared_budget_holds_for_every_chunk(chunks: list[GoldenChunk]) -> None:
+def test_declared_budget_holds_for_every_chunk(chunks: list[GoldenChunk], models_config) -> None:
+    """T35: the budget is checked per **call**, so a split day is graded by its parts.
+
+    For a chunk the layer does not split the declared whole-chunk inequality is the
+    call's inequality; for the long day (``chunks_planned > 1``) the whole input is
+    *deliberately* larger than one call can carry, and comparing it with the window
+    is exactly the false failure T35 removed. The per-part inequality is asserted
+    here through the layer's own chunker, and the check itself answers with no
+    violation.
+    """
     for chunk in chunks:
-        assert harness.check_budget(chunk) == [], chunk.id
-        assert (
-            chunk.budget.chunk_tokens_est
-            + harness.prompt_tokens_est_for(chunk.category)
-            + PROFILE_MAX_TOKENS[chunk.category]
-            <= chunk.budget.num_ctx
+        profile = resolve_phase2_profile(
+            models_config, harness.PROFILE_NAME_BY_CATEGORY[chunk.category]
         )
+        assert harness.check_budget(chunk, profile=profile) == [], chunk.id
+        parts = harness._planned_call_tokens(chunk, profile=profile)
+        assert len(parts) >= chunk.budget.chunks_planned, chunk.id
+        for part_tokens in parts:
+            assert (
+                part_tokens
+                + harness.prompt_tokens_est_for(chunk.category)
+                + PROFILE_MAX_TOKENS[chunk.category]
+                <= chunk.budget.num_ctx
+            ), chunk.id
+        if chunk.budget.chunks_planned == 1:
+            assert (
+                chunk.budget.chunk_tokens_est
+                + harness.prompt_tokens_est_for(chunk.category)
+                + PROFILE_MAX_TOKENS[chunk.category]
+                <= chunk.budget.num_ctx
+            ), chunk.id
 
 
 def test_the_declared_prompt_overhead_matches_the_template_files() -> None:
@@ -363,8 +385,9 @@ def test_the_prompt_and_the_cap_alone_fit_every_window() -> None:
         assert harness.prompt_tokens_est_for(category) + cap <= DEFAULT_NUM_CTX, category
 
 
-def test_a_budget_overflow_is_detected(chunks: list[GoldenChunk]) -> None:
+def test_a_budget_overflow_is_detected(chunks: list[GoldenChunk], models_config) -> None:
     chunk = _chunk("week-01-2026-w38")
+    profile = resolve_phase2_profile(models_config, harness.PROFILE_NAME_BY_CATEGORY["week"])
     reserve = harness.prompt_tokens_est_for("week") + PROFILE_MAX_TOKENS["week"]
     oversized = chunk.model_copy(
         update={
@@ -373,7 +396,7 @@ def test_a_budget_overflow_is_detected(chunks: list[GoldenChunk]) -> None:
             )
         }
     )
-    violations = harness.check_budget(oversized)
+    violations = harness.check_budget(oversized, profile=profile)
     assert [violation.check for violation in violations] == ["context_budget"]
 
 
@@ -572,12 +595,12 @@ def test_report_lists_latency_and_pass_state(chunks: list[GoldenChunk], models_c
     )
     report = harness.format_report(outcomes, harness.golden_manifest())
     assert "PASS" in report
-    assert "threshold 8/10" in report
+    assert "threshold 8/11" in report
     assert "latency stt_error" in report
     # Each row names the profile the chunk ran under, so a route is visible (T19).
     assert "diary_stt" in report
     # A subset run cannot meet the threshold of the whole set (T18).
-    assert "invariants: 2/2 passed (threshold 8/10, 2/10 chunks measured)" in report
+    assert "invariants: 2/2 passed (threshold 8/11, 2/11 chunks measured)" in report
     assert "latency: 2/2 within budget" in report
 
 
@@ -634,8 +657,8 @@ def test_the_ci_run_reports_both_counts_and_exits_zero(capsys: pytest.CaptureFix
     """The CI definition of done, read from the report the CLI prints."""
     assert harness.main(["--strict"]) == 0
     output = capsys.readouterr().out
-    assert "OK: invariants 10/10 (required 10)" in output
-    assert "latency 8/8 within budget" in output
+    assert "OK: invariants 11/11 (required 11)" in output
+    assert "latency 9/9 within budget" in output
     # The mock reports no usage, so the measured-token line stays absent.
     assert "measured input tokens" not in output
 
@@ -699,10 +722,10 @@ def test_a_config_without_the_weekly_profile_skips_the_week_instead_of_crashing(
     output = capsys.readouterr().out
     assert "SKIP:profile_off" in output
     assert "skipped (profile off): 2 chunk(s)" in output
-    # The skipped chunks are outside the counts: eight were measured, not ten.
-    assert "invariants: 8/8 passed" in output
-    assert "8/10 chunks measured" in output
-    assert "OK: invariants 8/8 (required 8)" in output
+    # The skipped chunks are outside the counts: nine were measured, not eleven.
+    assert "invariants: 9/9 passed" in output
+    assert "9/11 chunks measured" in output
+    assert "OK: invariants 9/9 (required 8)" in output
 
 
 def test_a_run_that_measured_nothing_fails_closed(
@@ -733,7 +756,7 @@ def test_strict_is_never_softer_than_a_plain_run(
 ) -> None:
     """T19 fix review: `--strict` must not pass where the plain run fails.
 
-    With only the STT profile configured, seven chunks are skipped. The plain run
+    With only the STT profile configured, eight chunks are skipped. The plain run
     already fails (three measured, threshold eight), and `--strict` — which demands
     full coverage — must not turn that into a green run.
     """
@@ -749,10 +772,10 @@ def test_strict_is_never_softer_than_a_plain_run(
 
     assert harness.main(["--models-config", str(path)]) == 1
     plain = capsys.readouterr().out
-    assert "FAILED: invariants 3/3 measured, 7 skipped (profile off), 8 required" in plain
+    assert "FAILED: invariants 3/3 measured, 8 skipped (profile off), 8 required" in plain
     assert harness.main(["--strict", "--models-config", str(path)]) == 1
     strict = capsys.readouterr().out
-    assert "FAILED: invariants 3/3 measured, 7 skipped (profile off), 10 required" in strict
+    assert "FAILED: invariants 3/3 measured, 8 skipped (profile off), 11 required" in strict
     # A single selected chunk that is measured still passes on the same config.
     code = harness.main(["--chunk", "stt-01-colleague-call", "--models-config", str(path)])
     assert code == 0
@@ -801,14 +824,16 @@ def test_the_nli_block_measures_without_touching_the_counts(
     monkeypatch.setattr(harness, "nli_judge", _AllClaimsContradicted)
     assert harness.main(["--strict", "--nli"]) == 0
     output = capsys.readouterr().out
-    assert "OK: invariants 10/10 (required 10)" in output
-    assert "latency 8/8 within budget" in output
-    # Five summaries, eleven claims (three facts per day chunk, one weekly rollup).
-    # The judge condemns every pair, yet only the nine *propositional* claims — the
-    # day's facts — can be contradicted; the two weekly rollups are outside the
+    assert "OK: invariants 11/11 (required 11)" in output
+    assert "latency 9/9 within budget" in output
+    # Six summaries, forty claims: three facts per short day, twenty-nine for the
+    # long day of T35 (the mock answers a part with the facts it carries, and the
+    # fold-back with all of them), and one weekly rollup per week. The judge
+    # condemns every pair, yet only the thirty-eight *propositional* claims — the
+    # days' facts — can be contradicted; the two weekly rollups are outside the
     # rule's scope and land in the diagnostic column instead.
-    assert "nli (measurement, not a gate): summaries 5, claims 11" in output
-    assert "contradictions 9, unsupported 2" in output
+    assert "nli (measurement, not a gate): summaries 6, claims 40" in output
+    assert "contradictions 38, unsupported 2" in output
     assert "nli flagged contradictions: day-01-quiet-monday facts#1" in output
 
 
@@ -938,12 +963,16 @@ def test_an_empty_premise_is_an_error_not_a_clean_result(models_config) -> None:
 def test_the_report_names_the_measured_prompt_when_the_endpoint_reports_it(
     models_config,
 ) -> None:
-    """T20 evidence in the report itself: estimate against the real count."""
+    """T20 evidence in the report itself: estimate against the real count.
+
+    The wording says «max call» because that is what the figure is since T35: the
+    largest prompt among the calls the layer made, not the last one.
+    """
     chunk = _chunk("day-01-quiet-monday")
     outcome = _run(chunk, _passing(chunk), models_config)
     outcome.usage = harness.LLMUsage(input_tokens=1871, output_tokens=214)
     report = harness.format_report([outcome], harness.golden_manifest())
-    assert "measured input tokens (endpoint), max per category: day 1871 (cap 4096)" in report
+    assert "measured input tokens (endpoint), max call per category: day 1871 (cap 4096)" in report
 
 
 # ---------------------------------------------------------------------------
@@ -1040,8 +1069,11 @@ def test_a_permanent_error_does_not_take_the_remaining_chunks(
     broken_payload.pop("facts")  # the contract requires a non-empty list
 
     def factory(chunk: GoldenChunk) -> Any:
-        payload = broken_payload if chunk.id == broken else harness.ci_payload(chunk)
-        return harness.ScriptedProvider(payload)
+        # The healthy chunks get the ordinary CI provider (which answers a split day
+        # call by call, T35); only the broken one gets the malformed completion.
+        if chunk.id == broken:
+            return harness.ScriptedProvider(broken_payload)
+        return harness.ci_provider_factory(chunk)
 
     outcomes = harness.evaluate_all(chunks, provider_factory=factory, models_config=models_config)
     assert [outcome.chunk_id for outcome in outcomes] == [chunk.id for chunk in chunks]

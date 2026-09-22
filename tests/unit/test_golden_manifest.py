@@ -1,6 +1,6 @@
 """Unit tests for the golden eval set (T00).
 
-The set is ten synthetic Russian chunks in ``eval/golden``, loaded through
+The set is eleven synthetic Russian chunks in ``eval/golden``, loaded through
 ``diary.domain.contracts.golden`` (the single definition of the format). The
 tests verify the mix and the manifest thresholds, the per-chunk budget
 bookkeeping (``chunk_chars`` matches the serialized input and the context rule
@@ -102,8 +102,11 @@ def test_manifest_identity() -> None:
     assert MANIFEST.version == 1
     assert MANIFEST.lang == "ru"
     assert MANIFEST.synthetic is True
+    # T35 added the long day chunk (the split fixture) without touching the
+    # threshold: the number of chunks that must stay clean is a decision of T00,
+    # not something a new fixture may raise or lower.
     assert MANIFEST.threshold.pass_count == 8
-    assert MANIFEST.threshold.total == 10
+    assert MANIFEST.threshold.total == 11
     assert MANIFEST.budget_default.num_ctx == DEFAULT_NUM_CTX
     assert MANIFEST.latency_budget_s.stt_fix == 5
     assert MANIFEST.latency_budget_s.daily == 15
@@ -111,12 +114,12 @@ def test_manifest_identity() -> None:
     assert MANIFEST.latency_budget_s.weekly == 180
 
 
-def test_manifest_declares_ten_unique_chunks_with_the_required_mix() -> None:
-    assert len(CHUNK_IDS) == 10
-    assert len(set(CHUNK_IDS)) == 10
+def test_manifest_declares_eleven_unique_chunks_with_the_required_mix() -> None:
+    assert len(CHUNK_IDS) == 11
+    assert len(set(CHUNK_IDS)) == 11
     assert MANIFEST.counts.model_dump() == {
         "stt_error": 3,
-        "day": 3,
+        "day": 4,
         "week": 2,
         "wellbeing": 2,
     }
@@ -157,7 +160,7 @@ def test_actual_categories_match_the_declared_counts(chunks: dict[str, GoldenChu
 def test_contracts_are_the_expected_ones(chunks: dict[str, GoldenChunk]) -> None:
     counted = Counter(chunk.contract for chunk in chunks.values())
     expected = Counter(
-        {"stt_corrected": 3, "daily_summary": 3, "weekly_summary": 2, "coach_note": 2}
+        {"stt_corrected": 3, "daily_summary": 4, "weekly_summary": 2, "coach_note": 2}
     )
     assert counted == expected
 
@@ -201,12 +204,22 @@ def test_split_weekly_chunks_get_the_larger_context() -> None:
     assert num_ctx_for("wellbeing", 2) == DEFAULT_NUM_CTX
 
 
-def test_no_chunk_exceeds_the_default_context(chunks: dict[str, GoldenChunk]) -> None:
-    # T10 asserts chunk_tokens_est <= num_ctx - reserve; today every chunk is
-    # comfortably below the default window.
+def test_only_the_long_day_declares_a_split_and_it_keeps_the_default_window(
+    chunks: dict[str, GoldenChunk],
+) -> None:
+    """T35: a day that does not fit is split by entries, not given a bigger window.
+
+    ``num_ctx_for`` raises the window only for a **weekly** chunk fed in pieces; the
+    day layer divides a long day into parts inside the same 8192 (``ADR-016``). So the
+    one chunk that declares several pieces is the long day, and every chunk of the set
+    still lives in the default window — a split is not a licence to widen it.
+    """
+    split = [chunk for chunk in chunks.values() if chunk.budget.chunks_planned > 1]
+    assert [chunk.id for chunk in split] == ["day-04-long-wednesday"]
+    assert split[0].category == "day"
     for chunk in chunks.values():
-        assert chunk.budget.chunks_planned == 1
-        assert chunk.budget.num_ctx == DEFAULT_NUM_CTX
+        assert chunk.budget.num_ctx == DEFAULT_NUM_CTX, chunk.id
+        assert chunk.budget.chunk_tokens_est <= chunk.budget.num_ctx, chunk.id
 
 
 # ---------------------------------------------------------------------------

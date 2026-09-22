@@ -44,11 +44,13 @@ lexeme lists, the numeral words and the budget reserve. The checks are:
 * the generic eval-contract checks added by T10 — no advice/evaluation, no
   causal claims, no new facts (digits, numeral words, proper names) — plus the
   invariant fields the manifest already described;
-* the context budget ``chunk_tokens_est + prompt_tokens_est + max_tokens <=
-  num_ctx``, where the prompt overhead is estimated from the versioned template
-  the layer itself loads (T20, so the reserve cannot be understated) and, when
-  the endpoint reports usage, the *measured* ``input_tokens + profile.max_tokens
-  <= num_ctx``;
+* the context budget of **every call** the layer makes (T35): ``input_tokens_est +
+  prompt_tokens_est + max_tokens <= num_ctx`` per call, where the prompt overhead
+  is estimated from the versioned template the layer itself loads (T20, so the
+  reserve cannot be understated) and a layer that honestly splits a long input is
+  measured per part (T23, ``ADR-016``) instead of as one whole-chunk call; when the
+  endpoint reports usage, the *measured* ``input_tokens + profile.max_tokens <=
+  num_ctx`` is checked against the largest call, not the last one;
 * the raw source rows of an STT/day chunk are unchanged by the run, and the
   in-memory chunk input is not mutated;
 * the latency budget declared for the **route of the category** (T21: an STT
@@ -218,11 +220,18 @@ from diary.domain.pipelines.stt_fix.pipeline import (
 from diary.domain.pipelines.stt_fix.service import correct_stt
 from diary.domain.pipelines.sum_daily.day_input import collect_day_entries
 from diary.domain.pipelines.sum_daily.pipeline import (
+    ENTRIES_HEADER as SUM_ENTRIES_HEADER,
+)
+from diary.domain.pipelines.sum_daily.pipeline import (
+    PARTS_HEADER as SUM_PARTS_HEADER,
+)
+from diary.domain.pipelines.sum_daily.pipeline import (
     PROFILE_NAME as SUM_PROFILE_NAME,
 )
 from diary.domain.pipelines.sum_daily.pipeline import (
     PROMPT_PATH as SUM_PROMPT_PATH,
 )
+from diary.domain.pipelines.sum_daily.pipeline import SumDailyPipeline
 from diary.domain.pipelines.sum_daily.service import sum_daily
 from diary.domain.pipelines.sum_weekly.pipeline import (
     PROFILE_NAME as WEEK_PROFILE_NAME,
@@ -350,6 +359,7 @@ EXTRA_CHECKS: tuple[str, ...] = (
     "measured_context_budget",
     "raw_rows_unchanged",
     "context_budget",
+    "expected_parts",
 )
 
 _WORD_RE = re.compile(r"[а-яёa-z]+")
@@ -394,6 +404,12 @@ class HarnessError(Exception):
 #: the report, exactly like every other ``Violation.detail``.
 PIPELINE_ERROR_CHECK = "pipeline_error"
 
+#: Check the runner raises when a chunk declares that its layer feeds the input in
+#: several calls and the layer does not do it (T35). The declaration lives in the
+#: chunk's ``budget.chunks_planned``; grading it is what keeps the manifest
+#: expectation from being prose that nothing verifies.
+PARTS_CHECK = "expected_parts"
+
 
 @dataclass(frozen=True)
 class Violation:
@@ -425,6 +441,8 @@ class ChunkOutcome:
     violations: list[Violation] = field(default_factory=list)
     diagnostics: list[str] = field(default_factory=list)
     requests: int = 0
+    #: The **largest** usage the endpoint reported for one call of this chunk (T35:
+    #: a split day makes several calls, and the fold-back is the smallest of them).
     usage: LLMUsage | None = None
     #: NLI metrics of a summary chunk when ``--nli`` asked for them (T24a); the
     #: metrics are content-free (counts, probabilities, claim coordinates).
@@ -597,9 +615,18 @@ def _nli_premise(chunk: GoldenChunk) -> str:
     A layer asserts about the *meaning* of what it was given, so the premise is
     the entry texts of a day or the day rollups of a week — not row identifiers,
     timestamps or file paths. That also keeps the pair inside the model's
-    512-token budget, where a truncation would silently hide the very claim the
-    check exists for. An empty result is a loud error, not «everything is
-    neutral» (T24a DoD 2).
+    512-token budget for the chunks the set carried before T35, where a truncation
+    would silently hide the very claim the check exists for. An empty result is a
+    loud error, not «everything is neutral» (T24a DoD 2).
+
+    Named limit for a split day (T35): the premise is the **whole** day, exactly
+    what the layer was asked to summarize, so for ``day-04-long-wednesday`` it is
+    longer than one pair and the cross-encoder truncates it — that chunk's
+    contradiction verdicts rest on the beginning of the day, and the fact that the
+    measurement does not cover every sentence is stated here rather than implied.
+    The loopback is deliberate: taking the premise from one part instead would
+    judge a day summary against a fraction of its source, which is the mistake
+    T24a was built to avoid.
     """
     items = chunk.input if isinstance(chunk.input, list) else [chunk.input]
     parts: list[str] = []
@@ -865,24 +892,88 @@ def content_word_diagnostics(ctx: CheckContext) -> list[str]:
     return sorted(found)
 
 
-def check_budget(chunk: GoldenChunk) -> list[Violation]:
-    """The context budget: prompt (read from its file) + input + generation cap.
+def check_budget(chunk: GoldenChunk, *, profile: OpenAICompatibleProfile) -> list[Violation]:
+    """The context budget of every call the layer will make (T20; T35).
 
     The reserve is the layer's versioned prompt — estimated from the template the
     layer itself loads, never from a hand-maintained constant (T20) — plus the
-    generation cap of the profile the category runs under. Exceeding ``num_ctx``
-    fails the chunk: the check exists to bound the whole call, not just the
-    payload.
+    generation cap of the profile the category runs under.
+
+    The unit of this check is **one call**, not one chunk (T35). A layer that
+    honestly splits a long input (``chunks_planned > 1``: the day layer of T23,
+    ``ADR-016``) sends several smaller requests, so comparing the whole input with
+    the window would report a false ``context_budget`` exactly where the layer did
+    the right thing. The check therefore asks the *layer's own* chunker for the
+    parts (one implementation of the split, the discipline of T17) and bounds each
+    part's call; a chunk that declares a split its layer does not produce is
+    reported as :data:`PARTS_CHECK`, so the declared expectation is checked rather
+    than trusted.
     """
     reserve = prompt_tokens_est_for(chunk.category) + PROFILE_MAX_TOKENS[chunk.category]
-    if chunk.budget.chunk_tokens_est + reserve > chunk.budget.num_ctx:
+    if chunk.budget.chunks_planned == 1:
+        if chunk.budget.chunk_tokens_est + reserve > chunk.budget.num_ctx:
+            return [
+                Violation(
+                    "context_budget",
+                    f"{chunk.budget.chunk_tokens_est} + {reserve} > {chunk.budget.num_ctx}",
+                )
+            ]
+        return []
+    try:
+        parts = _planned_call_tokens(chunk, profile=profile)
+    except PipelinePermanentError:
+        # The chunk declares several calls, but its layer cannot split the input
+        # at all (one message larger than the window, a generation cap that leaves
+        # no room). The layer refuses loudly at run time; the declaration is what
+        # this check grades, and it does not hold.
         return [
             Violation(
-                "context_budget",
-                f"{chunk.budget.chunk_tokens_est} + {reserve} > {chunk.budget.num_ctx}",
+                PARTS_CHECK,
+                "the chunk declares several calls but the layer cannot split its input",
             )
         ]
-    return []
+    violations: list[Violation] = []
+    if len(parts) < chunk.budget.chunks_planned:
+        violations.append(
+            Violation(
+                PARTS_CHECK,
+                f"the declared split does not happen: {len(parts)} call(s) "
+                f"< declared {chunk.budget.chunks_planned}",
+            )
+        )
+    for index, tokens in enumerate(parts, start=1):
+        if tokens + reserve > chunk.budget.num_ctx:
+            violations.append(
+                Violation(
+                    "context_budget",
+                    f"part {index}: {tokens} + {reserve} > {chunk.budget.num_ctx}",
+                )
+            )
+    return violations
+
+
+def _planned_call_tokens(chunk: GoldenChunk, *, profile: OpenAICompatibleProfile) -> list[int]:
+    """Estimated input tokens of each call the layer builds for ``chunk``.
+
+    The parts come from the layer's own chunker — ``SumDailyPipeline.chunk_entries``,
+    the single implementation the runtime uses (T23, ``ADR-016``) — and are measured
+    with the eval contract's canonical serialization and coefficient, exactly like
+    ``budget.chunk_tokens_est`` measures the whole input, so the two are
+    commensurable.
+
+    Only a day chunk is split here: it is the layer that divides an input inside one
+    and the same window. A weekly chunk that declares several pieces instead gets the
+    larger window (``num_ctx_for``), which its declared ``num_ctx`` already carries,
+    so its whole input is its one call. A ``PipelinePermanentError`` from the chunker
+    travels up: the check grades it as a broken declaration.
+    """
+    if chunk.category != "day":
+        return [chunk.budget.chunk_tokens_est]
+    entries = [item for item in chunk.input if isinstance(item, RawEntry)]
+    if len(entries) != len(chunk.input):
+        raise HarnessError(f"chunk {chunk.id} declares a day input that is not a raw_entry list")
+    parts = SumDailyPipeline().chunk_entries(entries, profile=profile)
+    return [estimate_tokens(len(canonical_input_json(part))) for part in parts]
 
 
 @lru_cache(maxsize=1)
@@ -1160,7 +1251,7 @@ def evaluate_chunk(
         profile_name=PROFILE_NAME_BY_CATEGORY[chunk.category],
         latency_budget_s=_latency_budget_for(chunk),
     )
-    outcome.violations.extend(check_budget(chunk))
+    outcome.violations.extend(check_budget(chunk, profile=resolved_profile))
 
     input_json_before = canonical_input_json(chunk.input)
     with temp_database() as session:
@@ -1307,22 +1398,45 @@ def _record_measurements(
     profile: OpenAICompatibleProfile,
     provider: LLMProvider,
 ) -> None:
-    """Record and check endpoint measurements, when the provider reports them."""
+    """Record and check what the endpoint reported for **every** call (T35).
+
+    The call count is a metric of the chunk, and the token figure is the
+    **largest** measured prompt among the calls the layer made — not the last one.
+    A layer that splits a long input (T23, ``ADR-016``) sends several requests, and
+    reading the last of them (the fold-back) reported a number that measured the
+    smallest call of the run while claiming to measure the chunk's input. The
+    budget check uses the same maximum, because the window is a property of one
+    call: the largest call is what can overflow it.
+
+    A provider that reports a single usage (an older or simpler adapter) is read
+    through ``last_usage``; metrics only — never content.
+    """
     requests = getattr(provider, "request_count", None)
     if isinstance(requests, int):
         outcome.requests = requests
-    usage = getattr(provider, "last_usage", None)
-    if not isinstance(usage, LLMUsage):
+    usages = _measured_usages(provider)
+    if not usages:
         return
-    outcome.usage = usage
-    if usage.input_tokens + profile.max_tokens > chunk.budget.num_ctx:
+    largest = max(usages, key=lambda usage: usage.input_tokens)
+    outcome.usage = largest
+    if largest.input_tokens + profile.max_tokens > chunk.budget.num_ctx:
         outcome.violations.append(
             Violation(
                 "measured_context_budget",
-                f"measured {usage.input_tokens} input tokens + {profile.max_tokens} cap "
+                f"measured {largest.input_tokens} input tokens (largest of "
+                f"{len(usages)} call(s)) + {profile.max_tokens} cap "
                 f"> num_ctx {chunk.budget.num_ctx}",
             )
         )
+
+
+def _measured_usages(provider: LLMProvider) -> list[LLMUsage]:
+    """Every usage the provider reported for this chunk, in call order."""
+    usages = getattr(provider, "usages", None)
+    if isinstance(usages, list):
+        return [usage for usage in usages if isinstance(usage, LLMUsage)]
+    last = getattr(provider, "last_usage", None)
+    return [last] if isinstance(last, LLMUsage) else []
 
 
 def _apply_latency_budget(outcome: ChunkOutcome) -> None:
@@ -1376,22 +1490,30 @@ def evaluate_all(
 
 
 class ScriptedProvider:
-    """Deterministic provider: one fixed completion, recorded requests."""
+    """Deterministic provider: one fixed completion, or one answer per request.
 
-    def __init__(self, payload: Mapping[str, object] | str) -> None:
-        self._text = (
-            payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
-        )
+    ``payload`` is either a fixed mapping (or raw JSON text) served for every
+    call, or a callable that builds the answer of one call from its request —
+    which is what a chunk whose layer splits its input needs (T35).
+    """
+
+    def __init__(
+        self,
+        payload: Mapping[str, object] | str | Callable[[LLMRequest], Mapping[str, object]],
+    ) -> None:
+        self._payload = payload
         self.requests: list[LLMRequest] = []
 
     @property
     def request_count(self) -> int:
-        """Number of ``complete`` calls served (a week may need several)."""
+        """Number of ``complete`` calls served (a week or a long day may need several)."""
         return len(self.requests)
 
     def complete(self, request: LLMRequest) -> LLMResponse:
         self.requests.append(request)
-        return LLMResponse(text=self._text)
+        payload = self._payload(request) if callable(self._payload) else self._payload
+        text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+        return LLMResponse(text=text)
 
 
 def ci_payload(chunk: GoldenChunk) -> dict[str, object]:
@@ -1437,28 +1559,104 @@ def ci_payload(chunk: GoldenChunk) -> dict[str, object]:
 
 
 class MeasuringProvider:
-    """Wraps a provider and remembers the usage and the number of calls.
+    """Wraps a provider and remembers every usage and the number of calls.
 
-    The last reported :class:`~diary.domain.llm.models.LLMUsage` and the call
-    count are metrics only — never content.
+    All reported :class:`~diary.domain.llm.models.LLMUsage` counters are kept, in
+    call order, because a layer may make several calls (T35) and the chunk's
+    measurement is the largest of them; ``last_usage`` stays for a caller that
+    wants the last one. Metrics only — never content.
     """
 
     def __init__(self, provider: LLMProvider) -> None:
         self._provider = provider
         self.request_count = 0
+        self.usages: list[LLMUsage] = []
         self.last_usage: LLMUsage | None = None
 
     def complete(self, request: LLMRequest) -> LLMResponse:
         response = self._provider.complete(request)
         self.request_count += 1
         if response.usage is not None:
+            self.usages.append(response.usage)
             self.last_usage = response.usage
         return response
 
 
 def ci_provider_factory(chunk: GoldenChunk) -> LLMProvider:
-    """Provider factory of the CI mode (no network, no GPU, no API key)."""
+    """Provider factory of the CI mode (no network, no GPU, no API key).
+
+    A chunk whose layer splits its input — a day that does not fit one window (T35)
+    — gets a provider answering each call about the piece that call carries
+    (:func:`ci_call_payload`); every other chunk keeps the single fixed completion.
+    """
+    if chunk.contract == "daily_summary" and chunk.budget.chunks_planned > 1:
+        return ScriptedProvider(lambda request: ci_call_payload(chunk, request))
     return ScriptedProvider(ci_payload(chunk))
+
+
+def ci_call_payload(chunk: GoldenChunk, request: LLMRequest) -> dict[str, object]:
+    """The mock completion of one call of a **split** day chunk (T35).
+
+    The fixed whole-chunk completion of :func:`ci_payload` cannot answer a split
+    day: every part request carries one part of the day, and the fold-back request
+    carries the parts. A fixed whole-day answer would put the whole day into the
+    fold-back request once per part, and the *mock* — not the layer — would be what
+    fails on the merge budget: with this chunk's answer (2369 characters) the
+    fold-back would spend 3849 of its 4096 estimated tokens already at two parts,
+    and 4796 from three parts.
+
+    The rule stays the mock's own rule, applied to what the call carries: one fact
+    per entry text (part requests), and the parts' facts in part order for the
+    fold-back. The level is the chunk's declared expectation, as in the single-call
+    mock, so the fold-back receives the level the chunk declares. The result is
+    therefore the completion a single call would have produced — the mock's
+    honesty is unchanged: it exercises the plumbing, not the model.
+    """
+    if not isinstance(chunk.invariants, DailyInvariants):
+        raise HarnessError(f"chunk {chunk.id} is not a day chunk, so a split call cannot be mocked")
+    content = request.messages[0].content
+    if SUM_PARTS_HEADER in content:
+        parts = _json_items(content.rsplit(SUM_PARTS_HEADER, 1)[-1])
+        facts = [
+            fact
+            for part in parts
+            if isinstance(part, Mapping)
+            for fact in _strings_of(part.get("facts"))
+        ]
+    else:
+        entries = _json_items(content.rsplit(SUM_ENTRIES_HEADER, 1)[-1])
+        facts = [
+            text
+            for entry in entries
+            if isinstance(entry, Mapping)
+            for text in _strings_of(entry.get("text"))
+        ]
+    return {
+        "facts": facts or ["Запись без текста."],
+        "themes": [],
+        "energy": chunk.invariants.expected_energy,
+        "open_questions": [],
+    }
+
+
+def _json_items(text: str) -> list[object]:
+    """The JSON array a request carries after its content header."""
+    try:
+        payload = json.loads(text.strip())
+    except json.JSONDecodeError as exc:
+        raise HarnessError("a request of the split mock does not carry a JSON array") from exc
+    if not isinstance(payload, list):
+        raise HarnessError("a request of the split mock does not carry a JSON array")
+    return payload
+
+
+def _strings_of(value: object) -> list[str]:
+    """The non-empty strings of a JSON value (an absent field yields none)."""
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str) and item]
+    return []
 
 
 def live_provider_factory(models_config: ModelsConfig) -> Callable[[GoldenChunk], LLMProvider]:
@@ -1580,12 +1778,15 @@ def _result_label(outcome: ChunkOutcome) -> str:
 
 
 def _measured_usage_lines(outcomes: Sequence[ChunkOutcome]) -> list[str]:
-    """One line naming the largest measured prompt of each category (live only).
+    """One line naming the largest measured **call** of each category (live only).
 
     The endpoint's own count is the counter that can judge the character-based
     estimate, so the live report shows the maxima next to the generation cap of
-    each profile. CI mode receives no usage and the line is absent. The values
-    are metrics only — never content (AGENTS.md §7-8).
+    each profile. The figure of a chunk is the largest of its calls, not its last
+    one (T35): a layer that splits a long day sends several requests, and the
+    fold-back is the smallest of them, so reading the last call would report a
+    prompt that measured nothing. CI mode receives no usage and the line is absent.
+    The values are metrics only — never content (AGENTS.md §7-8).
     """
     maxima: dict[str, int] = {}
     for outcome in outcomes:
@@ -1598,7 +1799,7 @@ def _measured_usage_lines(outcomes: Sequence[ChunkOutcome]) -> list[str]:
         f"{category} {maxima[category]} (cap {PROFILE_MAX_TOKENS[category]})"
         for category in sorted(maxima)
     )
-    return [f"measured input tokens (endpoint), max per category: {parts}"]
+    return [f"measured input tokens (endpoint), max call per category: {parts}"]
 
 
 def format_report(outcomes: Sequence[ChunkOutcome], manifest: GoldenManifest) -> str:
@@ -1612,7 +1813,8 @@ def format_report(outcomes: Sequence[ChunkOutcome], manifest: GoldenManifest) ->
     """
     lines: list[str] = []
     header = (
-        f"{'chunk':<34}{'category':<12}{'profile':<14}{'latency':>9}  {'result':<18} failed checks"
+        f"{'chunk':<34}{'category':<12}{'profile':<14}{'latency':>9}{'calls':>7}  "
+        f"{'result':<18} failed checks"
     )
     lines.append(header)
     lines.append("-" * len(header))
@@ -1620,9 +1822,13 @@ def format_report(outcomes: Sequence[ChunkOutcome], manifest: GoldenManifest) ->
         failed = ", ".join(outcome.failed_checks) if outcome.failed_checks else "-"
         # A skipped chunk has no measurement: `0.00s` would read as «fast».
         latency = "n/a" if outcome.skipped else f"{outcome.latency_s:.2f}s"
+        # The call count is what makes a split day visible in a live run (T35): a
+        # chunk that needed several calls says so, instead of looking like one call
+        # whose measured prompt was small.
+        calls = "-" if outcome.skipped else str(outcome.requests)
         lines.append(
             f"{outcome.chunk_id:<34}{outcome.category:<12}{outcome.profile_name:<14}"
-            f"{latency:>9}  {_result_label(outcome):<18} {failed}"
+            f"{latency:>9}{calls:>7}  {_result_label(outcome):<18} {failed}"
         )
     summary = summarize(outcomes)
     lines.append("")
