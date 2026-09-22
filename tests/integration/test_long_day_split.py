@@ -414,7 +414,7 @@ def test_the_measured_figure_is_the_largest_call_not_the_last(
     report = harness.format_report([outcome], harness.golden_manifest())
     assert "max call per category: day 3000 (cap 4096)" in report
     # The row names the call count, so a split day is visible as one: the columns
-    # are chunk, category, profile, latency, calls, result, failed checks.
+    # are chunk, category, profile, latency, calls, slowest, result, failed checks.
     row = next(line for line in report.splitlines() if line.startswith(LONG_DAY))
     assert row.split()[4] == str(parts + 1)
 
@@ -440,3 +440,188 @@ def test_a_large_part_call_is_caught_by_the_measured_budget(
     assert outcome.failed_checks == ["measured_context_budget"]
     assert "8000" in outcome.violations[0].detail
     assert f"largest of {outcome.requests} call(s)" in outcome.violations[0].detail
+
+
+# ---------------------------------------------------------------------------
+# T40: the unit of the latency budget is one call
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedClock:
+    """A clock that reads one scripted run and refuses to be read twice over.
+
+    Counting the readings is the point: a run whose clock is read more often than
+    the script describes would otherwise keep a stale value and measure nothing.
+    """
+
+    def __init__(self, readings: list[float]) -> None:
+        self._readings = readings
+        self.read = 0
+
+    def __call__(self) -> float:
+        assert self.read < len(self._readings), (
+            "the run read the clock more often than the scripted calls describe"
+        )
+        value = self._readings[self.read]
+        self.read += 1
+        return value
+
+
+def _scripted_run(call_seconds: list[float], *, overhead: float = 0.0) -> _ScriptedClock:
+    """A clock reading the run the harness measures: start, each call, end (T40).
+
+    ``call_seconds`` is what the layer spends in its calls, one figure per call;
+    ``overhead`` is everything around them (the store, the chunker). The harness
+    reads every measurement off one clock (the chunk's total and the time of each
+    call), so the readings are a sequence: the chunk starts, each call starts and
+    ends, the chunk ends after the last call plus the overhead.
+
+    Scripting the clock is what lets these tests state the T35 numbers exactly
+    (parts of seconds, a fold-back of seconds) without sleeping: a test that slept
+    would measure the machine under load, which is the very thing this task is
+    about.
+    """
+    readings: list[float] = [0.0]
+    now = 0.0
+    for seconds in call_seconds:
+        readings.extend((now, now + seconds))
+        now += seconds
+    readings.append(now + overhead)
+    return _ScriptedClock(readings)
+
+
+def _run_with_clock(
+    chunk: GoldenChunk, call_seconds: list[float], *, overhead: float, models_config: ModelsConfig
+) -> Any:
+    """Evaluate ``chunk`` on the CI mock while its clock reads ``call_seconds``.
+
+    ``monkeypatch`` is deliberately not used: the clock is replaced for the duration
+    of one run and restored by the fixture-free helper, so a failing run cannot leave
+    a scripted clock behind for the rest of the session.
+    """
+    original = harness._clock
+    harness._clock = _scripted_run(call_seconds, overhead=overhead)
+    try:
+        provider = harness.ci_provider_factory(chunk)
+        return harness.evaluate_chunk(chunk, provider=provider, models_config=models_config)
+    finally:
+        harness._clock = original
+
+
+def test_a_split_day_is_graded_by_its_slowest_call_not_by_the_sum_of_them(
+    long_day: GoldenChunk, day_profile: OpenAICompatibleProfile, models_config: ModelsConfig
+) -> None:
+    """T40 DoD 1 and 2(a): the number of calls stops being a latency defect.
+
+    The defect: the budget of 15 s was calibrated on **one** call (T21), while a
+    correctly split day costs three or four (T35: 17.76 + 8.14 + 18.77 = 44.67 s of
+    machine time), so every honestly split day was red by construction. Here the
+    layer's own calls each stay inside the budget while their sum — the chunk total —
+    is far above it: the chunk must pass, and the total must still be reported, so
+    the price of splitting stays visible.
+    """
+    parts = len(_parts(long_day, day_profile))
+    calls = [6.0] * parts + [7.0]  # every call inside 15 s, the day far outside
+    outcome = _run_with_clock(long_day, calls, overhead=1.5, models_config=models_config)
+
+    # The timed calls are exactly the requests the endpoint saw, no more and no less.
+    assert outcome.requests == len(calls)
+    assert [round(seconds, 2) for seconds in outcome.call_seconds] == calls
+    assert outcome.slowest_call_s == pytest.approx(7.0)
+    # The chunk's total is what the old rule compared with the budget: over it.
+    assert outcome.latency_s > 15
+    assert outcome.latency_within_budget
+    assert outcome.content_violations == []
+
+    report = harness.format_report([outcome], harness.golden_manifest())
+    row = next(line for line in report.splitlines() if line.startswith(LONG_DAY))
+    cells = row.split()
+    assert cells[3] == f"{outcome.latency_s:.2f}s"  # the chunk's total stays printed
+    assert cells[4] == str(len(calls))  # the call count (T35)
+    assert cells[5] == f"{outcome.slowest_call_s:.2f}s"  # the figure the budget grades
+    assert "PASS" in cells
+    # Every call is named, not only the slowest, and the total is named next to them.
+    expected = ", ".join(f"{seconds:.2f}s" for seconds in calls)
+    assert f"{LONG_DAY} ({len(calls)} call(s), budget < 15s): {expected}" in report
+    assert f"chunk total {outcome.latency_s:.2f}s" in report
+    assert "latency day: slowest call 7.00s (budget < 15s), slowest chunk total" in report
+
+
+def test_a_single_call_chunk_over_its_budget_stays_red(models_config: ModelsConfig) -> None:
+    """T40 DoD 2(b): the unit change must not weaken an ordinary day.
+
+    A short day makes **one** call, so its call *is* its latency: the figure the
+    budget grades was the chunk before T40 and is the call now, and the verdict must
+    not move. 16 s against the day budget of 15 s is red, on the clock check alone
+    and not as a content failure (T18).
+
+    «Almost» rather than «exactly», and this test is where the difference is visible:
+    the chunk total is 16.4 s and the graded figure 16.0 s, because the work around
+    the call (the store, the gate) is no longer inside the budget. That is the
+    intended scope of the unit, not a loosening of the number — the pass/fail line
+    for a one-call chunk moved down by the work outside the call; a chunk whose
+    **call** misses the budget is still red (see the T40 sections of
+    ``docs/device-choice.md``, ``ADR-016`` and ``eval/golden/README.md``).
+    """
+    chunk = harness.load_golden_set(chunk_ids=["day-01-quiet-monday"])[1][0]
+    outcome = _run_with_clock(chunk, [16.0], overhead=0.4, models_config=models_config)
+
+    assert len(outcome.call_seconds) == 1 and outcome.requests == 1
+    assert outcome.slowest_call_s == pytest.approx(16.0)
+    assert outcome.latency_s == pytest.approx(16.4)
+    assert outcome.failed_checks == [harness.LATENCY_CHECK]
+    report = harness.format_report([outcome], harness.golden_manifest())
+    assert "FAIL:latency" in report
+    assert "invariants: 1/1 passed" in report
+
+
+def test_a_slow_call_of_a_split_day_is_still_red(
+    long_day: GoldenChunk, day_profile: OpenAICompatibleProfile, models_config: ModelsConfig
+) -> None:
+    """T40 DoD 2(b) for a chunk that splits: one slow call still fails the chunk.
+
+    The other side of the same axis. The budget is applied to **every** call, so a
+    single call over it fails the chunk even though the *number* of calls is not what
+    failed it — the two cases are separate claims, and only this test holds the
+    second one. Without it a rule that quietly graded nothing but single-call chunks
+    (``if len(outcome.call_seconds) > 1: return``) would pass the whole suite: that
+    mutation was measured against the suite during the T40 acceptance and survived
+    every test but this one.
+    """
+    parts = len(_parts(long_day, day_profile))
+    calls = [6.0] * parts + [20.0]  # one call over the 15 s budget, the rest inside
+    outcome = _run_with_clock(long_day, calls, overhead=1.5, models_config=models_config)
+
+    assert outcome.requests == len(calls)
+    assert outcome.slowest_call_s == pytest.approx(20.0)
+    assert not outcome.latency_within_budget
+    assert outcome.failed_checks == [harness.LATENCY_CHECK]
+    assert outcome.content_violations == []
+    # The report names the slowest call in the row, so the failing figure is visible
+    # without reading the violation detail.
+    report = harness.format_report([outcome], harness.golden_manifest())
+    row = next(line for line in report.splitlines() if line.startswith(LONG_DAY))
+    assert row.split()[5] == "20.00s"
+    assert "FAIL:latency" in report
+
+
+def test_a_chunk_whose_call_was_never_timed_is_not_read_as_fast() -> None:
+    """The fallback is the chunk's own wall time, never zero (T40 DoD 2).
+
+    A layer that refuses its input before its first request (``PipelineInputError``)
+    makes no call at all, so there is nothing to time per call. Grading such a chunk
+    as ``0.00s`` would turn «nothing was measured» into «fast»; the honest figure is
+    the wall time the harness did measure.
+    """
+    outcome = harness.ChunkOutcome(
+        chunk_id="day-without-a-call",
+        category="day",
+        kind="daily_summary",
+        latency_s=0.5,
+        latency_budget_s=0.0,
+    )
+    assert outcome.call_seconds == []
+    assert outcome.slowest_call_s == pytest.approx(0.5)
+    harness._apply_latency_budget(outcome)
+    assert [violation.check for violation in outcome.violations] == [harness.LATENCY_CHECK]
+    assert "no call was timed" in outcome.violations[0].detail

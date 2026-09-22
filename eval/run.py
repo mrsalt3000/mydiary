@@ -56,7 +56,11 @@ lexeme lists, the numeral words and the budget reserve. The checks are:
 * the latency budget declared for the **route of the category** (T21: an STT
   correction under 5 s and a day under 15 s on the GPU tags, a weekly rollup
   under 180 s on the CPU twin ``diary-sum-cpu``; the coaching note declares none
-  and is reported as ``n/a``).
+  and is reported as ``n/a``) applied to the **slowest single call** of the chunk
+  (T40: the budgets were calibrated on one call, so one call is the unit they are
+  compared with; the calls of a layer that honestly splits its input are timed
+  one by one, while the chunk's own total stays in the report, so the price of
+  splitting is visible instead of being absorbed by the budget).
 
 Two counts, never one (T18): a chunk can fail because its *content* broke an
 invariant or because it missed its latency budget, and the report names the two
@@ -275,6 +279,8 @@ PROMPT_PATH_BY_CATEGORY: dict[str, Path] = {
 #: Check the runner itself adds when a chunk misses its latency budget. It is
 #: not a content check: T18 keeps the two counts apart, because a cold model load
 #: and a broken invariant are different events that used to share one number.
+#: Since T40 the figure compared with the budget is the **slowest single call**
+#: of the chunk, not the sum of its calls (see :func:`_apply_latency_budget`).
 LATENCY_CHECK = "latency_budget"
 
 #: Pipeline type recorded on the processing run of each category.
@@ -436,10 +442,23 @@ class ChunkOutcome:
     kind: str
     profile_name: str = ""
     skipped_reason: str = ""
+    #: Wall time of the whole layer run of this chunk (T18) — the price the user
+    #: pays, including every call a split input needs and the database work around
+    #: them. Since T40 this is what the report prints in the chunk's ``latency``
+    #: column, while the **budget** is compared with :attr:`slowest_call_s`.
     latency_s: float = 0.0
     latency_budget_s: float | None = None
+    #: Wall time of every ``complete`` call the layer made, in call order (T40).
+    #: A day that the layer honestly splits (T23, ``ADR-016``) makes several calls;
+    #: timing them one by one is what lets the route budget stay calibrated on one
+    #: call. Empty when nothing was timed — a layer that failed before its first
+    #: request — and then :attr:`slowest_call_s` falls back to the chunk's total.
+    call_seconds: list[float] = field(default_factory=list)
     violations: list[Violation] = field(default_factory=list)
     diagnostics: list[str] = field(default_factory=list)
+    #: Number of calls the layer made, as the harness counted them (T40 — the count
+    #: is ``len(call_seconds)``, not a counter a provider reports, so one number has
+    #: one source; a call that raised is counted like any other).
     requests: int = 0
     #: The **largest** usage the endpoint reported for one call of this chunk (T35:
     #: a split day makes several calls, and the fold-back is the smallest of them).
@@ -472,6 +491,20 @@ class ChunkOutcome:
     def latency_violations(self) -> list[Violation]:
         """Violations of this chunk's latency budget (none when it has no budget)."""
         return [item for item in self.violations if item.check == LATENCY_CHECK]
+
+    @property
+    def slowest_call_s(self) -> float:
+        """The figure the route budget is compared with: the slowest single call (T40).
+
+        The budgets of T21 (5/15/180 s) were calibrated on **one** call, so one call
+        is the unit they are graded in: a layer that splits a long input into parts
+        is not punished for the number of parts, only for the slowest of them. When
+        no call was timed at all — a layer that refused its input before its first
+        request — the chunk's own wall time is the only measurement there is, and
+        the fallback is deliberately the *total* rather than zero: an unmeasurable
+        chunk must not read as a fast one.
+        """
+        return max(self.call_seconds) if self.call_seconds else self.latency_s
 
     @property
     def latency_within_budget(self) -> bool:
@@ -1197,6 +1230,58 @@ def _latest_result_payload(session: Session, chunk: GoldenChunk) -> Mapping[str,
 # ---------------------------------------------------------------------------
 
 
+def _clock() -> float:
+    """The monotonic clock every measurement of a run reads.
+
+    ``time.perf_counter`` in a real run; a **test seam** for the latency tests,
+    which script a run of known duration (T40) instead of sleeping. It is one
+    function so that the chunk's total and the times of its individual calls are
+    read off the same clock and cannot drift apart.
+    """
+    return time.perf_counter()
+
+
+class TimedProvider:
+    """Wraps a provider and records the wall time of **every** call (T40).
+
+    The unit of the latency budget is one call (the budgets of T21 were calibrated
+    on one call), so the harness has to know how long each call took — not only how
+    long the layer as a whole took. The measurement lives here rather than in the
+    live provider wrapper on purpose: it is the harness's own measurement of the
+    layer it runs, it applies to the CI mock as well, and it cannot be lost by a
+    factory that forgets to wrap a provider.
+
+    A call that raises is timed too: it cost the same wall time, and the layer may
+    well retry it (``generate_with_invariants``) or turn it into a named failure.
+    Metrics only — the request and the response are passed through untouched.
+    """
+
+    def __init__(self, provider: LLMProvider) -> None:
+        self._provider = provider
+        self.call_seconds: list[float] = []
+
+    def complete(self, request: LLMRequest) -> LLMResponse:
+        started = _clock()
+        try:
+            return self._provider.complete(request)
+        finally:
+            self.call_seconds.append(_clock() - started)
+
+    @property
+    def usages(self) -> list[LLMUsage] | None:
+        """The wrapped provider's reported usages, when it reports any."""
+        usages = getattr(self._provider, "usages", None)
+        if not isinstance(usages, list):
+            return None
+        return [usage for usage in usages if isinstance(usage, LLMUsage)]
+
+    @property
+    def last_usage(self) -> LLMUsage | None:
+        """The wrapped provider's last reported usage, when it reports one."""
+        usage = getattr(self._provider, "last_usage", None)
+        return usage if isinstance(usage, LLMUsage) else None
+
+
 def evaluate_chunk(
     chunk: GoldenChunk,
     *,
@@ -1211,8 +1296,13 @@ def evaluate_chunk(
     The provider is injected (a scripted mock in CI mode, the real
     OpenAI-compatible adapter in a live run); the layers, the store and the
     migrations are the real ones. Latency is measured around the layer call
-    itself, without the database setup, and is compared with the manifest budget
-    of the category.
+    itself, without the database setup: the chunk's total lands in
+    :attr:`ChunkOutcome.latency_s` and every individual call in
+    :attr:`ChunkOutcome.call_seconds`, and the manifest budget of the category is
+    compared with the **slowest call** (T40 — the unit the budgets of T21 were
+    calibrated in). The provider handed to the layer is a :class:`TimedProvider`
+    around the injected one, so the per-call timing does not depend on what the
+    caller's provider chooses to report.
 
     ``judge`` is the NLI instrument of ``--nli`` (T24a): when it is given, the
     claims of a summary chunk are checked against the canonical input the layer
@@ -1262,7 +1352,8 @@ def evaluate_chunk(
             )
         raw_state_before = _raw_state(session) if chunk.category in {"stt_error", "day"} else None
 
-        started = time.perf_counter()
+        timed = TimedProvider(provider)
+        started = _clock()
         refused: PipelineInvariantError | None = None
         permanent: PipelinePermanentError | LLMStructuredOutputError | None = None
         try:
@@ -1270,7 +1361,7 @@ def evaluate_chunk(
                 session,
                 chunk,
                 profile=resolved_profile,
-                provider=provider,
+                provider=timed,
                 gate_judge=gate_judge,
             )
         except PipelineInvariantError as exc:
@@ -1291,7 +1382,12 @@ def evaluate_chunk(
             # measurement itself is broken, which must not read as a defect of
             # the layer.
             permanent = exc
-        outcome.latency_s = time.perf_counter() - started
+        outcome.latency_s = _clock() - started
+        outcome.call_seconds = list(timed.call_seconds)
+        # The call count is the harness's own measurement (T40), not what a provider
+        # chooses to report: one source for one number, and it counts a call that
+        # raised like any other call the layer made.
+        outcome.requests = len(outcome.call_seconds)
         session.commit()
 
         if raw_state_before is not None and _raw_state(session) != raw_state_before:
@@ -1305,7 +1401,7 @@ def evaluate_chunk(
                     "the layer failed permanently, so the chunk is graded as that failure",
                 )
             )
-            _record_measurements(outcome, chunk, resolved_profile, provider)
+            _record_measurements(outcome, chunk, resolved_profile, timed)
             _apply_latency_budget(outcome)
             return outcome
         if refused is not None:
@@ -1317,7 +1413,7 @@ def evaluate_chunk(
             outcome.violations.extend(
                 Violation(check, "the layer refused to store its output") for check in named
             )
-            _record_measurements(outcome, chunk, resolved_profile, provider)
+            _record_measurements(outcome, chunk, resolved_profile, timed)
             _apply_latency_budget(outcome)
             return outcome
         payload = _latest_result_payload(session, chunk)
@@ -1343,7 +1439,7 @@ def evaluate_chunk(
         # different defects, and the second is worth measuring either way.
         outcome.nli = _nli_metrics(chunk, payload, judge)
 
-    _record_measurements(outcome, chunk, resolved_profile, provider)
+    _record_measurements(outcome, chunk, resolved_profile, timed)
     _apply_latency_budget(outcome)
     return outcome
 
@@ -1400,20 +1496,19 @@ def _record_measurements(
 ) -> None:
     """Record and check what the endpoint reported for **every** call (T35).
 
-    The call count is a metric of the chunk, and the token figure is the
-    **largest** measured prompt among the calls the layer made — not the last one.
-    A layer that splits a long input (T23, ``ADR-016``) sends several requests, and
-    reading the last of them (the fold-back) reported a number that measured the
-    smallest call of the run while claiming to measure the chunk's input. The
-    budget check uses the same maximum, because the window is a property of one
-    call: the largest call is what can overflow it.
+    The token figure is the **largest** measured prompt among the calls the layer
+    made — not the last one. A layer that splits a long input (T23, ``ADR-016``)
+    sends several requests, and reading the last of them (the fold-back) reported a
+    number that measured the smallest call of the run while claiming to measure the
+    chunk's input. The budget check uses the same maximum, because the window is a
+    property of one call: the largest call is what can overflow it.
 
-    A provider that reports a single usage (an older or simpler adapter) is read
-    through ``last_usage``; metrics only — never content.
+    The **call count** is not read here: it is the harness's own count of the calls
+    it timed (T40, ``ChunkOutcome.requests``), so the report has one source for that
+    number instead of two that a provider could disagree with. A provider that
+    reports a single usage (an older or simpler adapter) is read through
+    ``last_usage``; metrics only — never content.
     """
-    requests = getattr(provider, "request_count", None)
-    if isinstance(requests, int):
-        outcome.requests = requests
     usages = _measured_usages(provider)
     if not usages:
         return
@@ -1440,15 +1535,47 @@ def _measured_usages(provider: LLMProvider) -> list[LLMUsage]:
 
 
 def _apply_latency_budget(outcome: ChunkOutcome) -> None:
+    """Grade the chunk by its **slowest single call** against its route budget (T40).
+
+    The budget stays what the user's decision made it (5/15/180 s per route, T21)
+    and stays compared with **one call** — that is the unit it was calibrated in.
+    What changed in T40 is only which figure of a chunk that is. Until then it was
+    the whole layer run, which on a day the layer honestly splits (T23, ``ADR-016``)
+    is the sum of its parts plus the fold-back: 17.76 s + 8.14 s + 18.77 s in the
+    T35 measurement. Any correctly split day was therefore red by construction,
+    however fast each call was, and the number said nothing about the layer.
+
+    Now every call the layer made is timed (:class:`TimedProvider`) and the budget
+    is applied to each of them — equivalently, to the slowest one. A chunk that makes
+    a single call is graded by that call rather than by the chunk total around it, so
+    the work outside a call (the store, the gate) leaves the budget: measured live on
+    the three short golden days that is 0.24–3.03 s out of 15 s. The number the budget
+    is compared with is still the calibrated one, the chunk total is printed next to
+    it, and the number of calls is never what fails a chunk: a split day with one slow
+    call is as red as a single-call day that is slow.
+    """
     budget = outcome.latency_budget_s
-    if budget is not None and outcome.latency_s > budget:
-        outcome.violations.append(
-            Violation(
-                LATENCY_CHECK,
-                f"{outcome.latency_s:.2f}s > {budget:.0f}s "
-                f"(profile {outcome.profile_name}, category {outcome.category})",
-            )
+    if budget is None:
+        return
+    slowest = outcome.slowest_call_s
+    if slowest <= budget:
+        return
+    calls = len(outcome.call_seconds)
+    if calls:
+        over = sum(1 for seconds in outcome.call_seconds if seconds > budget)
+        unit = f"slowest of {calls} call(s), {over} over budget"
+    else:
+        # Nothing was timed (the layer failed before its first request), so there is
+        # no call to blame and no «1 over budget» to report next to it.
+        unit = "the chunk — no call was timed"
+    outcome.violations.append(
+        Violation(
+            LATENCY_CHECK,
+            f"{slowest:.2f}s > {budget:.0f}s ({unit}; "
+            f"chunk total {outcome.latency_s:.2f}s, profile {outcome.profile_name}, "
+            f"category {outcome.category})",
         )
+    )
 
 
 def evaluate_all(
@@ -1681,9 +1808,10 @@ class Summary:
     T18 keeps the two natures of a failure apart instead of adding them into one
     number: ``invariants_passed`` is what the manifest threshold talks about,
     ``latency_within_budget`` counts the chunks that stayed inside their route's
-    budget (out of ``latency_measured``), and ``fully_passed`` is their
-    intersection. The report never blends them, because a gate refusal and a cold
-    model load are different events.
+    budget (out of ``latency_measured``; each chunk is graded by its **slowest
+    single call**, T40), and ``fully_passed`` is their intersection. The report
+    never blends them, because a gate refusal and a cold model load are different
+    events.
     """
 
     total: int
@@ -1693,6 +1821,12 @@ class Summary:
     latency_measured: int
     latency_within_budget: int
     fully_passed: int
+    #: The slowest **single call** of each category (T40) — the figure the route
+    #: budget was compared with, and the one the report prints as ``slowest call``.
+    max_call_by_category: dict[str, float]
+    #: The slowest **chunk total** of each category: every call of the layer plus
+    #: the work around them. Printed next to the call figure, so the price of
+    #: splitting a day is visible in the summary as well as in the chunk row.
     max_latency_by_category: dict[str, float]
     latency_budgets: dict[str, float | None]
     diagnostics_total: int
@@ -1720,6 +1854,7 @@ def summarize(outcomes: Sequence[ChunkOutcome]) -> Summary:
     rather than a flattering ``0.00s``.
     """
     max_latency: dict[str, float] = {}
+    max_call: dict[str, float] = {}
     budgets: dict[str, float | None] = {}
     skipped_categories: set[str] = set()
     for outcome in outcomes:
@@ -1728,6 +1863,9 @@ def summarize(outcomes: Sequence[ChunkOutcome]) -> Summary:
             continue
         max_latency[outcome.category] = max(
             max_latency.get(outcome.category, 0.0), outcome.latency_s
+        )
+        max_call[outcome.category] = max(
+            max_call.get(outcome.category, 0.0), outcome.slowest_call_s
         )
         budgets.setdefault(outcome.category, outcome.latency_budget_s)
     measured = [outcome for outcome in outcomes if not outcome.skipped]
@@ -1748,6 +1886,7 @@ def summarize(outcomes: Sequence[ChunkOutcome]) -> Summary:
         latency_measured=len(timed),
         latency_within_budget=sum(1 for outcome in timed if outcome.latency_within_budget),
         fully_passed=sum(1 for outcome in measured if outcome.passed),
+        max_call_by_category=max_call,
         max_latency_by_category=max_latency,
         latency_budgets=budgets,
         diagnostics_total=sum(len(outcome.diagnostics) for outcome in outcomes),
@@ -1802,6 +1941,38 @@ def _measured_usage_lines(outcomes: Sequence[ChunkOutcome]) -> list[str]:
     return [f"measured input tokens (endpoint), max call per category: {parts}"]
 
 
+def _per_call_latency_lines(outcomes: Sequence[ChunkOutcome]) -> list[str]:
+    """Name every call of a chunk that made several, and the chunk's total (T40).
+
+    The budget is graded per call, so the report has to show the calls: a reader who
+    sees only the slowest one cannot tell a layer that made three fast calls from
+    one that made a single slow call, and the T35 finding («any correctly split day
+    is red by construction») was exactly about that difference. Chunks with a single
+    call print nothing extra — their row already is the call. Metrics only, never
+    content (AGENTS.md §7-8).
+    """
+    several = [
+        outcome for outcome in outcomes if not outcome.skipped and len(outcome.call_seconds) > 1
+    ]
+    if not several:
+        return []
+    lines = [
+        "",
+        "per-call latency of the chunks that made more than one call "
+        "(the route budget is graded per call, T40):",
+    ]
+    for outcome in several:
+        calls = ", ".join(f"{seconds:.2f}s" for seconds in outcome.call_seconds)
+        budget = outcome.latency_budget_s
+        verified = "n/a" if budget is None else f"< {budget:.0f}s"
+        lines.append(
+            f"  {outcome.chunk_id} ({len(outcome.call_seconds)} call(s), budget {verified}): "
+            f"{calls} — slowest {outcome.slowest_call_s:.2f}s, "
+            f"chunk total {outcome.latency_s:.2f}s"
+        )
+    return lines
+
+
 def format_report(outcomes: Sequence[ChunkOutcome], manifest: GoldenManifest) -> str:
     """The human report: chunk ids, metrics and failed check names only.
 
@@ -1809,12 +1980,15 @@ def format_report(outcomes: Sequence[ChunkOutcome], manifest: GoldenManifest) ->
     §7-8): only ids, categories, the profile each chunk ran under, latency,
     pass/fail, check names and — when the endpoint reports usage — the measured
     token maxima. Invariants and latency are reported as two separate counts
-    (T18) — the threshold applies to the invariant count alone.
+    (T18) — the threshold applies to the invariant count alone. Latency appears as
+    two figures (T40): the chunk's **total** (``latency``, the price of splitting a
+    long day included) and the **slowest call** the route budget was graded with
+    (``slowest``), with the calls of a multi-call chunk listed under the table.
     """
     lines: list[str] = []
     header = (
-        f"{'chunk':<34}{'category':<12}{'profile':<14}{'latency':>9}{'calls':>7}  "
-        f"{'result':<18} failed checks"
+        f"{'chunk':<34}{'category':<12}{'profile':<14}{'latency':>9}{'calls':>7}"
+        f"{'slowest':>9}  {'result':<18} failed checks"
     )
     lines.append(header)
     lines.append("-" * len(header))
@@ -1826,10 +2000,17 @@ def format_report(outcomes: Sequence[ChunkOutcome], manifest: GoldenManifest) ->
         # chunk that needed several calls says so, instead of looking like one call
         # whose measured prompt was small.
         calls = "-" if outcome.skipped else str(outcome.requests)
+        # `latency` is the chunk's total (what the user waits for), `slowest` is the
+        # figure the route budget is compared with since T40 (the largest prompt the
+        # endpoint counted is a different figure and keeps its own name in the token
+        # line). Printing both is what keeps the price of splitting a day visible
+        # instead of hiding it behind the budget.
+        slowest = "n/a" if outcome.skipped else f"{outcome.slowest_call_s:.2f}s"
         lines.append(
             f"{outcome.chunk_id:<34}{outcome.category:<12}{outcome.profile_name:<14}"
-            f"{latency:>9}{calls:>7}  {_result_label(outcome):<18} {failed}"
+            f"{latency:>9}{calls:>7}{slowest:>9}  {_result_label(outcome):<18} {failed}"
         )
+    lines.extend(_per_call_latency_lines(outcomes))
     summary = summarize(outcomes)
     lines.append("")
     threshold = f"{manifest.threshold.pass_count}/{manifest.threshold.total}"
@@ -1867,9 +2048,13 @@ def format_report(outcomes: Sequence[ChunkOutcome], manifest: GoldenManifest) ->
             continue
         budget = summary.latency_budgets.get(category)
         verified = "n/a" if budget is None else f"< {budget:.0f}s"
+        # Two figures on purpose (T40): the budget is compared with one call, and the
+        # chunk's total — the price of splitting a long day into parts — is printed
+        # next to it so a reader can see both without opening the chunk row.
         lines.append(
-            f"latency {category}: max {summary.max_latency_by_category[category]:.2f}s "
-            f"(budget {verified})"
+            f"latency {category}: slowest call {summary.max_call_by_category[category]:.2f}s "
+            f"(budget {verified}), slowest chunk total "
+            f"{summary.max_latency_by_category[category]:.2f}s"
         )
     lines.append(
         f"diagnostics (informational, not a failure): {summary.diagnostics_total} token(s)"
