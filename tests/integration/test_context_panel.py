@@ -74,12 +74,26 @@ SUNDAY = sunday_date_for(DAY)
 
 PANEL_RE = re.compile(r'<aside class="context-panel".*?</aside>', re.DOTALL)
 STEP_RE = re.compile(r'<div class="pipeline-step">.*?(?=<div class="pipeline-step">|\Z)', re.DOTALL)
+#: One ``process-card`` of the panel, up to the next card / the closing note.
+CARD_RE = re.compile(
+    r'<section class="process-card">.*?'
+    r'(?=<section class="process-card">|<p class="privacy-note">|</aside>)',
+    re.DOTALL,
+)
 
 
 def _panel(html: str) -> str:
     match = PANEL_RE.search(html)
     assert match is not None, "the day page must render the context panel"
     return match.group(0)
+
+
+def _card(panel: str, title: str) -> str:
+    """The rendered fragment of the process card whose title is ``title``."""
+    for candidate in CARD_RE.findall(panel):
+        if f">{title}<" in candidate:
+            return candidate
+    raise AssertionError(f"no process card titled {title!r} in the panel")
 
 
 def _step(panel: str, title: str) -> str:
@@ -197,9 +211,10 @@ def test_day_page_renders_the_panel_in_the_third_column(api_client: TestClient) 
     panel = _panel(html)
     assert 'aria-label="Обработка дня"' in html
     assert "<h2>Обработка дня</h2>" in panel
-    # Two honest blocks, both named.
+    # Three honest blocks, all named.
     assert '<h3 class="process-title">Записи дня</h3>' in panel
     assert '<h3 class="process-title">Недельные слои</h3>' in panel
+    assert '<h3 class="process-title">Слои фазы 2</h3>' in panel
     # The panel is a snapshot of the server state and says so.
     assert PANEL_SNAPSHOT_NOTE in panel
 
@@ -299,7 +314,10 @@ def test_day_block_says_so_when_there_is_nothing_to_transcribe(
 def test_empty_day_reports_no_entries_instead_of_zeros(api_client: TestClient) -> None:
     panel = _panel(api_client.get(f"/?date={DAY.isoformat()}").text)
     assert "За этот день записей нет." in panel
-    assert '<div class="pipeline">' not in panel
+    # The *day* block draws no steps at all for an empty day. (The phase-2 block
+    # below it is a separate card: it reports the two layer lineages of the day
+    # and of its week as «Не посчитано» — task T37.)
+    assert '<div class="pipeline">' not in _card(panel, "Записи дня")
 
 
 def test_voice_without_an_audio_row_is_reported_separately(
@@ -686,18 +704,21 @@ def test_other_templates_do_not_fill_the_panel() -> None:
 # T31 — the day page reads a constant number of rows
 # ---------------------------------------------------------------------------
 
-#: SQL statements one render of the day page issues **after** T31, for a day
-#: that holds at least one voice message. The acceptance measured 17 for 1, 2
-#: and 3 voice messages and for a long mixed day, and 11 for a day with no voice
-#: message at all; this test pins the voice-message cases (the audio reads are
-#: skipped for a day without voice messages, not run with an empty result).
+#: SQL statements one render of the day page issues, for a day that holds at
+#: least one voice message. The acceptance measured 17 for 1, 2 and 3 voice
+#: messages and for a long mixed day, and 11 for a day with no voice message at
+#: all; this test pins the voice-message cases (the audio reads are skipped for
+#: a day without voice messages, not run with an empty result). Task T37 added
+#: two constant reads — the newest ``daily_summary`` of the day and the newest
+#: ``weekly_summary`` of its ISO week — so the same three cases now measure 19,
+#: and a day with no voice message measures 13.
 #:
 #: Before T31 the same page issued ``11 + 6 * N`` — 17 / 23 / 29 for
 #: 1 / 2 / 3 voice messages: every card resolved its audio state with three
 #: single-message reads, and the panel repeated those three per voice row.
 #: The numbers are pinned on purpose: a future change that reintroduces a
 #: per-message read must fail here and be justified, not pass silently.
-DAY_PAGE_QUERY_COUNT = 17
+DAY_PAGE_QUERY_COUNT = 19
 
 
 @contextmanager

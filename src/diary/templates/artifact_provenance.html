@@ -1,0 +1,145 @@
+{# Provenance of one artifact — «артефакт → источник → прогон обработки» (task T37).
+
+   Opened from the day page's «Слои фазы 2» block (a second-family result of
+   that day or of its ISO week) and from the export detail page (a first-family
+   artifact of that export). The chain itself is resolved by the T08 store
+   (`diary.db.results.trace_layer_result`, ADR-007 §7, docs/data-lineage.md §7) —
+   this page renders what the resolver returned and never assembles a chain of
+   its own, so it cannot claim a lineage that no run wrote.
+
+   Privacy (AGENTS.md §7): identifiers, statuses and timestamps only. The text
+   of the source message, the stored LLM payload (`result_json`) and the text of
+   the original export are never rendered here — the page states whether a
+   payload exists and links to the page that already owns the text (the day page
+   or the export page). Nothing of the chain is logged.
+
+   Honest states (AGENTS.md §19): a first-family artifact gets the true answer —
+   its lineage runs through the weekly export, and the page links to that export
+   instead of inventing a second-family chain; a result with no recorded run, a
+   row without an anchor and a stale link each say so in words, and no control is
+   drawn that would lead nowhere. #}
+{% extends "base.html" %}
+{% block title %}Происхождение артефакта — Local Diary{% endblock %}
+{% block page_title %}Происхождение артефакта{% endblock %}
+{% block page_subtitle %}
+  <span class="breadcrumbs__subtitle">артефакт → источник → прогон</span>
+{% endblock %}
+{% block content %}
+<main class="exports-page provenance-page">
+  {% if artifact %}
+  <p class="exports-page__note">
+    {{ artifact.layer_title }}{% if artifact.version_label %} · {{ artifact.version_label }}{% endif %}
+    · ID <span class="provenance-page__mono">{{ artifact.id }}</span>
+    · создан {{ artifact.created_display }}
+  </p>
+
+  <section class="lineage-block">
+    <h2 class="lineage-block__title">Артефакт</h2>
+    <div class="lineage-row">
+      <p class="lineage-row__name">
+        <code>{{ artifact.layer }}</code>{% if artifact.version_label %}<span class="lineage-row__tag">{{ artifact.version_label }}</span>{% endif %}
+      </p>
+      <p class="lineage-row__meta">Слой: {{ artifact.layer_title }}</p>
+      <p class="lineage-row__meta">Идентификатор: <span class="provenance-page__mono">{{ artifact.id }}</span></p>
+      <p class="lineage-row__meta">Создан: {{ artifact.created_display }}</p>
+      {% if artifact.path %}
+      <p class="lineage-row__meta">
+        Файл: <span class="provenance-page__mono">{{ artifact.path }}</span>
+        {%- if artifact.sha_prefix %} · sha256 {{ artifact.sha_prefix }}…{% endif %}
+      </p>
+      {% if not artifact.file_present %}
+      <p class="lineage-row__meta lineage-row__meta--warn">Файла нет на диске.</p>
+      {% endif %}
+      {% endif %}
+      <p class="lineage-row__meta">
+        {% if artifact.has_result %}
+        Структурированный результат хранится в базе; его текст здесь не показывается.
+        {% else %}
+        Структурированного результата в базе нет{% if artifact.path %}, результат — файл{% endif %}.
+        {% endif %}
+      </p>
+    </div>
+  </section>
+
+  {% if family == 'second' %}
+  <section class="lineage-block">
+    <h2 class="lineage-block__title">Источник</h2>
+    <div class="lineage-row">
+      <p class="lineage-row__name">Якорь: <code>{{ source.anchor_caption }}</code></p>
+      <p class="lineage-row__meta">Вид источника: {{ source.kind_label }} ({{ source.kind }})</p>
+      {% if source.local_tz %}
+      <p class="lineage-row__meta">
+        Часовой пояс якоря: {{ source.local_tz }}
+        {%- if not source.tz_matches_app %}; страница дня показывает даты в {{ source.app_timezone }}{% endif %}
+      </p>
+      {% endif %}
+      {% for row in source.rows %}
+      <p class="lineage-row__meta{% if row.warn %} lineage-row__meta--warn{% endif %}">
+        {{ row.label }}: {% if row.mono %}<span class="provenance-page__mono">{{ row.value }}</span>{% else %}{{ row.value }}{% endif %}
+      </p>
+      {% endfor %}
+      {% if source.link %}
+      <p class="lineage-row__meta"><a href="{{ source.link.url }}">{{ source.link.label }}</a></p>
+      {% endif %}
+      {% if source.missing_text %}
+      <p class="lineage-row__meta lineage-row__meta--warn">{{ source.missing_text }}</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="lineage-block">
+    <h2 class="lineage-block__title">Прогон обработки</h2>
+    {% if run.present %}
+    <div class="lineage-row">
+      <p class="lineage-row__name">
+        {{ run.pipeline_label }}<span class="lineage-row__tag">{{ run.status_label }}</span>
+        <span class="provenance-page__mono">({{ run.pipeline_type }})</span>
+      </p>
+      <p class="lineage-row__meta">ID прогона: <span class="provenance-page__mono">{{ run.id }}</span></p>
+      <p class="lineage-row__meta">Статус: {{ run.status_label }} ({{ run.status }})</p>
+      <p class="lineage-row__meta">
+        Профиль: {{ run.profile_name or 'не записано' }} · модель: {{ run.model_name or 'не записано' }}
+        · версия промпта: {{ run.prompt_version or 'не записано' }}
+      </p>
+      <p class="lineage-row__meta">
+        Создан: {{ run.created_display }} · начат: {{ run.started_display or '—' }}
+        · завершён: {{ run.finished_display or '—' }}
+      </p>
+      {% if run.error_summary %}
+      <p class="lineage-row__meta lineage-row__meta--warn">Ошибка: {{ run.error_summary }}</p>
+      {% endif %}
+      {% if run.input_ref %}
+      <p class="lineage-row__meta">
+        {{ run.input_ref.label }}:
+        <a href="{{ run.input_ref.url }}"><span class="provenance-page__mono">{{ run.input_ref.id }}</span></a>
+      </p>
+      {% endif %}
+    </div>
+    {% else %}
+    <p class="compare-block__empty">
+      Прогон обработки для этого артефакта не записан: результат в хранилище есть, а
+      строка прогона, который его создал, отсутствует. Источник указан выше по якорю артефакта.
+    </p>
+    {% endif %}
+  </section>
+  {% else %}
+  <section class="lineage-block">
+    <h2 class="lineage-block__title">Источник</h2>
+    <p class="compare-block__empty">{{ notice }}</p>
+    {% if export %}
+    <div class="lineage-row">
+      <p class="lineage-row__meta">
+        Выгрузка: <span class="provenance-page__mono">{{ export.filename }}</span>
+        · неделя {{ export.week_display }} · ревизия r{{ export.revision }}
+        · создана {{ export.created_at_display }}
+      </p>
+      <p class="lineage-row__meta"><a href="{{ export.detail_url }}">Открыть выгрузку недели</a></p>
+    </div>
+    {% endif %}
+  </section>
+  {% endif %}
+  {% else %}
+  <p class="exports-page__notice">{{ notice }}</p>
+  {% endif %}
+</main>
+{% endblock %}

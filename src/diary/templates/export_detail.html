@@ -137,6 +137,13 @@
           {% else %}
           <p class="lineage-row__meta lineage-row__meta--warn">Файл отсутствует на диске.</p>
           {% endif %}
+          {# Task T37: the artifact's own provenance page. A layer 1–4 artifact
+             gets the honest first-family answer there (its line runs through
+             this export, not through a second-family anchor), so the control
+             never pretends a chain that does not exist. #}
+          <p class="lineage-row__meta">
+            <a href="{{ row.provenance_url }}">Показать происхождение</a>
+          </p>
         </div>
         {% endfor %}
       {% elif section.empty_message %}

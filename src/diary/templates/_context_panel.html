@@ -24,12 +24,20 @@
       message, so they are shown here with links to the existing export pages.
       A week without an export says so and links to ``/exports``, where one is
       created.
+   3. «Слои фазы 2» (task T37) — the second-family results anchored to this
+      very day and to its ISO week (``daily_summary`` and ``weekly_summary``),
+      with the mockup's «Показать происхождение» control, which opens the chain
+      «артефакт → источник → прогон обработки» on the artifact's own page. The
+      control is rendered only for an artifact that exists; a layer without a
+      result says «Не посчитано» and offers nothing (a dead control is worse
+      than none). The other two second-family layers are anchored to a single
+      message and to a weekly-summary artifact, i.e. to something this page is
+      not, so they are not listed here.
 
    What is deliberately absent (dead elements are worse than missing ones):
-   the mockup's "Показать происхождение" (there is no provenance page to open),
-   its "Экспортировать запись" (the product exports weeks, not single entries)
-   and its close button (the panel is server-rendered; closing it would only
-   hide information, not navigate anywhere).
+   the mockup's "Экспортировать запись" (the product exports weeks, not single
+   entries) and its close button (the panel is server-rendered; closing it
+   would only hide information, not navigate anywhere).
 
    No diary text is rendered here — only counts, statuses, times, file names
    and model names read from the configuration. No script of its own: the panel
@@ -127,6 +135,38 @@
     <a class="context-action" href="{{ panel.week.create_url }}">{{ panel.create_export_link_label }}</a>
   </div>
   {% endif %}
+</section>
+
+{# Block 3 (task T37): the second-family results of this day and of its ISO
+   week. Each row names the layer, its newest stored version and, when a result
+   exists, the control that opens the chain «артефакт → источник → прогон» on
+   the artifact's own page. A layer without a result offers no control. #}
+<section class="process-card">
+  <h3 class="process-title">Слои фазы 2</h3>
+  <p class="process-subtitle">{{ panel.phase2.subtitle }}</p>
+  <div class="pipeline">
+    {% for layer in panel.phase2.layers %}
+    <div class="pipeline-step">
+      <span class="step-icon{% if layer.state %} {{ layer.state }}{% endif %}" aria-hidden="true">
+        {%- if layer.state == 'done' -%}
+        <svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>
+        {%- else -%}
+        <svg viewBox="0 0 24 24"><path d="M12 8v4l2.5 2.5"/><circle cx="12" cy="12" r="9"/></svg>
+        {%- endif -%}
+      </span>
+      <div class="step-content">
+        <p class="step-title">{{ layer.title }}</p>
+        <p class="step-detail">{{ layer.detail }}</p>
+        {% if layer.provenance_url %}
+        <div class="context-actions">
+          <a class="context-action" href="{{ layer.provenance_url }}">{{ panel.provenance_link_label }}</a>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  <p class="step-detail">{{ panel.phase2.note }}</p>
 </section>
 
 {# Delicacy note: the short form of the wellbeing-layer disclaimer

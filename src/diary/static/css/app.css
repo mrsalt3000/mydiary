@@ -1911,6 +1911,17 @@ textarea {
   color: var(--danger);
 }
 
+/* ------------------- artifact provenance page (T37) ------------------- */
+
+/* Identifiers (UUIDs, ISO week ids, artifact paths) are long and are read
+   character by character: monospaced, and allowed to break anywhere so a
+   36-character id can never widen the page column. No new colour is
+   introduced — the surrounding `.lineage-row__meta` keeps the text colour. */
+.provenance-page__mono {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
 .export-week__actions {
   display: flex;
   flex-wrap: wrap;

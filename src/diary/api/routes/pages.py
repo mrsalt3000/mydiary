@@ -87,6 +87,13 @@ from diary.db.repositories import (
     TranscriptionRepository,
     WeeklyExportRepository,
 )
+from diary.db.results import (
+    LayerResultError,
+    LayerResultTrace,
+    UnsupportedLayerError,
+    latest_layer_result,
+    trace_layer_result,
+)
 from diary.domain.chat.service import MessageCursor
 from diary.domain.exports.service import export_filename, list_exports
 from diary.domain.exports.weeks import sunday_date_for
@@ -95,6 +102,11 @@ from diary.domain.pipelines.naming import (
     PIPELINE_JOB_TYPE,
 )
 from diary.domain.pipelines.sum_daily.day_input import day_bounds, local_date_of
+from diary.domain.pipelines.sum_weekly.week_input import (
+    WeeklyInputError,
+    week_days,
+    week_id_of,
+)
 from diary.domain.pipelines.wellbeing.safety import (
     ESCALATION_LINES,
     ESCALATION_TITLE,
@@ -823,6 +835,15 @@ PANEL_CREATE_EXPORT_LINK = "Создать выгрузку недели"
 PANEL_AUDIO_FILE_MISSING = "Аудиофайл не найден"
 PANEL_LAYER_NOT_RUN = "Не посчитано"
 
+#: Subtitle and note of the phase-2 block (task T37). The note names what the
+#: control opens and what the chain deliberately does not contain — the source
+#: text is never part of it (AGENTS.md §7).
+PANEL_PHASE2_SUBTITLE = "Артефакт → источник → прогон"
+PANEL_PHASE2_NOTE = (
+    "Показан путь результата: артефакт → источник → прогон обработки. "
+    "Текст дневника в цепочке не показывается."
+)
+
 #: Mark of a voice row whose message lies *outside* the rendered feed window
 #: (a day longer than :data:`PAGE_LIMIT`). The row keeps its real status — the
 #: day block counts the whole day — but offers no jump, because the card it
@@ -1162,6 +1183,66 @@ def _week_layers_view(session: Session, day: date) -> dict[str, Any]:
     return view
 
 
+def _phase2_layers_view(session: Session, day: date) -> dict[str, Any]:
+    """The «Слои фазы 2» block: this day's second-family results (task T37).
+
+    The phase-2 layers are anchored to their source directly (ADR-007 §1), and
+    two of them are anchored to something this page *is*: the local calendar day
+    (``daily_summary`` — ``local_date`` + ``local_tz``) and the ISO week that
+    contains it (``weekly_summary`` — ``week_id``). Both anchors are computed
+    exactly as the layers compute them (``APP_TIMEZONE`` for the day,
+    :func:`~diary.domain.pipelines.sum_weekly.week_input.week_id_of` for the
+    week), so the block can never look at a different lineage than a run would
+    write.
+
+    The newest version of each lineage is read through the T08 store
+    (``latest_layer_result``) — the same read path the layers use. A layer
+    without a stored result says so in words and offers no control; an existing
+    result offers :data:`~diary.api.routes.pages.PROVENANCE_LINK_LABEL`, which
+    opens the chain on the artifact's own page.
+
+    ``stt_corrected`` (anchored to a single message) and ``coach_note``
+    (anchored to a weekly-summary artifact) are deliberately not listed here:
+    the unit of this page is the day, and neither layer is a result *of* that
+    day or of its week.
+    """
+    settings = get_settings()
+    anchors: tuple[tuple[ArtifactLayer, dict[str, Any]], ...] = (
+        (
+            ArtifactLayer.daily_summary,
+            {"local_date": day, "local_tz": settings.timezone},
+        ),
+        (ArtifactLayer.weekly_summary, {"week_id": week_id_of(day)}),
+    )
+    layers: list[dict[str, Any]] = []
+    for layer, anchor in anchors:
+        artifact = latest_layer_result(session, layer=layer, **anchor)
+        if artifact is None:
+            layers.append(
+                _panel_step(
+                    key=layer.value,
+                    title=LAYER_SHORT_TITLES[layer],
+                    detail=PANEL_LAYER_NOT_RUN,
+                    state=None,
+                )
+            )
+            continue
+        version = f"v{artifact.version}" if artifact.version is not None else ""
+        created = f"создано {_format_local(artifact.created_at)}"
+        layers.append(
+            {
+                **_panel_step(
+                    key=layer.value,
+                    title=LAYER_SHORT_TITLES[layer],
+                    detail=f"{version} · {created}" if version else created,
+                    state="done",
+                ),
+                "provenance_url": _provenance_url(artifact.id),
+            }
+        )
+    return {"subtitle": PANEL_PHASE2_SUBTITLE, "note": PANEL_PHASE2_NOTE, "layers": layers}
+
+
 def _day_processing_panel(
     session: Session,
     *,
@@ -1196,12 +1277,14 @@ def _day_processing_panel(
         "steps": _day_block_steps(counters, stt_chip=_transcription_chip()),
         "voice_rows": rows,
         "week": _week_layers_view(session, day),
+        "phase2": _phase2_layers_view(session, day),
         "snapshot_note": PANEL_SNAPSHOT_NOTE,
         "wellbeing_note_title": PANEL_WELLBEING_NOTE_TITLE,
         "wellbeing_note": PANEL_WELLBEING_NOTE,
         "export_link_label": PANEL_EXPORT_LINK,
         "no_export_text": PANEL_NO_EXPORT_TEXT,
         "create_export_link_label": PANEL_CREATE_EXPORT_LINK,
+        "provenance_link_label": PROVENANCE_LINK_LABEL,
     }
 
 
@@ -1519,6 +1602,10 @@ def _lineage_artifact_view(
         "download_url": _artifact_download_url(export.id, artifact.id),
         "file_present": file_present,
         "parent_caption": parent_caption,
+        # Task T37: the artifact's own provenance page. For a first-family
+        # artifact it answers honestly that its lineage runs through this very
+        # export (and links back here), so the control leads somewhere real.
+        "provenance_url": _provenance_url(artifact.id),
         "run_status_label": (
             RUN_STATUS_LABELS[producing_run.status] if producing_run is not None else None
         ),
@@ -2003,5 +2090,347 @@ def older_messages_fragment(
             "messages": _message_views(window, session),
             "has_more": next_cursor is not None,
             "older_cursor": quote(older_cursor, safe="") if older_cursor else None,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task T37 — «Показать происхождение»: артефакт → источник → прогон обработки
+# ---------------------------------------------------------------------------
+
+#: Caption of the provenance control wherever it is offered (the wording of the
+#: UI mockup's button, which could not be rendered before this task: there was
+#: no page to open).
+PROVENANCE_LINK_LABEL = "Показать происхождение"
+
+#: Captions of the source kinds :func:`~diary.db.results.trace_layer_result`
+#: reports for a second-family anchor (ADR-007 §7).
+SOURCE_KIND_LABELS: dict[str, str] = {
+    "message": "Запись дневника (сообщение)",
+    "local_day": "Локальный календарный день",
+    "iso_week": "ISO-неделя",
+    "artifact": "Артефакт предыдущего слоя",
+}
+
+#: Captions of the message kinds a ``raw_id`` anchor can point at.
+SOURCE_MESSAGE_KIND_LABELS: dict[MessageKind, str] = {
+    MessageKind.text: "Текстовая запись",
+    MessageKind.audio: "Голосовое сообщение",
+}
+
+#: The resolver's own answer for a first-family artifact (layers 1–4): there is
+#: no second-family chain to show, the lineage runs through the weekly export.
+FIRST_FAMILY_NOTICE = (
+    "Артефакт принадлежит первой семье якорей: он привязан к недельной выгрузке, "
+    "а прямого якоря второй семьи у него нет. Цепочку «оригинал → нормализация → "
+    "саммари/wellbeing» показывает страница этой выгрузки."
+)
+
+#: Answer when a stored row carries no anchor of either family — nothing to
+#: resolve, and saying so is more honest than drawing an empty chain.
+UNRESOLVED_NOTICE = (
+    "Происхождение не разрешается: артефакт не привязан ни к недельной выгрузке, "
+    "ни к якорю второй семьи. Данные не изменены — показать цепочку нечего."
+)
+
+#: Answer when the artifact row itself is gone (a stale or hand-made link).
+ARTIFACT_MISSING_NOTICE = (
+    "Артефакт не найден: в хранилище нет строки с таким идентификатором. "
+    "Ссылка устарела; ничего не изменено."
+)
+
+
+def _provenance_url(artifact_id: uuid.UUID | str) -> str:
+    """Page URL of the provenance chain of one artifact (task T37)."""
+    return f"/artifacts/{artifact_id}/provenance"
+
+
+def _anchor_value_text(value: object) -> str:
+    """The anchor value of a result as it is shown (``YYYY-MM-DD`` for a day)."""
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
+def _artifact_identity_view(artifact: Artifact) -> dict[str, Any]:
+    """Family-independent identity of one artifact row.
+
+    Only what the row itself carries: layer, version, identifiers, the
+    server-generated relative path and whether a structured payload is stored.
+    The payload itself (``result_json``) is LLM output over diary text and is
+    never rendered (AGENTS.md §7) — the page states that it exists, nothing
+    more.
+    """
+    settings = get_settings()
+    path = artifact.path
+    return {
+        "id": str(artifact.id),
+        "layer": artifact.layer.value,
+        "layer_title": LAYER_TITLES.get(artifact.layer, artifact.layer.value),
+        "version_label": f"v{artifact.version}" if artifact.version is not None else None,
+        "created_display": _format_local(artifact.created_at),
+        "path": path,
+        "sha_prefix": artifact.sha256[:16] if artifact.sha256 else None,
+        "file_present": bool(path) and (settings.data_root / str(path)).is_file(),
+        "has_result": artifact.result_json is not None,
+    }
+
+
+def _trace_source_view(trace: LayerResultTrace) -> dict[str, Any]:
+    """The resolved source of a second-family result, as plain template fields.
+
+    Whatever the anchor points at, only identifiers, kinds and moments of the
+    source are shown — never the text of a message and never the payload of an
+    upstream artifact. A source row that cannot be resolved says so in words
+    instead of leaving the block empty (AGENTS.md §19); ``rows``/``link`` are
+    built here so the template stays a plain listing.
+    """
+    settings = get_settings()
+    value_text = _anchor_value_text(trace.anchor_value)
+    view: dict[str, Any] = {
+        "kind": trace.source_kind,
+        "kind_label": SOURCE_KIND_LABELS.get(trace.source_kind, trace.source_kind),
+        "anchor_field": trace.anchor_field,
+        "anchor_caption": f"{trace.anchor_field} = {value_text}",
+        "local_tz": trace.artifact.local_tz,
+        "tz_matches_app": trace.artifact.local_tz in (None, settings.timezone),
+        "app_timezone": settings.timezone,
+        "rows": [],
+        "link": None,
+        "missing_text": None,
+    }
+    if trace.source_kind == "message":
+        message = trace.source_message
+        if message is None:
+            view["missing_text"] = (
+                "Запись, на которую указывает якорь артефакта, в хранилище не найдена."
+            )
+            return view
+        # The message's own local day is derived exactly as the day page derives
+        # it, so the link opens the day the message belongs to. The anchor is
+        # *not* used for that: it names the message, not a day.
+        day = local_date_of(message.created_at, settings.tzinfo)
+        rows: list[dict[str, Any]] = [
+            {
+                "label": "Тип записи",
+                "value": SOURCE_MESSAGE_KIND_LABELS.get(message.kind, message.kind.value),
+            },
+            {"label": "ID записи", "value": str(message.id), "mono": True},
+            {"label": "Создана", "value": _format_local(message.created_at)},
+        ]
+        if message.deleted_at is not None:
+            rows.append(
+                {
+                    "label": "Состояние",
+                    "value": (
+                        "запись удалена "
+                        f"{_format_local(message.deleted_at)}, текст стёрт (ADR-011); "
+                        "строка сохранена, поэтому прослеживаемость не потеряна"
+                    ),
+                    "warn": True,
+                }
+            )
+        view["rows"] = rows
+        view["link"] = {
+            "url": f"/?date={day.isoformat()}",
+            "label": f"Открыть день {day.strftime('%d.%m.%Y')}",
+        }
+        return view
+    if trace.source_kind == "local_day":
+        day_iso = _anchor_value_text(trace.anchor_value)
+        view["rows"] = [{"label": "День", "value": day_iso}]
+        view["link"] = {"url": f"/?date={day_iso}", "label": f"Открыть день {day_iso}"}
+        return view
+    if trace.source_kind == "iso_week":
+        week_id = _anchor_value_text(trace.anchor_value)
+        view["rows"] = [{"label": "ISO-неделя", "value": week_id}]
+        try:
+            days = week_days(week_id)
+        except WeeklyInputError:
+            view["missing_text"] = (
+                "Идентификатор ISO-недели в якоре артефакта не распознан — "
+                "дни недели показать нельзя."
+            )
+            return view
+        view["rows"].append(
+            {
+                "label": "Дни недели",
+                "value": f"{days[0].strftime('%d.%m.%Y')} — {days[-1].strftime('%d.%m.%Y')}",
+            }
+        )
+        return view
+    source_artifact = trace.source_artifact
+    if source_artifact is None:
+        view["missing_text"] = (
+            "Артефакт-источник, на который указывает якорь, в хранилище не найден."
+        )
+        return view
+    version_label = (
+        f"v{source_artifact.version}" if source_artifact.version is not None else "не записана"
+    )
+    view["rows"] = [
+        {
+            "label": "Слой источника",
+            "value": LAYER_TITLES.get(source_artifact.layer, source_artifact.layer.value),
+        },
+        {"label": "Версия источника", "value": version_label},
+        {"label": "ID источника", "value": str(source_artifact.id), "mono": True},
+        {"label": "Создан", "value": _format_local(source_artifact.created_at)},
+    ]
+    view["link"] = {
+        "url": _provenance_url(source_artifact.id),
+        "label": "Показать происхождение этого источника",
+    }
+    return view
+
+
+def _trace_run_view(trace: LayerResultTrace) -> dict[str, Any]:
+    """The producing processing run of a result, or an explicit "not recorded".
+
+    The fields are exactly what ``processing_runs`` carries (ADR-004 provenance:
+    status, profile, model, prompt version, timestamps, safe error summary and
+    the run's own input). A ``NULL`` column is worded as «не записано» — the run
+    row is shown as it is, never completed with a guess. ``input_ref`` points at
+    the artifact or the export the run consumed, when it recorded one; the
+    second-family runs are created without ``input_export_id`` (ADR-008 §7).
+    """
+    run = trace.run
+    if run is None:
+        return {"present": False}
+    input_ref: dict[str, str] | None = None
+    if run.input_artifact_id is not None:
+        input_ref = {
+            "label": "Артефакт-вход прогона",
+            "id": str(run.input_artifact_id),
+            "url": _provenance_url(run.input_artifact_id),
+        }
+    elif run.input_export_id is not None:
+        input_ref = {
+            "label": "Выгрузка-вход прогона",
+            "id": str(run.input_export_id),
+            "url": f"/exports/{run.input_export_id}",
+        }
+    return {
+        "present": True,
+        "id": str(run.id),
+        "pipeline_label": PIPELINE_LABELS.get(run.pipeline_type, run.pipeline_type.value),
+        "pipeline_type": run.pipeline_type.value,
+        "status": run.status.value,
+        "status_label": RUN_STATUS_LABELS.get(run.status, run.status.value),
+        "profile_name": run.profile_name,
+        "model_name": run.model_name,
+        "prompt_version": run.prompt_version,
+        "error_summary": run.error_summary,
+        "created_display": _format_local(run.created_at),
+        "started_display": _format_local(run.started_at) if run.started_at is not None else None,
+        "finished_display": _format_local(run.finished_at) if run.finished_at is not None else None,
+        "input_ref": input_ref,
+    }
+
+
+def _first_family_export_view(session: Session, artifact: Artifact) -> dict[str, Any] | None:
+    """The weekly export a first-family artifact belongs to, or ``None``.
+
+    Read only to link to the page that owns the first family's lineage. A
+    missing export row (or a row without ``export_id``) returns ``None`` and the
+    caller says so instead of offering a link into nowhere (§19).
+    """
+    if artifact.export_id is None:
+        return None
+    record = WeeklyExportRepository(session).get(artifact.export_id)
+    if record is None:
+        return None
+    view = _export_view(record)
+    view["detail_url"] = f"/exports/{record.id}"
+    view["week_display"] = (
+        f"{view['monday'].strftime('%d.%m.%Y')} — {view['sunday'].strftime('%d.%m.%Y')}"
+    )
+    return view
+
+
+def _provenance_view(session: Session, artifact: Artifact) -> dict[str, Any]:
+    """Template fields of the provenance page of one artifact (task T37).
+
+    The chain «артефакт → источник → прогон обработки» is resolved by the T08
+    store (:func:`~diary.db.results.trace_layer_result`) and is never assembled
+    here, so the page cannot claim a lineage that no run wrote. Its own outcome
+    decides which of three honest answers is rendered:
+
+    * ``second`` — the resolver returned the anchor, the resolved source and the
+      producing run (a result without a recorded run is worded as such);
+    * ``first`` — the resolver raised :class:`UnsupportedLayerError`: layers 1–4
+      are anchored to a weekly export, so the page says that and links there;
+    * ``unresolved`` — any other :class:`LayerResultError` (a row carrying no
+      anchor of either family): the page says so instead of drawing an empty
+      chain.
+    """
+    view: dict[str, Any] = {
+        "artifact": _artifact_identity_view(artifact),
+        "family": "unresolved",
+        "notice": UNRESOLVED_NOTICE,
+        "source": None,
+        "run": None,
+        "export": None,
+    }
+    try:
+        trace = trace_layer_result(session, artifact.id)
+    except UnsupportedLayerError:
+        view["family"] = "first"
+        view["notice"] = FIRST_FAMILY_NOTICE
+        view["export"] = _first_family_export_view(session, artifact)
+        return view
+    except LayerResultError:
+        return view
+    view["family"] = "second"
+    view["notice"] = None
+    view["source"] = _trace_source_view(trace)
+    view["run"] = _trace_run_view(trace)
+    return view
+
+
+@pages_router.get("/artifacts/{artifact_id}/provenance", response_class=HTMLResponse)
+def artifact_provenance_page(
+    artifact_id: uuid.UUID,
+    request: Request,
+    session: Annotated[Session, Depends(get_session)],
+) -> HTMLResponse:
+    """Provenance of one artifact: артефакт → источник → прогон (task T37).
+
+    Opened from the day page's phase-2 block (a second-family result anchored to
+    that day or to its ISO week) and from the export detail page (a first-family
+    artifact of that export). The page renders identifiers, statuses and
+    timestamps only: neither the text of a source message nor the stored LLM
+    payload is shown, and nothing of the chain is logged (AGENTS.md §7–8).
+
+    An unknown artifact id answers ``404`` *inside the shell* with an honest
+    sentence — the everyday cause is a stale link, and the shell says more than a
+    bare error page would. Every other state of the chain (no run recorded, a
+    source row gone, no anchor at all) is a ``200`` with the words that describe
+    it, because those are states of a page that exists.
+    """
+    artifact = session.get(Artifact, artifact_id)
+    if artifact is None:
+        return templates.TemplateResponse(
+            request,
+            "artifact_provenance.html",
+            {
+                "artifact": None,
+                "family": None,
+                "notice": ARTIFACT_MISSING_NOTICE,
+                "source": None,
+                "run": None,
+                "export": None,
+                "nav_current": "exports",
+                "nav": _nav_context(session),
+            },
+            status_code=404,
+        )
+    return templates.TemplateResponse(
+        request,
+        "artifact_provenance.html",
+        {
+            **_provenance_view(session, artifact),
+            "nav_current": "exports",
+            "nav": _nav_context(session),
         },
     )
