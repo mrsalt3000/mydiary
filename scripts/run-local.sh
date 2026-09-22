@@ -21,14 +21,23 @@
 #   scripts/run-local.sh web [аргументы...]      # uvicorn на 127.0.0.1:8000
 #   scripts/run-local.sh worker [аргументы...]   # воркер очереди задач
 #   scripts/run-local.sh cli [аргументы...]      # python -m diary.cli (day/week/coach/backup)
+#   scripts/run-local.sh nli [аргументы...]      # python -m diary.cli nli (отчёт NLI по сохранённой сводке дня)
 #   scripts/run-local.sh --help
 #
 # Аргументы после режима ЗАМЕНЯЮТ аргументы по умолчанию (web: --host 127.0.0.1
-# --port 8000 --reload; worker: --poll-interval 2; cli: ничего — подкоманду
-# передавайте явно, например `cli day --date 2026-09-14`). Режим cli — это
+# --port 8000 --reload; worker: --poll-interval 2; cli и nli: ничего — подкоманду
+# и её флаги передавайте явно, например `cli day --date 2026-09-14`,
+# `nli --date 2026-09-14`). Режим cli — это
 # «один вход» в пайплайн фазы 2 с этой машины (T11): он готовит то же
 # окружение, что web/worker (.env в окружение, шим libcublas, HF_HUB_OFFLINE),
 # без которого профили LLM не найдут ключ, а STT на GPU — библиотеку.
+#
+# Режим nli (T27) — инструмент владельца данных: NLI-проверка **сохранённой**
+# дневной сводки против источника, отчёт без текста, база открывается только на
+# чтение. Это не гейт: ничего не пишется и ничего не блокируется. Сам NLI считает
+# на CPU (onnxruntime), GPU и шим libcublas ему не нужны, HF_HUB_OFFLINE ни на что
+# не влияет; окружение всё равно готовится то же, что у других режимов, — чтобы
+# результат не зависел от способа запуска.
 #
 # Переопределяемые переменные окружения:
 #   CT2_CUDA_SHIM_DIR  каталог с libcublas.so.12 (по умолчанию ~/.local/lib/ct2-cuda)
@@ -57,9 +66,9 @@ fi
 shift
 
 case "$mode" in
-    web | worker | cli) ;;
+    web | worker | cli | nli) ;;
     *)
-        printf 'run-local.sh: неизвестный режим %s (ожидается web, worker или cli)\n' "$mode" >&2
+        printf 'run-local.sh: неизвестный режим %s (ожидается web, worker, cli или nli)\n' "$mode" >&2
         exit 2
         ;;
 esac
@@ -115,5 +124,11 @@ case "$mode" in
         # аргументов нет, и argparse сам объяснит, что нужно.
         printf 'run-local.sh: cli | %s | HF_HUB_OFFLINE=%s\n' "$cuda_note" "$HF_HUB_OFFLINE" >&2
         exec "$VENV_PYTHON" -m diary.cli "$@"
+        ;;
+    nli)
+        # Отдельный режим ради подготовленного окружения и понятной подсказки в
+        # --help; подкоманда nli у diary.cli делает саму работу (T27).
+        printf 'run-local.sh: nli | %s | HF_HUB_OFFLINE=%s\n' "$cuda_note" "$HF_HUB_OFFLINE" >&2
+        exec "$VENV_PYTHON" -m diary.cli nli "$@"
         ;;
 esac

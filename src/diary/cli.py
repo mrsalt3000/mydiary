@@ -35,6 +35,18 @@ Commands
     and the worker deliberately has no ``coach_note`` job handler (task T07,
     decision 3), so the note is never produced behind the user's back.
 
+``python -m diary.cli nli [--date YYYY-MM-DD]``
+    Check a **stored** day summary against the day it was written from with the
+    NLI rules of T24a and print a report (coordinates, probabilities, counters —
+    never diary text). The newest stored day summary is audited unless ``--date``
+    names another one. This is an instrument for the owner of the data, **not a
+    gate**: nothing is stored, nothing is changed, and the exit code says only
+    whether the report could be produced. The rules, the scope (the day's
+    ``facts``) and the instrument are the runtime ones (T24b/``ADR-014``); the
+    weekly layer is not covered (T26/``ADR-015``). The database is opened
+    read-only, and a missing instrument or an empty store is a non-zero exit with
+    a clear message, never an empty report.
+
 Output is identifiers and counts only (run/artifact ids, layer names, profile
 and model names, token usage, skip reasons) — never diary text, prompts or model
 output. A database that is not migrated yet is an error: create it with
@@ -70,6 +82,7 @@ from diary.domain.backup import (
 )
 from diary.domain.pipelines import pipeline as phase2_pipeline
 from diary.domain.pipelines.base import PipelineError
+from diary.domain.pipelines.nli_audit import audit_stored_day, format_report, read_only_session
 from diary.domain.pipelines.nli_guard import default_nli_judge
 from diary.domain.pipelines.pipeline import (
     SKIP_PROFILE_OFF,
@@ -237,6 +250,20 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="the ISO week whose newest stored weekly summary is the note's input",
     )
     _add_models_config_option(coach_parser)
+
+    nli_parser = subparsers.add_parser(
+        "nli",
+        help=(
+            "check a stored day summary against its source with the NLI rules "
+            "(report only, not a gate; reads the database read-only)"
+        ),
+    )
+    nli_parser.add_argument(
+        "--date",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help=("audit the newest stored summary of this local day instead of the newest stored one"),
+    )
     return parser
 
 
@@ -432,6 +459,30 @@ def _run_coach(args: argparse.Namespace) -> int:
     return _EXIT_OK
 
 
+def _run_nli(args: argparse.Namespace) -> int:
+    """Print the NLI report of a stored day summary (read-only, never a gate).
+
+    The database is opened read-only by :func:`read_only_session`, the instrument is
+    the runtime one (T24b), and the day layer is the only scope (T26/``ADR-015``).
+    Nothing is stored and nothing is changed: the exit code says whether the report
+    could be produced, not whether the summary «passed». Both an empty store and an
+    unavailable instrument are clear, non-zero exits (DoD 3-4 of T27).
+    """
+    if args.date:
+        try:
+            local_date = date.fromisoformat(args.date)
+        except ValueError as exc:
+            print(f"error: --date must be an ISO date (YYYY-MM-DD): {exc}", file=sys.stderr)
+            return _EXIT_ERROR
+    else:
+        local_date = None
+    with read_only_session() as session:
+        report = audit_stored_day(session, local_date=local_date, judge=default_nli_judge())
+    for line in format_report(report):
+        print(line)
+    return _EXIT_OK
+
+
 def _run_backup(args: argparse.Namespace) -> int:
     settings = get_settings()
     if args.clean_temp:
@@ -470,6 +521,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_week(args)
         if args.command == "coach":
             return _run_coach(args)
+        if args.command == "nli":
+            return _run_nli(args)
     except BackupConfirmRequiredError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return _EXIT_ERROR
