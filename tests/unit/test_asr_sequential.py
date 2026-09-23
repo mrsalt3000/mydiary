@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from diary.core.models_config import FasterWhisperProfile
+from diary.core.models_config import FasterWhisperProfile, GigaamCtcLmProfile
 from diary.domain.transcription import asr
 from diary.domain.transcription import providers as transcription_providers
 
@@ -149,6 +149,34 @@ def test_llm_unload_is_called_exactly_once_and_whisper_released_once(
     asr.run(_audio_path(tmp_path), _profile(), unload_llm=_unload_llm(journal))
 
     assert journal.count(LLM_UNLOAD) == 1
+    assert provider.unload_calls == 1
+
+
+def test_the_gigaam_backend_runs_through_the_same_slot_and_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T44 DoD 3: the second backend does not change the slot or the order.
+
+    The GigaAM sidecar adapter is registered like any other provider, so this
+    test pins what the configuration switch must *not* touch: LLM unloaded →
+    STT → backend released, inside the one process-wide STT slot (ADR-010). The
+    adapter here is a fake, exactly as the Whisper tests fake theirs.
+    """
+    journal: list[str] = []
+    provider = FakeProvider(journal, text="текст от gigaam")
+    monkeypatch.setitem(
+        transcription_providers.PROVIDER_REGISTRY, "gigaam2_ctc_lm", lambda: provider
+    )
+    profile = GigaamCtcLmProfile(
+        provider="gigaam2_ctc_lm",
+        model_id="waveletdeboshir/gigaam-ctc-with-lm",
+        revision="07d97cf8a4f178b68679cafae0600c8487877301",
+    )
+
+    text = asr.run(_audio_path(tmp_path), profile, unload_llm=_unload_llm(journal))
+
+    assert text == "текст от gigaam"
+    assert journal == [LLM_UNLOAD, STT, WHISPER_UNLOAD]
     assert provider.unload_calls == 1
 
 

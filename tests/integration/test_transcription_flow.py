@@ -294,11 +294,13 @@ def test_unregistered_stt_backend_fails_before_stt_and_writes_no_row(
 ) -> None:
     """A configured backend with no adapter never reaches speech-to-text.
 
-    The GigaAM-v2 CTC+LM profile parses from T43 on, but its provider arrives in
-    T44. The service resolves the provider **before** ``asr.run``, so the
-    refusal is loud and cheap: no GPU slot, no decode, and — the observable half
-    of "no silent fallback" — no transcription row that would present the audio
-    as transcribed (a fallback to Whisper would have written one).
+    The GigaAM-v2 CTC+LM profile has an adapter from T44 on, so the scenario is
+    made by removing that adapter from the registry — which is exactly what a
+    third, unknown backend would look like. The service resolves the provider
+    **before** ``asr.run``, so the refusal is loud and cheap: no GPU slot, no
+    decode, and — the observable half of "no silent fallback" — no transcription
+    row that would present the audio as transcribed (a fallback to Whisper would
+    have written one).
     """
     audio_id, _ = _upload_audio(api_client)
     response = api_client.post(f"{AUDIO_URL}/{audio_id}/transcribe")
@@ -314,6 +316,7 @@ def test_unregistered_stt_backend_fails_before_stt_and_writes_no_row(
             revision="07d97cf8a4f178b68679cafae0600c8487877301",
         ),
     )
+    monkeypatch.delitem(transcription_providers.PROVIDER_REGISTRY, "gigaam2_ctc_lm")
     asr_calls: list[str] = []
 
     def _forbidden_asr(*args: object, **kwargs: object) -> str:
@@ -331,10 +334,123 @@ def test_unregistered_stt_backend_fails_before_stt_and_writes_no_row(
         assert job is not None
         # The job fails with a safe summary naming the missing provider — the
         # retry policy is the worker's business, the message is the user's.
+        # The boundary wraps the refusal in ``PermanentJobError`` (the class the
+        # worker stores), and the original message survives in the summary.
         assert job.status is JobStatus.failed
         assert job.error_summary is not None
-        assert job.error_summary.startswith("TranscriptionProviderError:")
+        assert job.error_summary.startswith("PermanentJobError:")
         assert "gigaam2_ctc_lm" in job.error_summary
+
+
+def test_unregistered_stt_backend_fails_on_the_first_attempt(
+    session_factory,
+    api_client,
+    monkeypatch,
+) -> None:
+    """T44 DoD 6: a refusal retrying cannot fix must not burn the attempt budget.
+
+    Before T44 the factory's refusal was a bare ``TranscriptionProviderError``
+    and reached the worker as *transient*: the job was retried ``max_attempts``
+    times for a configuration that cannot change between attempts. It now
+    carries ``retryable = False``, so one attempt is the whole story — and no
+    history row is written for a run that never happened.
+    """
+    audio_id, _ = _upload_audio(api_client)
+    response = api_client.post(f"{AUDIO_URL}/{audio_id}/transcribe")
+    assert response.status_code == 202
+    job_id = uuid.UUID(response.json()["id"])
+
+    monkeypatch.setattr(
+        transcription_service,
+        "_load_transcription_profile",
+        lambda: GigaamCtcLmProfile(
+            provider="gigaam2_ctc_lm",
+            model_id="waveletdeboshir/gigaam-ctc-with-lm",
+            revision="07d97cf8a4f178b68679cafae0600c8487877301",
+        ),
+    )
+    monkeypatch.delitem(transcription_providers.PROVIDER_REGISTRY, "gigaam2_ctc_lm")
+
+    assert process_due_jobs(session_factory, worker_id="test-worker") == 1
+
+    with session_factory() as session:
+        job = JobRepository(session).get(job_id)
+        assert job is not None
+        assert job.status is JobStatus.failed
+        assert job.attempts == 1
+        assert job.error_summary is not None
+        assert job.error_summary.startswith("PermanentJobError:")
+        assert "No transcription provider is registered" in job.error_summary
+
+    assert _run_rows(session_factory, audio_id) == []
+
+
+def test_gigaam_run_records_backend_model_and_decoding_knobs(
+    session_factory,
+    api_client,
+    monkeypatch,
+) -> None:
+    """T44 DoD 4: a GigaAM run's row names the backend, the model and the knobs.
+
+    The adapter is faked (no sidecar venv, no GPU), but everything the row is
+    built from is the real profile and the real service path: ``provider_name``
+    comes from the discriminator, ``model_name`` from the shared
+    ``transcription_model_name`` helper, ``language`` from the Russian-only
+    constant, and ``metadata_json`` from the provider-dependent snapshot. The
+    Whisper key set is pinned by its own unit test and is not touched here.
+    """
+    audio_id, _ = _upload_audio(api_client)
+    response = api_client.post(f"{AUDIO_URL}/{audio_id}/transcribe")
+    assert response.status_code == 202
+    job_id = uuid.UUID(response.json()["id"])
+
+    profile = GigaamCtcLmProfile(
+        provider="gigaam2_ctc_lm",
+        model_id="waveletdeboshir/gigaam-ctc-with-lm",
+        revision="07d97cf8a4f178b68679cafae0600c8487877301",
+        device="cuda",
+        beam_width=8,
+        alpha=0.5,
+        # beta stays None: "the checkpoint's own value", recorded as such.
+    )
+
+    class _FakeSidecar:
+        version = "sidecar-test"
+
+        def transcribe(self, audio_path, profile) -> str:  # type: ignore[no-untyped-def]
+            return "Синтетический текст GigaAM."
+
+        def unload(self) -> None:  # pragma: no cover - the service always calls it
+            return None
+
+    fake = _FakeSidecar()
+    monkeypatch.setattr(transcription_service, "_load_transcription_profile", lambda: profile)
+    monkeypatch.setitem(transcription_providers.PROVIDER_REGISTRY, "gigaam2_ctc_lm", lambda: fake)
+    monkeypatch.setattr(transcription_service, "_default_llm_unloader", lambda: None)
+
+    assert process_due_jobs(session_factory, worker_id="test-worker") == 1
+
+    with session_factory() as session:
+        job = JobRepository(session).get(job_id)
+        assert job is not None and job.status is JobStatus.succeeded and job.attempts == 1
+        rows = _run_rows(session_factory, audio_id)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.raw_text == "Синтетический текст GigaAM."
+        assert row.provider_name == "gigaam2_ctc_lm"
+        assert row.model_name == "waveletdeboshir/gigaam-ctc-with-lm"
+        assert row.language == "ru"
+        assert row.metadata_json is not None
+        assert row.metadata_json["provider_version"] == "sidecar-test"
+        # The decoding knobs and the pin are what a later reader needs to know
+        # how this row was produced; ``alpha: 0.5`` is the configured value and
+        # ``beta: null`` honestly says "the checkpoint's own".
+        assert row.metadata_json["device"] == "cuda"
+        assert row.metadata_json["beam_width"] == 8
+        assert row.metadata_json["alpha"] == 0.5
+        assert row.metadata_json["beta"] is None
+        assert row.metadata_json["revision"] == "07d97cf8a4f178b68679cafae0600c8487877301"
+        assert row.metadata_json["job_id"] == str(job_id)
 
 
 # ---------------------------------------------------------------------------

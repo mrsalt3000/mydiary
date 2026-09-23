@@ -63,7 +63,7 @@ from diary.domain.pipelines import service as pipeline_service
 from diary.domain.pipelines.base import PipelinePermanentError
 from diary.domain.pipelines.nli_guard import default_nli_judge
 from diary.domain.transcription import service as transcription_service
-from diary.domain.transcription.providers import ProviderUnavailableError
+from diary.domain.transcription.errors import TranscriptionProviderError
 
 logger = logging.getLogger("diary.workers.handlers")
 
@@ -125,20 +125,26 @@ def _transcribe_audio(session: Session, job: Job) -> None:
 
     - the payload has no valid ``audio_file_id`` (``TranscriptionPermanentError``);
     - the audio row/bytes are gone;
-    - the optional faster-whisper runtime is not installed
-      (``ProviderUnavailableError``);
-    - the models configuration is missing/broken (``ModelsConfigError``).
+    - the models configuration is missing/broken (``ModelsConfigError``);
+    - the provider refuses at the configuration level — an unregistered backend,
+      an unset/absent sidecar runtime, weights that are not on this machine
+      (T44). That mapping is **the error class' own policy**: the handler reads
+      ``TranscriptionProviderError.retryable`` instead of listing classes, so a
+      deterministic failure cannot silently become transient again (the T43
+      acceptance found the factory's refusal being retried).
 
-    Any other exception (provider runtime failure, decoder error) propagates
-    unchanged and follows the worker's transient retry policy; the domain
-    service writes the single terminal ``failed`` transcription row when the
-    last attempt fails.
+    A *retryable* provider failure (decoder/model runtime error, timeout)
+    propagates unchanged and follows the worker's transient retry policy; the
+    domain service writes the single terminal ``failed`` transcription row when
+    the last attempt fails.
     """
     try:
         transcription_service.run_transcription(session, job)
     except transcription_service.TranscriptionPermanentError as exc:
         raise PermanentJobError(str(exc)) from exc
-    except ProviderUnavailableError as exc:
+    except TranscriptionProviderError as exc:
+        if exc.retryable:
+            raise
         raise PermanentJobError(str(exc)) from exc
     except ModelsConfigError as exc:
         raise PermanentJobError(str(exc)) from exc

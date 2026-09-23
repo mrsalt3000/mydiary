@@ -26,6 +26,9 @@ _APP_ENV_VARS = (
     "APP_TEMP_DIR",
     "APP_BACKUPS_DIR",
     "APP_NLI_MODEL_DIR",
+    "APP_GIGAAM_PYTHON",
+    "APP_GIGAAM_WORKER_SCRIPT",
+    "APP_GIGAAM_WORKER_TIMEOUT_S",
 )
 
 
@@ -164,8 +167,62 @@ def test_a_directory_that_is_not_a_path_is_a_validation_error() -> None:
         _settings(data_root=123)
 
 
+def test_gigaam_sidecar_paths_default_to_unset_and_the_repo_script() -> None:
+    """T44: the interpreter is machine state (no default), the script is ours."""
+    settings = _settings()
+
+    assert settings.gigaam_python is None
+    assert settings.gigaam_worker_script == PROJECT_ROOT / "scripts" / "gigaam-stt-worker.py"
+    assert settings.gigaam_worker_timeout_s == 1800.0
+
+
+def test_gigaam_sidecar_paths_follow_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_GIGAAM_PYTHON", "/opt/gigaam/venv/bin/python")
+    monkeypatch.setenv("APP_GIGAAM_WORKER_SCRIPT", "/opt/gigaam/worker.py")
+    monkeypatch.setenv("APP_GIGAAM_WORKER_TIMEOUT_S", "120")
+
+    settings = AppSettings(_env_file=None)
+
+    assert settings.gigaam_python == Path("/opt/gigaam/venv/bin/python")
+    assert settings.gigaam_worker_script == Path("/opt/gigaam/worker.py")
+    assert settings.gigaam_worker_timeout_s == 120.0
+
+
+def test_gigaam_paths_are_not_rebased_by_the_data_root() -> None:
+    """They point outside the data root: the root must not touch them."""
+    settings = _settings(data_root="/srv/diary", gigaam_worker_script="/opt/gigaam/worker.py")
+
+    assert settings.gigaam_worker_script == Path("/opt/gigaam/worker.py")
+    assert settings.audio_dir == Path("/srv/diary/audio")
+
+
+def test_a_relative_gigaam_script_resolves_against_the_project_root() -> None:
+    settings = _settings(gigaam_worker_script="scripts/other-worker.py")
+
+    assert settings.gigaam_worker_script == PROJECT_ROOT / "scripts" / "other-worker.py"
+
+
+def test_an_explicit_gigaam_path_equal_to_the_default_is_kept() -> None:
+    """T38 through the T44 fields: no source silently replaces a set value."""
+    default_script = PROJECT_ROOT / "scripts" / "gigaam-stt-worker.py"
+    settings = _settings(
+        gigaam_python="/opt/gigaam/venv/bin/python", gigaam_worker_script=default_script
+    )
+
+    assert settings.gigaam_worker_script == default_script
+    assert settings.gigaam_python == Path("/opt/gigaam/venv/bin/python")
+
+
+def test_an_empty_gigaam_interpreter_means_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``APP_GIGAAM_PYTHON=`` is how a shell unsets it; it must not become '.'."""
+    monkeypatch.setenv("APP_GIGAAM_PYTHON", "   ")
+
+    assert AppSettings(_env_file=None).gigaam_python is None
+
+
 def test_get_settings_cache_and_reload(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_TIMEZONE", "Pacific/Auckland")
+
     reload_settings()
     try:
         first = get_settings()

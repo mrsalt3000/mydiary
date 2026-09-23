@@ -13,11 +13,20 @@ Design (``docs/architecture-brief.md`` §8.2–8.3, ``skills/local-stt``):
   never required to run the application; without the package the adapter raises
   :class:`ProviderUnavailableError` before any model is constructed or
   downloaded;
+- :class:`~diary.domain.transcription.gigaam.GigaamSidecarProvider` — the second
+  backend (T44), which drives an isolated sidecar process instead of a library in
+  this interpreter (``docs/stt-backends-analysis.md`` §10). It is imported here
+  only to register it: the adapter itself imports no application dependency
+  beyond settings and the profile schema;
 - :func:`create_provider` — a small registry-based factory over the profile.
   Tests replace this function (or the registry entry) with a fake provider, so
   no model or GPU is ever needed in CI. Since T43 the profile is a discriminated
   union: the factory dispatches on ``provider``, and an unregistered backend
-  (``gigaam2_ctc_lm`` before T44) raises instead of falling back to Whisper.
+  raises instead of falling back to Whisper.
+
+The error taxonomy (including which failures are retryable) lives in
+:mod:`diary.domain.transcription.errors`, and is re-exported here because this
+module has always been its public face.
 
 Privacy contract (AGENTS.md §7–8): raw audio and transcription text are never
 logged by this module. Every exception it raises carries only a static,
@@ -34,6 +43,13 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from diary.core.models_config import FasterWhisperProfile, TranscriptionProfile
+from diary.domain.transcription.errors import (
+    ProviderConfigurationError,
+    ProviderUnavailableError,
+    TranscriptionExecutionError,
+    TranscriptionProviderError,
+)
+from diary.domain.transcription.gigaam import GigaamSidecarProvider
 
 logger = logging.getLogger("diary.domain.transcription.providers")
 
@@ -42,30 +58,6 @@ _FASTER_WHISPER_DIST = "faster-whisper"
 
 #: Static installation hint shown in the provider-unavailable error.
 _INSTALL_HINT = "Install the optional dependency with 'pip install -e \".[stt]\"'."
-
-
-class TranscriptionProviderError(Exception):
-    """Base class for transcription-provider errors.
-
-    Messages are always static and never contain diary content or secrets.
-    """
-
-
-class ProviderUnavailableError(TranscriptionProviderError):
-    """The configured provider runtime (faster-whisper) is not installed.
-
-    Raised before any model is loaded or downloaded; the job fails permanently
-    at the worker boundary (retrying would never help without an explicit
-    install).
-    """
-
-
-class TranscriptionExecutionError(TranscriptionProviderError):
-    """The provider failed at runtime; the message is a sanitised summary.
-
-    Only the exception *class name* is echoed — never the original message,
-    which could carry audio/decoder internals.
-    """
 
 
 class TranscriptionProvider(Protocol):
@@ -230,6 +222,7 @@ class FasterWhisperProvider:
 #: :data:`~diary.core.models_config.TranscriptionProfile`.
 PROVIDER_REGISTRY: dict[str, type[TranscriptionProvider]] = {
     "faster_whisper": FasterWhisperProvider,
+    "gigaam2_ctc_lm": GigaamSidecarProvider,
 }
 
 
@@ -241,9 +234,12 @@ def create_provider(profile: TranscriptionProfile) -> TranscriptionProvider:
     model or touch a GPU.
 
     A provider that is not registered is a **loud error**, not a fallback: a
-    configuration naming a backend whose adapter does not exist yet (the
-    GigaAM-v2 CTC+LM contour is configured in T43 and implemented in T44) fails
-    here, before any model is loaded, instead of silently running Whisper.
+    configuration naming a backend with no adapter fails here, before any model
+    is loaded, instead of silently running Whisper (ADR-017 §4). The refusal is
+    a :class:`~diary.domain.transcription.errors.ProviderConfigurationError` —
+    deliberately a *non-retryable* error: the configuration cannot change
+    between two attempts of the same job, so retrying would only burn the
+    attempt budget (T43 acceptance, T44).
 
     Where that lands in the call order is the caller's business, and the two
     callers differ: :func:`~diary.domain.transcription.service.run_transcription`
@@ -255,7 +251,7 @@ def create_provider(profile: TranscriptionProfile) -> TranscriptionProvider:
     """
     provider_cls = PROVIDER_REGISTRY.get(profile.provider)
     if provider_cls is None:
-        raise TranscriptionProviderError(
+        raise ProviderConfigurationError(
             f"No transcription provider is registered for {profile.provider!r}."
         )
     return provider_cls()
@@ -263,7 +259,9 @@ def create_provider(profile: TranscriptionProfile) -> TranscriptionProvider:
 
 __all__ = [
     "FasterWhisperProvider",
+    "GigaamSidecarProvider",
     "PROVIDER_REGISTRY",
+    "ProviderConfigurationError",
     "ProviderUnavailableError",
     "TranscriptionExecutionError",
     "TranscriptionProvider",

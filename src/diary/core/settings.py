@@ -48,6 +48,12 @@ _SUBDIR_FIELDS: dict[str, str] = {
     "nli_model_dir": "models/nli",
 }
 
+#: Settings that hold machine paths outside the data root (they are not
+#: subdirectories of it) and therefore only get the "absolute path" treatment:
+#: a relative value resolves against the repository root, an absolute one is
+#: kept exactly as given (T38).
+_TOOL_PATH_FIELDS: tuple[str, ...] = ("gigaam_python", "gigaam_worker_script")
+
 
 def _absolute_path(value: Any) -> Path | None:
     """Return ``value`` resolved to an absolute path, or ``None`` when it is
@@ -165,6 +171,35 @@ class AppSettings(BaseSettings):
     #: conversion; the shipped default is the value measured and documented in
     #: ``docs/nli-validation-analysis.md``.
     nli_model_sha256: str = PINNED_NLI_MODEL_SHA256
+    #: Interpreter of the GigaAM sidecar's own virtualenv (T44), e.g.
+    #: ``~/.local/share/mydiary/gigaam/venv/bin/python``. It lives in settings
+    #: rather than in the model profile because it is a machine path, not a
+    #: decoding parameter; ``None`` (the default) means "not provisioned yet",
+    #: which the provider reports as a clear unavailability instead of guessing
+    #: an interpreter. Read from ``APP_GIGAAM_PYTHON``; an empty value is
+    #: treated as unset.
+    gigaam_python: Path | None = None
+    #: Worker script of the GigaAM sidecar (T44) — the process the application
+    #: starts for one transcription. Relative values resolve against the
+    #: repository root, like every other path here. Read from
+    #: ``APP_GIGAAM_WORKER_SCRIPT``.
+    gigaam_worker_script: Path = PROJECT_ROOT / "scripts" / "gigaam-stt-worker.py"
+    #: How long one sidecar invocation may take before it is killed and the
+    #: attempt fails as a transient error (T44). Generous by default. Basis —
+    #: measured 2026-09-23 on the 332 s recording at 20 s chunks
+    #: (``docs/stt-backends-analysis.md`` §6.5): model load **15.9–25.6 s**
+    #: (4 runs) plus inference **5.997–9.300 s** (5 runs). T44 starts one
+    #: sidecar process per file, so the load is paid on every invocation.
+    #: Read from ``APP_GIGAAM_WORKER_TIMEOUT_S``.
+    gigaam_worker_timeout_s: float = Field(default=1800.0, gt=0)
+
+    @field_validator("gigaam_python", mode="before")
+    @classmethod
+    def _empty_interpreter_is_unset(cls, value: Any) -> Any:
+        """An empty ``APP_GIGAAM_PYTHON`` means "not configured", not the cwd."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @field_validator("timezone")
     @classmethod
@@ -222,6 +257,10 @@ class AppSettings(BaseSettings):
         the root, and relative values (of the root and of any directory) resolve
         against the repository root. Values that are not paths are passed
         through untouched for the field to reject.
+
+        The tool paths (:data:`_TOOL_PATH_FIELDS`, T44) get the last two steps
+        only: made absolute against the repository root, never defaulted and
+        never rebased, because they point outside the data root.
         """
         if not isinstance(data, dict):
             return data
@@ -240,6 +279,19 @@ class AppSettings(BaseSettings):
             explicit = _absolute_path(values[field_name])
             if explicit is not None:
                 values[field_name] = explicit
+        for field_name in _TOOL_PATH_FIELDS:
+            # Tool paths are not subdirectories of the data root, so they are
+            # neither rebased nor defaulted here — only made absolute. A source
+            # that set one keeps its value (T38); an empty string for the
+            # optional interpreter is passed on and read as "unset".
+            if field_name not in values:
+                continue
+            raw = values[field_name]
+            if isinstance(raw, str) and not raw.strip():
+                continue
+            resolved = _absolute_path(raw)
+            if resolved is not None:
+                values[field_name] = resolved
         return values
 
     @property

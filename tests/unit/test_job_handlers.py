@@ -23,6 +23,11 @@ import pytest
 from diary.core.models_config import ModelsConfigError
 from diary.db.models import Job, JobType
 from diary.domain.pipelines import pipeline as phase2_pipeline
+from diary.domain.transcription import service as transcription_service
+from diary.domain.transcription.errors import (
+    ProviderConfigurationError,
+    TranscriptionExecutionError,
+)
 from diary.workers import handlers
 
 
@@ -189,6 +194,46 @@ def test_transcribe_handler_fails_permanently_without_valid_payload() -> None:
     assert handler is not None
     job = Job(job_type=JobType.transcribe_audio, payload_json=None)
     with pytest.raises(handlers.PermanentJobError, match="audio_file_id"):
+        handler(session=None, job=job)  # type: ignore[arg-type]
+
+
+def test_transcribe_handler_makes_a_provider_refusal_permanent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T44 DoD 6: the provider's own retry policy decides, not a class list.
+
+    A configuration-level refusal (no adapter, no sidecar runtime, no weights on
+    this machine) is ``retryable = False``, so the handler must turn it into a
+    permanent failure on the first attempt instead of burning the budget on a
+    condition that cannot change.
+    """
+
+    def _refuse(session: object, job: object) -> None:
+        raise ProviderConfigurationError("synthetic: no provider is registered for 'x'")
+
+    monkeypatch.setattr(transcription_service, "run_transcription", _refuse)
+    handler = handlers.get_handler(JobType.transcribe_audio)
+    assert handler is not None
+    job = Job(job_type=JobType.transcribe_audio, payload_json={"audio_file_id": "any"})
+
+    with pytest.raises(handlers.PermanentJobError, match="no provider is registered"):
+        handler(session=None, job=job)  # type: ignore[arg-type]
+
+
+def test_transcribe_handler_lets_a_retryable_provider_failure_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runtime failure is retryable: it must reach the worker's retry policy."""
+
+    def _fail(session: object, job: object) -> None:
+        raise TranscriptionExecutionError("synthetic: the decoder failed (RuntimeError)")
+
+    monkeypatch.setattr(transcription_service, "run_transcription", _fail)
+    handler = handlers.get_handler(JobType.transcribe_audio)
+    assert handler is not None
+    job = Job(job_type=JobType.transcribe_audio, payload_json={"audio_file_id": "any"})
+
+    with pytest.raises(TranscriptionExecutionError):
         handler(session=None, job=job)  # type: ignore[arg-type]
 
 

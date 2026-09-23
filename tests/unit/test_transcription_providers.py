@@ -4,10 +4,17 @@ No database and no model are used: faster-whisper is an optional dependency,
 and its import is stubbed out to prove that a missing package produces a
 clean :class:`ProviderUnavailableError` without attempting any download or
 model load, and that runtime failures are sanitised at the adapter boundary.
+
+The GigaAM sidecar adapter (T44) is driven through an injected **runner** and a
+fake **process**: no interpreter, no sidecar virtualenv and no GPU are involved,
+and the two tests that start a real child use ``sys.executable`` with a trivial
+script (no network, no model).
 """
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -15,7 +22,8 @@ from pathlib import Path
 import pytest
 
 from diary.core.models_config import FasterWhisperProfile, GigaamCtcLmProfile
-from diary.domain.transcription import providers
+from diary.core.settings import AppSettings
+from diary.domain.transcription import gigaam, providers
 
 
 def _profile() -> FasterWhisperProfile:
@@ -67,16 +75,27 @@ def test_create_provider_rejects_empty_registry(monkeypatch: pytest.MonkeyPatch)
         providers.create_provider(_profile())
 
 
-def test_unregistered_gigaam_backend_fails_loudly_without_falling_back() -> None:
-    """T43/ADR-017: an unimplemented backend is an error, never a Whisper run.
+def test_unregistered_backend_is_a_permanent_refusal() -> None:
+    """T43/ADR-017 + T44 DoD 6: an unknown tag is refused, never retried.
 
-    The GigaAM-v2 CTC+LM profile parses (T43) but has no adapter until T44, so
-    the factory must refuse — the alternative, silently transcribing with
-    Whisper, would both mislabel the provenance and ignore the configured
-    backend.
+    The profile union cannot express a third ``provider`` value, so the stand-in
+    carries only what the factory reads (``provider``). The refusal is a
+    :class:`ProviderConfigurationError` whose ``retryable`` flag is ``False`` —
+    the property the worker boundary reads, instead of a list of classes that a
+    new error could silently fall out of (the T43 acceptance found the factory's
+    refusal being retried although no retry can help).
     """
-    with pytest.raises(providers.TranscriptionProviderError, match="gigaam2_ctc_lm"):
-        providers.create_provider(_giga_profile())
+    unknown = types.SimpleNamespace(provider="whisper_cpp")
+    with pytest.raises(providers.ProviderConfigurationError, match="whisper_cpp") as excinfo:
+        providers.create_provider(unknown)  # type: ignore[arg-type]
+    assert excinfo.value.retryable is False
+
+
+def test_gigaam_backend_is_registered_behind_the_same_factory() -> None:
+    """T44: ``gigaam2_ctc_lm`` has an adapter, reached through the same registry."""
+    provider = providers.create_provider(_giga_profile())
+    assert isinstance(provider, providers.GigaamSidecarProvider)
+    assert providers.PROVIDER_REGISTRY["gigaam2_ctc_lm"] is providers.GigaamSidecarProvider
 
 
 def test_faster_whisper_provider_refuses_a_foreign_profile(
@@ -257,3 +276,333 @@ def test_unload_without_a_loaded_model_never_imports_faster_whisper(
     provider.unload()
 
     assert provider._model is None
+
+
+# ---------------------------------------------------------------------------
+# GigaAM sidecar adapter (T44)
+# ---------------------------------------------------------------------------
+# Everything here is hermetic: the runner is injected, the process is fake, and
+# the settings point at files this test creates. Nothing imports torch, spawns a
+# sidecar virtualenv or touches the network.
+
+_GIGAAM_REVISION = "07d97cf8a4f178b68679cafae0600c8487877301"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_gigaam_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the tests independent of a developer's own APP_GIGAAM_* variables."""
+    for name in ("APP_GIGAAM_PYTHON", "APP_GIGAAM_WORKER_SCRIPT", "APP_GIGAAM_WORKER_TIMEOUT_S"):
+        monkeypatch.delenv(name, raising=False)
+
+
+class _FakeProcess:
+    """The process surface the adapter uses (``SidecarProcess``)."""
+
+    def __init__(self, returncode: int | None = 0) -> None:
+        self.returncode = returncode
+        self.terminate_calls = 0
+        self.kill_calls = 0
+        self.wait_calls: list[float | None] = []
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self.kill_calls += 1
+        self.returncode = -9
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.wait_calls.append(timeout)
+        assert self.returncode is not None, "wait() on a process that never exited"
+        return self.returncode
+
+
+class _FakeRunner:
+    """A runner that returns a scripted outcome and records its arguments."""
+
+    def __init__(
+        self,
+        *,
+        stdout: str = "",
+        stderr: str = "",
+        returncode: int = 0,
+        process: _FakeProcess | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+        self.process = process if process is not None else _FakeProcess(returncode)
+        self.error = error
+        self.calls: list[tuple[list[str], dict[str, str], float]] = []
+
+    def run(self, argv, *, env, timeout_s):  # type: ignore[no-untyped-def]
+        self.calls.append((list(argv), dict(env), timeout_s))
+        if self.error is not None:
+            raise self.error
+        self.process.returncode = self.returncode
+        return gigaam.SidecarRun(process=self.process, stdout=self.stdout, stderr=self.stderr)
+
+
+def _result_json(text: str = "сырой текст", *, gap: float = 0.0, double: float = 0.0) -> str:
+    return json.dumps({"text": text, "coverage": {"gap_s": gap, "double_s": double}})
+
+
+def _gigaam_settings(tmp_path: Path, **overrides: object) -> AppSettings:
+    """Settings whose interpreter and worker script exist (so only the runner is faked)."""
+    interpreter = tmp_path / "sidecar-venv" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True, exist_ok=True)
+    interpreter.write_text("#!/bin/sh\nexit 0\n")
+    script = tmp_path / "gigaam-stt-worker.py"
+    script.write_text("#!/usr/bin/env python\n")
+    defaults: dict[str, object] = {
+        "gigaam_python": interpreter,
+        "gigaam_worker_script": script,
+    }
+    defaults.update(overrides)
+    return AppSettings(_env_file=None, **defaults)
+
+
+def _sidecar(settings: AppSettings, runner: _FakeRunner) -> gigaam.GigaamSidecarProvider:
+    return gigaam.GigaamSidecarProvider(settings=settings, runner=runner)
+
+
+def test_gigaam_transcribe_returns_the_text_and_passes_the_profile(
+    tmp_path: Path,
+) -> None:
+    """The happy path: one JSON result in, the recognised text out."""
+    runner = _FakeRunner(stdout=_result_json("сырой текст") + "\n")
+    settings = _gigaam_settings(tmp_path)
+    provider = _sidecar(settings, runner)
+
+    text = provider.transcribe(_audio_path(tmp_path), _giga_profile())
+
+    assert text == "сырой текст"
+    assert len(runner.calls) == 1
+    argv, env, timeout_s = runner.calls[0]
+    assert argv[0] == str(settings.gigaam_python)
+    assert argv[1] == str(settings.gigaam_worker_script)
+    assert argv[2] == str(_audio_path(tmp_path))
+    for flag, value in (
+        ("--model-id", "waveletdeboshir/gigaam-ctc-with-lm"),
+        ("--revision", _GIGAAM_REVISION),
+        ("--device", "cpu"),
+        ("--beam-width", "64"),
+        ("--max-chunk-s", "20.0"),
+        ("--chunk-overlap-s", "0.5"),
+    ):
+        assert argv[argv.index(flag) + 1] == value
+    # alpha/beta are absent when the profile does not set them: the worker then
+    # keeps the checkpoint's own values instead of receiving a substituted one.
+    assert "--alpha" not in argv
+    assert "--beta" not in argv
+    # The child can never start a download inside a transcription request.
+    assert env["HF_HUB_OFFLINE"] == "1"
+    assert timeout_s == settings.gigaam_worker_timeout_s
+
+
+def test_gigaam_alpha_and_beta_are_sent_only_when_the_profile_sets_them(
+    tmp_path: Path,
+) -> None:
+    runner = _FakeRunner(stdout=_result_json())
+    provider = _sidecar(_gigaam_settings(tmp_path), runner)
+    profile = GigaamCtcLmProfile(
+        provider="gigaam2_ctc_lm",
+        model_id="waveletdeboshir/gigaam-ctc-with-lm",
+        revision=_GIGAAM_REVISION,
+        alpha=0.4612549346468768,
+        beta=0.3271780420615455,
+    )
+
+    provider.transcribe(_audio_path(tmp_path), profile)
+
+    argv = runner.calls[0][0]
+    assert argv[argv.index("--alpha") + 1] == repr(0.4612549346468768)
+    assert argv[argv.index("--beta") + 1] == repr(0.3271780420615455)
+
+
+def test_gigaam_missing_interpreter_is_unavailable_before_any_process(tmp_path: Path) -> None:
+    """No interpreter configured: refuse without starting anything (DoD 1)."""
+    runner = _FakeRunner(stdout=_result_json())
+    settings = _gigaam_settings(tmp_path, gigaam_python=None)
+    provider = _sidecar(settings, runner)
+
+    with pytest.raises(providers.ProviderUnavailableError, match="APP_GIGAAM_PYTHON"):
+        provider.transcribe(_audio_path(tmp_path), _giga_profile())
+
+    assert runner.calls == []
+    assert providers.ProviderUnavailableError.retryable is False
+
+
+def test_gigaam_missing_worker_script_is_unavailable(tmp_path: Path) -> None:
+    runner = _FakeRunner(stdout=_result_json())
+    settings = _gigaam_settings(tmp_path, gigaam_worker_script=tmp_path / "absent-worker.py")
+    provider = _sidecar(settings, runner)
+
+    with pytest.raises(providers.ProviderUnavailableError, match="APP_GIGAAM_WORKER_SCRIPT"):
+        provider.transcribe(_audio_path(tmp_path), _giga_profile())
+
+    assert runner.calls == []
+
+
+def test_gigaam_unload_after_false_is_an_explicit_configuration_error(tmp_path: Path) -> None:
+    """The switch the sidecar cannot honour is refused, not silently ignored."""
+    runner = _FakeRunner(stdout=_result_json())
+    provider = _sidecar(_gigaam_settings(tmp_path), runner)
+    profile = GigaamCtcLmProfile(
+        provider="gigaam2_ctc_lm",
+        model_id="waveletdeboshir/gigaam-ctc-with-lm",
+        revision=_GIGAAM_REVISION,
+        unload_after=False,
+    )
+
+    with pytest.raises(providers.ProviderConfigurationError, match="unload_after") as excinfo:
+        provider.transcribe(_audio_path(tmp_path), profile)
+
+    assert runner.calls == []
+    assert excinfo.value.retryable is False
+
+
+def test_gigaam_trust_remote_code_false_is_refused(tmp_path: Path) -> None:
+    """The wrapper cannot run without executing its own code; say so, don't pretend."""
+    runner = _FakeRunner(stdout=_result_json())
+    provider = _sidecar(_gigaam_settings(tmp_path), runner)
+    profile = GigaamCtcLmProfile(
+        provider="gigaam2_ctc_lm",
+        model_id="waveletdeboshir/gigaam-ctc-with-lm",
+        revision=_GIGAAM_REVISION,
+        trust_remote_code=False,
+    )
+
+    with pytest.raises(providers.ProviderConfigurationError, match="trust_remote_code"):
+        provider.transcribe(_audio_path(tmp_path), profile)
+    assert runner.calls == []
+
+
+def test_gigaam_provider_refuses_a_foreign_profile(tmp_path: Path) -> None:
+    """The adapter serves its own provider only; the runner is never asked."""
+    runner = _FakeRunner(stdout=_result_json())
+    provider = _sidecar(_gigaam_settings(tmp_path), runner)
+
+    with pytest.raises(providers.TranscriptionProviderError, match="faster_whisper"):
+        provider.transcribe(_audio_path(tmp_path), _profile())
+
+    assert runner.calls == []
+
+
+def test_gigaam_runtime_failure_is_transient_and_sanitised(tmp_path: Path) -> None:
+    """A non-zero exit stays transient and echoes only the worker's class name."""
+    poisoned = "секретный текст дневника"
+    runner = _FakeRunner(returncode=1, stderr=f"{poisoned}\nRuntimeError\n")
+    provider = _sidecar(_gigaam_settings(tmp_path), runner)
+
+    with pytest.raises(providers.TranscriptionExecutionError) as excinfo:
+        provider.transcribe(_audio_path(tmp_path), _giga_profile())
+
+    assert "RuntimeError" in str(excinfo.value)
+    assert poisoned not in str(excinfo.value)
+    assert excinfo.value.retryable is True
+
+
+def test_gigaam_unavailable_exit_is_a_permanent_refusal(tmp_path: Path) -> None:
+    """Missing weights/packages: exit 3 is permanent, and named in the message."""
+    runner = _FakeRunner(returncode=3, stderr="LocalEntryNotFoundError\n")
+    provider = _sidecar(_gigaam_settings(tmp_path), runner)
+
+    with pytest.raises(providers.ProviderUnavailableError, match="LocalEntryNotFoundError"):
+        provider.transcribe(_audio_path(tmp_path), _giga_profile())
+
+
+def test_gigaam_malformed_stdout_is_a_transient_failure(tmp_path: Path) -> None:
+    runner = _FakeRunner(stdout="это не JSON\n")
+    provider = _sidecar(_gigaam_settings(tmp_path), runner)
+
+    with pytest.raises(providers.TranscriptionExecutionError) as excinfo:
+        provider.transcribe(_audio_path(tmp_path), _giga_profile())
+
+    assert "не JSON" not in str(excinfo.value)
+
+
+def test_gigaam_nonzero_coverage_is_refused(tmp_path: Path) -> None:
+    """A plan that does not cover the recording is a failed run, never a transcript."""
+    runner = _FakeRunner(stdout=_result_json(gap=1.0))
+    provider = _sidecar(_gigaam_settings(tmp_path), runner)
+
+    with pytest.raises(providers.TranscriptionExecutionError, match="does not cover"):
+        provider.transcribe(_audio_path(tmp_path), _giga_profile())
+
+
+def test_gigaam_timeout_is_transient(tmp_path: Path) -> None:
+    runner = _FakeRunner(error=gigaam.SidecarTimeoutError("synthetic timeout"))
+    provider = _sidecar(_gigaam_settings(tmp_path), runner)
+
+    with pytest.raises(gigaam.SidecarTimeoutError) as excinfo:
+        provider.transcribe(_audio_path(tmp_path), _giga_profile())
+
+    assert excinfo.value.retryable is True
+
+
+def test_unload_terminates_a_sidecar_that_outlived_its_result(tmp_path: Path) -> None:
+    """The lifecycle guarantee: a live sidecar is terminated, and only once."""
+    process = _FakeProcess(returncode=None)  # still running
+    provider = _sidecar(_gigaam_settings(tmp_path), _FakeRunner())
+    provider._process = process
+
+    provider.unload()
+
+    assert process.terminate_calls == 1
+    assert process.returncode is not None
+
+    provider.unload()  # idempotent: the handle was dropped, no second signal
+
+    assert process.terminate_calls == 1
+
+
+def test_unload_is_a_noop_for_a_finished_sidecar(tmp_path: Path) -> None:
+    """The normal path: the worker printed its JSON and exited on its own."""
+    runner = _FakeRunner(stdout=_result_json())
+    provider = _sidecar(_gigaam_settings(tmp_path), runner)
+
+    provider.transcribe(_audio_path(tmp_path), _giga_profile())
+    assert provider._process is runner.process
+
+    provider.unload()
+
+    assert runner.process.terminate_calls == 0
+    assert provider._process is None
+
+
+def test_unload_without_a_process_is_a_noop(tmp_path: Path) -> None:
+    provider = _sidecar(_gigaam_settings(tmp_path), _FakeRunner())
+
+    provider.unload()
+
+    assert provider._process is None
+
+
+def test_subprocess_runner_returns_the_child_output() -> None:
+    """The real runner, on a trivial child: no model, no GPU, no network."""
+    runner = gigaam.SubprocessRunner()
+
+    run = runner.run(
+        [sys.executable, "-c", "import sys; print('{}'); sys.stderr.write('note\\n')"],
+        env=dict(os.environ),
+        timeout_s=60.0,
+    )
+
+    assert run.process.returncode == 0
+    assert run.stdout.strip() == "{}"
+    assert "note" in run.stderr
+
+
+def test_subprocess_runner_kills_the_child_on_timeout() -> None:
+    """A hung child is killed and the attempt fails as a transient error."""
+    runner = gigaam.SubprocessRunner()
+
+    with pytest.raises(gigaam.SidecarTimeoutError, match="within"):
+        runner.run(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            env=dict(os.environ),
+            timeout_s=0.5,
+        )

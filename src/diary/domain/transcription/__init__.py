@@ -3,21 +3,25 @@
 Manual, worker-executed local speech-to-text: provider abstraction
 (:mod:`diary.domain.transcription.providers`), the request/execute use cases
 (:mod:`diary.domain.transcription.service`), the optional faster-whisper
-adapter and the sequential GPU access point of phase 2
-(:mod:`diary.domain.transcription.asr`, T03). Never runs STT inside an HTTP
-request and never stores or logs diary content outside the ``transcriptions``
-table (skills/local-stt).
+adapter, the GigaAM-v2 CTC+LM sidecar adapter (T44) and the sequential GPU
+access point of phase 2 (:mod:`diary.domain.transcription.asr`, T03). Never
+runs STT inside an HTTP request and never stores or logs diary content outside
+the ``transcriptions`` table (skills/local-stt).
 """
 
 from diary.domain.transcription import asr
 from diary.domain.transcription.asr import AsrError, LlmUnloadError
+from diary.domain.transcription.errors import (
+    ProviderConfigurationError,
+    ProviderUnavailableError,
+    TranscriptionExecutionError,
+    TranscriptionProviderError,
+)
+from diary.domain.transcription.gigaam import GigaamSidecarProvider
 from diary.domain.transcription.providers import (
     PROVIDER_REGISTRY,
     FasterWhisperProvider,
-    ProviderUnavailableError,
-    TranscriptionExecutionError,
     TranscriptionProvider,
-    TranscriptionProviderError,
     create_provider,
 )
 from diary.domain.transcription.service import (
@@ -33,9 +37,11 @@ from diary.domain.transcription.service import (
 __all__ = [
     "AsrError",
     "FasterWhisperProvider",
+    "GigaamSidecarProvider",
     "LlmUnloadError",
     "PROFILE_REF_TRANSCRIPTION",
     "PROVIDER_REGISTRY",
+    "ProviderConfigurationError",
     "ProviderUnavailableError",
     "TranscriptionExecutionError",
     "TranscriptionPermanentError",

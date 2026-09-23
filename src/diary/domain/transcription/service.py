@@ -46,10 +46,13 @@ Transcription lifecycle and idempotency (ADR-005, architecture brief §8)
 * ``succeeded``/``failed`` rows carry a profile snapshot (provider/model/
   language columns) plus ``metadata_json`` with the originating ``job_id``,
   so each result is traceable to its exact run.
-* A provider failure is transient: the worker retries it with backoff; the
-  ``failed`` row is written only when the last attempt fails
+* A *retryable* provider failure is transient: the worker retries it with
+  backoff; the ``failed`` row is written only when the last attempt fails
   (``job.attempts >= max_attempts``), so a retrying job never multiplies
-  failure rows.
+  failure rows. A *non*-retryable one (configuration-level refusal, runtime not
+  provisioned) fails the job on its first attempt and writes no result row at
+  all — the retry policy is a property of the error class (T44,
+  :mod:`diary.domain.transcription.errors`).
 * Re-execution safety (worker crash between the handler commit and
   ``mark_succeeded``; stale-``running`` reset): before doing any work the
   handler checks whether a *succeeded* row already records this job's
@@ -84,8 +87,8 @@ from diary.db.repositories import (
 from diary.domain.audio.service import AudioNotFoundError, resolve_audio_file
 from diary.domain.llm.unload import unload_local_llms
 from diary.domain.transcription import asr
+from diary.domain.transcription.errors import ProviderConfigurationError
 from diary.domain.transcription.providers import (
-    ProviderUnavailableError,
     TranscriptionProvider,
     create_provider,
 )
@@ -237,15 +240,16 @@ def run_transcription(
     (no STT is started; the handler/core records no result row and the retry
     policy applies), which is the loud direction of the veto.
 
-    A configured STT backend with no registered adapter (``gigaam2_ctc_lm``
-    until T44) makes :func:`~diary.domain.transcription.providers.create_provider`
-    raise :class:`~diary.domain.transcription.providers.TranscriptionProviderError`.
+    A configured STT backend with no registered adapter makes
+    :func:`~diary.domain.transcription.providers.create_provider` raise
+    :class:`~diary.domain.transcription.errors.ProviderConfigurationError`.
     This service resolves the provider itself, **before** calling
     :func:`~diary.domain.transcription.asr.run`, so for this path the refusal
     surfaces before the GPU slot is taken and before any result row is written.
     (``asr.run`` takes the slot itself when called directly and releases it in
     its ``finally``.) Either way it is the explicit failure ADR-017 requires
-    instead of a silent fallback to Whisper.
+    instead of a silent fallback to Whisper, and it is not retryable: the error
+    class carries ``retryable = False``, which the worker boundary reads (T44).
     """
     audio_file_id = _payload_audio_id(job)
     if _has_recorded_success(session, audio_file_id, job):
@@ -279,10 +283,11 @@ def run_transcription(
     resolved_unload = unload_llm if unload_llm is not None else _default_llm_unloader
     try:
         raw_text = asr.run(audio_path, profile, unload_llm=resolved_unload)
-    except ProviderUnavailableError:
-        # Environment problem (faster-whisper not installed): never retryable;
-        # the handler maps it to a permanent job failure. No result row is
-        # written — no provider run happened.
+    except ProviderConfigurationError:
+        # The configuration cannot work here (no adapter for the backend, the
+        # sidecar runtime/weights are absent, an unsupported profile switch):
+        # never retryable; the handler maps it to a permanent job failure. No
+        # result row is written — no provider run happened.
         raise
     except Exception:
         if _is_terminal_attempt(job) and not _has_recorded_failure(session, audio_file_id, job):
