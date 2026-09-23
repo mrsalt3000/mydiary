@@ -68,7 +68,12 @@ from collections.abc import Callable, Collection
 
 from sqlalchemy.orm import Session
 
-from diary.core.models_config import FasterWhisperProfile, load_models_config
+from diary.core.models_config import (
+    GigaamCtcLmProfile,
+    TranscriptionProfile,
+    load_models_config,
+    transcription_model_name,
+)
 from diary.core.settings import get_settings
 from diary.db.models import Job, JobType, Transcription, TranscriptionStatus
 from diary.db.repositories import (
@@ -102,11 +107,13 @@ class TranscriptionPermanentError(TranscriptionServiceError):
     """
 
 
-def _load_transcription_profile() -> FasterWhisperProfile:
+def _load_transcription_profile() -> TranscriptionProfile:
     """Return the current ``transcription`` profile from the models config.
 
-    Module-level hook so tests can substitute a profile without a config file
-    (no models YAML is needed in CI; monkeypatched in integration tests).
+    The profile is whichever STT backend the configuration names —
+    ``faster_whisper`` or ``gigaam2_ctc_lm`` (T43). Module-level hook so tests
+    can substitute a profile without a config file (no models YAML is needed in
+    CI; monkeypatched in integration tests).
     """
     return load_models_config().transcription
 
@@ -229,6 +236,16 @@ def run_transcription(
     A failed LLM unload raises :class:`~diary.domain.transcription.asr.LlmUnloadError`
     (no STT is started; the handler/core records no result row and the retry
     policy applies), which is the loud direction of the veto.
+
+    A configured STT backend with no registered adapter (``gigaam2_ctc_lm``
+    until T44) makes :func:`~diary.domain.transcription.providers.create_provider`
+    raise :class:`~diary.domain.transcription.providers.TranscriptionProviderError`.
+    This service resolves the provider itself, **before** calling
+    :func:`~diary.domain.transcription.asr.run`, so for this path the refusal
+    surfaces before the GPU slot is taken and before any result row is written.
+    (``asr.run`` takes the slot itself when called directly and releases it in
+    its ``finally``.) Either way it is the explicit failure ADR-017 requires
+    instead of a silent fallback to Whisper.
     """
     audio_file_id = _payload_audio_id(job)
     if _has_recorded_success(session, audio_file_id, job):
@@ -343,14 +360,47 @@ def _is_terminal_attempt(job: Job) -> bool:
     return job.attempts >= effective_max
 
 
-def _profile_metadata(profile: FasterWhisperProfile) -> dict[str, object]:
-    """Non-sensitive run snapshot for a transcription row."""
+def _profile_metadata(profile: TranscriptionProfile) -> dict[str, object]:
+    """Non-sensitive run snapshot for a transcription row.
+
+    Provider-dependent on purpose: the Whisper snapshot keeps exactly the keys
+    history already carries (``device``/``compute_type``/``beam_size``), so rows
+    written before T43 read as before, while the GigaAM-v2 CTC+LM backend
+    records its own decoding knobs (``beam_width``/``alpha``/``beta``) and the
+    pinned ``revision``. Nothing here can carry diary content.
+    """
+    if isinstance(profile, GigaamCtcLmProfile):
+        return {
+            "profile_ref": PROFILE_REF_TRANSCRIPTION,
+            "device": profile.device,
+            "beam_width": profile.beam_width,
+            "alpha": profile.alpha,
+            "beta": profile.beta,
+            "revision": profile.revision,
+        }
     return {
         "profile_ref": PROFILE_REF_TRANSCRIPTION,
         "device": profile.device,
         "compute_type": profile.compute_type,
         "beam_size": profile.beam_size,
     }
+
+
+#: Recognition language of the GigaAM-v2 CTC+LM backend. Russian only, so it is
+#: a property of the provider rather than a profile knob — the same reasoning
+#: that keeps ``sample_rate`` out of :class:`GigaamCtcLmProfile`.
+_GIGAAM_LANGUAGE = "ru"
+
+
+def _profile_language(profile: TranscriptionProfile) -> str:
+    """The language code recorded on a transcription row.
+
+    Whisper carries it in the profile; GigaAM is Russian-only, so its constant
+    is used (``transcriptions.language`` is NOT NULL).
+    """
+    if isinstance(profile, GigaamCtcLmProfile):
+        return _GIGAAM_LANGUAGE
+    return profile.language
 
 
 def _provider_version(provider: TranscriptionProvider) -> str | None:
@@ -365,7 +415,7 @@ def _record_success_row(
     session: Session,
     job: Job,
     provider: TranscriptionProvider,
-    profile: FasterWhisperProfile,
+    profile: TranscriptionProfile,
     audio_file_id: uuid.UUID,
     raw_text: str,
 ) -> None:
@@ -381,8 +431,8 @@ def _record_success_row(
         status=TranscriptionStatus.succeeded,
         profile_name=PROFILE_REF_TRANSCRIPTION,
         provider_name=profile.provider,
-        model_name=profile.model,
-        language=profile.language,
+        model_name=transcription_model_name(profile),
+        language=_profile_language(profile),
         metadata_json=metadata,
     )
 
@@ -390,7 +440,7 @@ def _record_success_row(
 def _record_failed_row(
     session: Session,
     job: Job,
-    profile: FasterWhisperProfile,
+    profile: TranscriptionProfile,
     audio_file_id: uuid.UUID,
 ) -> None:
     """Insert the single terminal ``failed`` row for this job (no error text).
@@ -409,8 +459,8 @@ def _record_failed_row(
         status=TranscriptionStatus.failed,
         profile_name=PROFILE_REF_TRANSCRIPTION,
         provider_name=profile.provider,
-        model_name=profile.model,
-        language=profile.language,
+        model_name=transcription_model_name(profile),
+        language=_profile_language(profile),
         metadata_json=metadata,
     )
 

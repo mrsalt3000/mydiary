@@ -31,7 +31,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from diary.api.routes.messages import get_session
-from diary.core.models_config import FasterWhisperProfile
+from diary.core.models_config import FasterWhisperProfile, GigaamCtcLmProfile
 from diary.core.settings import get_settings, reload_settings
 from diary.db.base import utc_now
 from diary.db.models import Job, JobStatus, JobType, TranscriptionStatus
@@ -280,6 +280,61 @@ def test_request_transcription_creates_job_and_reuses_active_one(
 def test_request_transcription_for_unknown_audio_raises(session) -> None:
     with pytest.raises(AudioNotFoundError):
         transcription_service.request_transcription(session, uuid.uuid4())
+
+
+# ---------------------------------------------------------------------------
+# unregistered STT backend (T43/ADR-017)
+# ---------------------------------------------------------------------------
+
+
+def test_unregistered_stt_backend_fails_before_stt_and_writes_no_row(
+    session_factory,
+    api_client,
+    monkeypatch,
+) -> None:
+    """A configured backend with no adapter never reaches speech-to-text.
+
+    The GigaAM-v2 CTC+LM profile parses from T43 on, but its provider arrives in
+    T44. The service resolves the provider **before** ``asr.run``, so the
+    refusal is loud and cheap: no GPU slot, no decode, and — the observable half
+    of "no silent fallback" — no transcription row that would present the audio
+    as transcribed (a fallback to Whisper would have written one).
+    """
+    audio_id, _ = _upload_audio(api_client)
+    response = api_client.post(f"{AUDIO_URL}/{audio_id}/transcribe")
+    assert response.status_code == 202
+    job_id = uuid.UUID(response.json()["id"])
+
+    monkeypatch.setattr(
+        transcription_service,
+        "_load_transcription_profile",
+        lambda: GigaamCtcLmProfile(
+            provider="gigaam2_ctc_lm",
+            model_id="waveletdeboshir/gigaam-ctc-with-lm",
+            revision="07d97cf8a4f178b68679cafae0600c8487877301",
+        ),
+    )
+    asr_calls: list[str] = []
+
+    def _forbidden_asr(*args: object, **kwargs: object) -> str:
+        asr_calls.append("asr.run")
+        raise AssertionError("asr.run must not be reached for an unregistered backend")
+
+    monkeypatch.setattr(transcription_service.asr, "run", _forbidden_asr)
+
+    _exhaust_job(session_factory, job_id)
+
+    assert asr_calls == []
+    assert _run_rows(session_factory, audio_id) == []
+    with session_factory() as session:
+        job = JobRepository(session).get(job_id)
+        assert job is not None
+        # The job fails with a safe summary naming the missing provider — the
+        # retry policy is the worker's business, the message is the user's.
+        assert job.status is JobStatus.failed
+        assert job.error_summary is not None
+        assert job.error_summary.startswith("TranscriptionProviderError:")
+        assert "gigaam2_ctc_lm" in job.error_summary
 
 
 # ---------------------------------------------------------------------------

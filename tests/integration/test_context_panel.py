@@ -480,6 +480,38 @@ def test_day_block_chip_names_the_configured_stt_profile(
     assert "llama3.2" not in panel
 
 
+def test_day_block_chip_names_the_gigaam_stt_profile(
+    api_client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T43: the STT chip follows the configured backend, not one hard-coded name.
+
+    The GigaAM-v2 CTC+LM profile has no ``model`` field (its identifier is
+    ``model_id``), so reading ``profile.model`` here would raise for the first
+    GigaAM-configured file.
+    """
+    config = parse_models_config(
+        {
+            "profiles": {
+                "transcription": {
+                    "provider": "gigaam2_ctc_lm",
+                    "model_id": "waveletdeboshir/gigaam-ctc-with-lm",
+                    "revision": "07d97cf8a4f178b68679cafae0600c8487877301",
+                },
+                "normalization": _openai_profile(),
+                "summarization": _openai_profile(),
+                "wellbeing_analysis": _openai_profile(),
+            }
+        }
+    )
+    monkeypatch.setattr(pages_module, "_load_models_config", lambda: config)
+    _, audio = _create_voice(session, _at(10))
+    _transcribe_succeeded(session, audio)
+    session.commit()
+
+    panel = _panel(api_client.get(f"/?date={DAY.isoformat()}").text)
+    assert "gigaam2-ctc-lm · waveletdeboshir/gigaam-ctc-with-lm" in _step(panel, "Транскрипция")
+
+
 def test_day_block_omits_the_chip_when_the_configuration_is_unavailable(
     api_client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:

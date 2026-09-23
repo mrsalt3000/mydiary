@@ -15,7 +15,9 @@ Design (``docs/architecture-brief.md`` §8.2–8.3, ``skills/local-stt``):
   downloaded;
 - :func:`create_provider` — a small registry-based factory over the profile.
   Tests replace this function (or the registry entry) with a fake provider, so
-  no model or GPU is ever needed in CI.
+  no model or GPU is ever needed in CI. Since T43 the profile is a discriminated
+  union: the factory dispatches on ``provider``, and an unregistered backend
+  (``gigaam2_ctc_lm`` before T44) raises instead of falling back to Whisper.
 
 Privacy contract (AGENTS.md §7–8): raw audio and transcription text are never
 logged by this module. Every exception it raises carries only a static,
@@ -31,7 +33,7 @@ from importlib.metadata import version as _distribution_version
 from pathlib import Path
 from typing import Any, Protocol
 
-from diary.core.models_config import FasterWhisperProfile
+from diary.core.models_config import FasterWhisperProfile, TranscriptionProfile
 
 logger = logging.getLogger("diary.domain.transcription.providers")
 
@@ -70,7 +72,7 @@ class TranscriptionProvider(Protocol):
     """Transcribes one local audio file into raw text (never diary-adjacent
     side effects; the caller persists the result)."""
 
-    def transcribe(self, audio_path: Path, profile: FasterWhisperProfile) -> str: ...
+    def transcribe(self, audio_path: Path, profile: TranscriptionProfile) -> str: ...
 
     def unload(self) -> None:
         """Release every model/resource the provider holds (idempotent).
@@ -130,7 +132,7 @@ class FasterWhisperProvider:
         #: Cache key ``(model, device, compute_type)`` of :attr:`_model`.
         self._model_key: tuple[str, str, str] | None = None
 
-    def transcribe(self, audio_path: Path, profile: FasterWhisperProfile) -> str:
+    def transcribe(self, audio_path: Path, profile: TranscriptionProfile) -> str:
         """Transcribe ``audio_path`` and return the raw text.
 
         The model is loaded on first use and kept until :meth:`unload` (or a
@@ -138,11 +140,22 @@ class FasterWhisperProvider:
         operation instead of a no-op. The returned text and the error surface
         are unchanged from the pre-T03 adapter.
 
+        The parameter is the whole transcription union (a registry adapter must
+        accept what the factory may hand it); this adapter serves the
+        ``faster_whisper`` provider only and refuses any other profile loudly —
+        the factory never routes another backend here, so that branch is a
+        programming-error guard, not a fallback.
+
         Raises :class:`ProviderUnavailableError` when faster-whisper is not
         installed (nothing is downloaded or loaded in that case) and
         :class:`TranscriptionExecutionError` for any runtime failure (message
         is static and carries only the exception class name).
         """
+        if not isinstance(profile, FasterWhisperProfile):
+            raise TranscriptionProviderError(
+                "FasterWhisperProvider serves the 'faster_whisper' provider only; "
+                f"got {profile.provider!r}."
+            )
         model = self._model_for(profile)
         try:
             segments, _info = model.transcribe(
@@ -213,18 +226,32 @@ class FasterWhisperProvider:
         return model
 
 
-#: Concrete provider classes, keyed by ``FasterWhisperProfile.provider``.
+#: Concrete provider classes, keyed by the ``provider`` discriminator of a
+#: :data:`~diary.core.models_config.TranscriptionProfile`.
 PROVIDER_REGISTRY: dict[str, type[TranscriptionProvider]] = {
     "faster_whisper": FasterWhisperProvider,
 }
 
 
-def create_provider(profile: FasterWhisperProfile) -> TranscriptionProvider:
+def create_provider(profile: TranscriptionProfile) -> TranscriptionProvider:
     """Return a provider instance for ``profile`` (registry-based factory).
 
     The registry is a module-level hook: tests monkeypatch it (or this
     function) with a fake provider, so transcription tests never download a
     model or touch a GPU.
+
+    A provider that is not registered is a **loud error**, not a fallback: a
+    configuration naming a backend whose adapter does not exist yet (the
+    GigaAM-v2 CTC+LM contour is configured in T43 and implemented in T44) fails
+    here, before any model is loaded, instead of silently running Whisper.
+
+    Where that lands in the call order is the caller's business, and the two
+    callers differ: :func:`~diary.domain.transcription.service.run_transcription`
+    resolves the provider **before** it enters
+    :func:`~diary.domain.transcription.asr.run`, so its refusal is visible before
+    the GPU slot; ``asr.run`` itself calls the factory **inside** the slot and
+    releases the slot in its ``finally``, so a direct call takes and frees the
+    slot before failing.
     """
     provider_cls = PROVIDER_REGISTRY.get(profile.provider)
     if provider_cls is None:

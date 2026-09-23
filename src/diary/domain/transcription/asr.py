@@ -22,6 +22,12 @@ releases Whisper, and a failed unload still releases everything that was
 acquired. The order is what the task's DoD asks for: ``run`` returns only after
 Whisper is unloaded, so the caller's next LLM call can never overlap it.
 
+The invariant is about *any* local STT model, not one product: since T43 the
+configured backend may be ``faster_whisper`` or ``gigaam2_ctc_lm``
+(:data:`~diary.core.models_config.TranscriptionProfile`). Both enter here, and
+the order above is unchanged — "Whisper" below stands for whichever backend the
+configuration names.
+
 Failure policy (deliberate): if ``unload_llm`` raises, STT is **not** started
 and :class:`LlmUnloadError` propagates. Proceeding "without the unload" would
 mean transcribing while the LLM is still on the GPU — exactly the veto case —
@@ -66,7 +72,10 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from diary.core.models_config import FasterWhisperProfile
+from diary.core.models_config import (
+    TranscriptionProfile,
+    transcription_model_name,
+)
 from diary.domain.transcription.providers import create_provider
 
 logger = logging.getLogger("diary.domain.transcription.asr")
@@ -90,7 +99,7 @@ class LlmUnloadError(AsrError):
 
 def run(
     audio_path: Path,
-    profile: FasterWhisperProfile,
+    profile: TranscriptionProfile,
     *,
     unload_llm: Callable[[], None],
 ) -> str:
@@ -103,6 +112,18 @@ def run(
     (:func:`~diary.domain.transcription.providers.create_provider`), so tests
     substitute a fake provider and never need faster-whisper, a model or a GPU.
 
+    ``profile`` is any :data:`~diary.core.models_config.TranscriptionProfile`:
+    since T43 the configuration can name either the ``faster_whisper`` backend
+    or the ``gigaam2_ctc_lm`` one, and both go through this same sequential
+    access point. The provider factory is called **inside** this function's GPU
+    slot, so a backend with no registered adapter fails right there: the slot is
+    taken and released again in the ``finally`` (step 5) without any STT work.
+    A caller that needs the refusal to be visible *before* the slot — the
+    transcription service does — calls
+    :func:`~diary.domain.transcription.providers.create_provider` itself first
+    (:func:`~diary.domain.transcription.service.run_transcription`). Either way
+    the failure is loud, never a fallback to Whisper.
+
     Returns the raw recognised text (the caller persists it — this function has
     no database side effects). Raises :class:`LlmUnloadError` when the injected
     unload fails (no STT started) and lets provider errors
@@ -112,12 +133,13 @@ def run(
     propagates: the caller must then treat the turn as *not* finished rather
     than move on to the LLM, because Whisper may still be resident.
     """
+    model_name = transcription_model_name(profile)
     wait_started = time.monotonic()
-    logger.info("asr stage=slot-wait model=%s device=%s", profile.model, profile.device)
+    logger.info("asr stage=slot-wait model=%s device=%s", model_name, profile.device)
     with _GPU_SLOT:
         logger.info(
             "asr stage=slot-acquired model=%s wait_ms=%d",
-            profile.model,
+            model_name,
             _elapsed_ms(wait_started),
         )
         provider = create_provider(profile)
@@ -134,7 +156,7 @@ def run(
                 ) from exc
             logger.info("asr stage=llm-unload-done duration_ms=%d", _elapsed_ms(unload_started))
             stt_started = time.monotonic()
-            logger.info("asr stage=stt-start model=%s device=%s", profile.model, profile.device)
+            logger.info("asr stage=stt-start model=%s device=%s", model_name, profile.device)
             text = provider.transcribe(audio_path, profile)
             logger.info("asr stage=stt-done duration_ms=%d", _elapsed_ms(stt_started))
         finally:

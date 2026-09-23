@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from diary.core.models_config import FasterWhisperProfile
+from diary.core.models_config import FasterWhisperProfile, GigaamCtcLmProfile
 from diary.domain.transcription import providers
 
 
@@ -26,6 +26,14 @@ def _profile() -> FasterWhisperProfile:
         device="cpu",
         compute_type="int8",
         beam_size=1,
+    )
+
+
+def _giga_profile() -> GigaamCtcLmProfile:
+    return GigaamCtcLmProfile(
+        provider="gigaam2_ctc_lm",
+        model_id="waveletdeboshir/gigaam-ctc-with-lm",
+        revision="07d97cf8a4f178b68679cafae0600c8487877301",
     )
 
 
@@ -57,6 +65,28 @@ def test_create_provider_rejects_empty_registry(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(providers, "PROVIDER_REGISTRY", {})
     with pytest.raises(providers.TranscriptionProviderError, match="registered"):
         providers.create_provider(_profile())
+
+
+def test_unregistered_gigaam_backend_fails_loudly_without_falling_back() -> None:
+    """T43/ADR-017: an unimplemented backend is an error, never a Whisper run.
+
+    The GigaAM-v2 CTC+LM profile parses (T43) but has no adapter until T44, so
+    the factory must refuse — the alternative, silently transcribing with
+    Whisper, would both mislabel the provenance and ignore the configured
+    backend.
+    """
+    with pytest.raises(providers.TranscriptionProviderError, match="gigaam2_ctc_lm"):
+        providers.create_provider(_giga_profile())
+
+
+def test_faster_whisper_provider_refuses_a_foreign_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The adapter serves its own provider only; no package is even imported."""
+    monkeypatch.setitem(sys.modules, "faster_whisper", None)  # any import would fail
+    provider = providers.FasterWhisperProvider()
+    with pytest.raises(providers.TranscriptionProviderError, match="gigaam2_ctc_lm"):
+        provider.transcribe(_audio_path(tmp_path), _giga_profile())
 
 
 def test_missing_faster_whisper_raises_unavailable_without_model_load(

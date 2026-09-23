@@ -49,3 +49,4 @@
 | [ADR-014](ADR-014-runtime-nli-gate-for-the-day-layer.md) | Слой дня отказывается писать сводку, противоречащую источнику (NLI-гейт в рантайме; T24b) | Accepted | 2026-09-21 |
 | [ADR-015](ADR-015-weekly-rollup-stays-out-of-the-contradiction-rule.md) | Недельный rollup остаётся вне правила противоречия: недельная формулировка измерена и отвергнута по числам (T26) | Proposed | 2026-09-21 |
 | [ADR-016](ADR-016-day-layer-context-budget.md) | Дневной слой считает бюджет окна и делит день по записям, а не отвергает его (T23; промпт сведения `sum_daily/v2.md`) | Proposed | 2026-09-21 |
+| [ADR-017](ADR-017-second-stt-backend-behind-the-provider-factory.md) | Второй STT-бэкенд (GigaAM-v2 CTC+LM) выбирается конфигом за существующей фабрикой провайдеров; без автофолбэка (T43–T46) | Accepted | 2026-09-23 |

@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from diary.core.models_config import (
     FasterWhisperProfile,
+    GigaamCtcLmProfile,
     ModelProfile,
     ModelsConfig,
     ModelsConfigError,
@@ -64,6 +65,19 @@ def _host_only_url(base_url: str) -> str | None:
 
 def status_for(task: TaskType, profile: ModelProfile) -> ProfileStatus:
     """Build a diagnostics view for a single task profile."""
+    if isinstance(profile, GigaamCtcLmProfile):
+        # Local GigaAM-v2 CTC+LM backend: no API key, and nothing to resolve at
+        # status time. The weights/revision are pinned in the profile and the
+        # runtime is provisioned separately (T45); whether that runtime is
+        # installed is a runtime failure of T44, not a configuration state, so
+        # the profile itself is valid (same reasoning as local Whisper).
+        return ProfileStatus(
+            task=task,
+            provider=ProviderType.gigaam2_ctc_lm,
+            model=profile.model_id,
+            api_key_configured=True,
+            valid=True,
+        )
     if isinstance(profile, FasterWhisperProfile):
         # Local STT requires no API key, so it is trivially configured.
         return ProfileStatus(
@@ -94,12 +108,13 @@ def validate_all(config: ModelsConfig) -> None:
 
     Currently the only runtime readiness check is secret presence: every
     ``openai_compatible`` profile must reference an environment variable
-    that is set and non-empty. Local ``faster_whisper`` STT needs no secret.
-    The error names only the task and the environment-variable name.
+    that is set and non-empty. The local STT backends — ``faster_whisper`` and
+    ``gigaam2_ctc_lm`` — need no secret. The error names only the task and the
+    environment-variable name.
     """
     problems: list[str] = []
     for task, profile in config.profiles_by_task():
-        if isinstance(profile, FasterWhisperProfile):
+        if isinstance(profile, (FasterWhisperProfile, GigaamCtcLmProfile)):
             continue
         if not _env_is_configured(profile.api_key_env):
             problems.append(

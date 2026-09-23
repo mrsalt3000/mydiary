@@ -18,15 +18,19 @@ import yaml
 from diary.core.models_config import (
     MODELS_CONFIG_ENV_VAR,
     FasterWhisperProfile,
+    GigaamCtcLmProfile,
     ModelsConfig,
     ModelsConfigError,
     OpenAICompatibleProfile,
+    ProviderType,
     TaskType,
     load_models_config,
     parse_models_config,
+    transcription_model_name,
 )
 from diary.core.profile_status import (
     profile_statuses,
+    status_for,
     validate_all,
 )
 from diary.core.settings import PROJECT_ROOT
@@ -265,7 +269,10 @@ def test_unknown_task_profile_name_rejected(tmp_path: Path) -> None:
 def test_unknown_inner_field_rejected(tmp_path: Path) -> None:
     with pytest.raises(ModelsConfigError) as exc:
         _config_from_text(tmp_path, _yaml_for(tweaks={"transcription": {"modle": "tiny"}}))
-    assert "transcription.modle" in str(exc.value)
+    # Since T43 the transcription profile is a discriminated union, so the
+    # location names the resolved backend variant as well (still the offending
+    # field, one level deeper).
+    assert "transcription.faster_whisper.modle" in str(exc.value)
 
 
 def test_provider_type_enforced_per_task(tmp_path: Path) -> None:
@@ -280,20 +287,27 @@ def test_provider_type_enforced_per_task(tmp_path: Path) -> None:
             tmp_path,
             _yaml_for(tweaks={"transcription": {"provider": "openai_compatible"}}),
         )
-    assert "transcription.provider" in str(exc.value)
+    # The transcription profile accepts only the STT tags (T43): an LLM provider
+    # is an unknown discriminator, and the message lists what *is* accepted.
+    transcription_message = str(exc.value)
+    assert "transcription" in transcription_message
+    assert "openai_compatible" in transcription_message
+    assert "faster_whisper" in transcription_message
+    assert "gigaam2_ctc_lm" in transcription_message
 
 
 def test_invalid_values_rejected(tmp_path: Path) -> None:
     with pytest.raises(ModelsConfigError) as exc:
         _config_from_text(tmp_path, _yaml_for(tweaks={"transcription": {"device": "tpu"}}))
-    assert "transcription.device" in str(exc.value)
+    # Tag-qualified location since T43 (transcription is a discriminated union).
+    assert "transcription.faster_whisper.device" in str(exc.value)
 
     with pytest.raises(ModelsConfigError) as exc:
         _config_from_text(
             tmp_path,
             _yaml_for(tweaks={"transcription": {"compute_type": "float64"}}),
         )
-    assert "transcription.compute_type" in str(exc.value)
+    assert "transcription.faster_whisper.compute_type" in str(exc.value)
 
     with pytest.raises(ModelsConfigError) as exc:
         _config_from_text(
@@ -779,3 +793,392 @@ def test_reasoning_effort_reaches_the_payload(
     assert "reasoning_effort" not in payload_for(
         profile.model_copy(update={"reasoning_effort": None})
     )
+
+
+# ---------------------------------------------------------------------------
+# Second STT backend behind the ``provider`` discriminator (T43, ADR-017)
+# ---------------------------------------------------------------------------
+
+#: The revision the T42 spike measured the GigaAM-v2 CTC+LM wrapper at
+#: (``docs/stt-backends-analysis.md`` §11). The example config must pin exactly
+#: it: the wrapper runs locally through ``trust_remote_code``.
+GIGAAM_PINNED_REVISION = "07d97cf8a4f178b68679cafae0600c8487877301"
+GIGAAM_MODEL_ID = "waveletdeboshir/gigaam-ctc-with-lm"
+
+GIGAAM_FIELDS: dict[str, object] = {
+    "provider": "gigaam2_ctc_lm",
+    "model_id": GIGAAM_MODEL_ID,
+    "revision": GIGAAM_PINNED_REVISION,
+}
+
+
+def _giga_profiles(overrides: dict[str, object] | None = None) -> dict[str, dict[str, object]]:
+    """The default profiles with ``transcription`` switched to GigaAM."""
+    profiles = _profiles_dict()
+    profiles["transcription"] = dict(GIGAAM_FIELDS, **(overrides or {}))
+    return profiles
+
+
+def test_gigaam_transcription_profile_loads_with_defaults(tmp_path: Path) -> None:
+    """(а) DoD 1: the second profile shape loads and its defaults are the decided ones."""
+    config = _config_from_profiles(tmp_path, _giga_profiles())
+    profile = config.transcription
+    assert isinstance(profile, GigaamCtcLmProfile)
+    assert profile.provider == "gigaam2_ctc_lm"
+    assert profile.model_id == GIGAAM_MODEL_ID
+    assert profile.revision == GIGAAM_PINNED_REVISION
+    assert profile.trust_remote_code is True
+    assert profile.device == "cpu"
+    assert profile.beam_width == 64
+    # None means "use the checkpoint's own alpha/beta", not a silent 0.0.
+    assert profile.alpha is None
+    assert profile.beta is None
+    assert profile.max_chunk_s == pytest.approx(20.0)
+    assert profile.chunk_overlap_s == pytest.approx(0.5)
+    assert profile.unload_after is True
+    # The provenance accessor names the Hugging Face repository, not ``model``.
+    assert transcription_model_name(profile) == GIGAAM_MODEL_ID
+
+
+def test_gigaam_transcription_profile_reads_explicit_values(tmp_path: Path) -> None:
+    config = _config_from_profiles(
+        tmp_path,
+        _giga_profiles(
+            {
+                "device": "cuda",
+                "beam_width": 8,
+                "alpha": 0.5,
+                "beta": 0.25,
+                "max_chunk_s": 120.0,
+                "chunk_overlap_s": 0.0,
+                "trust_remote_code": False,
+                "unload_after": False,
+            }
+        ),
+    )
+    profile = config.transcription
+    assert isinstance(profile, GigaamCtcLmProfile)
+    assert profile.device == "cuda"
+    assert profile.beam_width == 8
+    assert profile.alpha == pytest.approx(0.5)
+    assert profile.beta == pytest.approx(0.25)
+    assert profile.max_chunk_s == pytest.approx(120.0)
+    assert profile.chunk_overlap_s == pytest.approx(0.0)
+    assert profile.trust_remote_code is False
+    assert profile.unload_after is False
+
+
+def test_unknown_transcription_provider_is_a_load_error(tmp_path: Path) -> None:
+    """(б) DoD 1: a third ``provider`` value is refused, not silently downgraded.
+
+    The message must name the offending value **and** the accepted tags, so the
+    user can fix the config without reading the source.
+    """
+    with pytest.raises(ModelsConfigError) as exc:
+        _config_from_profiles(tmp_path, _giga_profiles({"provider": "whisper_cpp"}))
+    message = str(exc.value)
+    assert "transcription" in message
+    assert "whisper_cpp" in message
+    assert "faster_whisper" in message
+    assert "gigaam2_ctc_lm" in message
+
+
+def test_whisper_only_config_still_loads_unchanged(tmp_path: Path) -> None:
+    """(в) DoD 5: a user config with only ``faster_whisper`` needs no edits."""
+    config = _config_from_text(tmp_path, _yaml_for())
+    profile = config.transcription
+    assert isinstance(profile, FasterWhisperProfile)
+    assert profile.provider == "faster_whisper"
+    assert profile.model == "small"
+    assert profile.language == "ru"
+    assert profile.compute_type == "int8"
+    assert profile.beam_size == 5
+    assert transcription_model_name(profile) == "small"
+
+
+@pytest.mark.parametrize(
+    ("max_chunk_s", "chunk_overlap_s"),
+    [(10.0, 10.0), (10.0, 11.0)],
+)
+def test_chunk_overlap_must_be_smaller_than_max_chunk(
+    tmp_path: Path, max_chunk_s: float, chunk_overlap_s: float
+) -> None:
+    """(г) An overlap that removes no audio is a config error naming both values."""
+    with pytest.raises(ModelsConfigError) as exc:
+        _config_from_profiles(
+            tmp_path,
+            _giga_profiles({"max_chunk_s": max_chunk_s, "chunk_overlap_s": chunk_overlap_s}),
+        )
+    message = str(exc.value)
+    assert "chunk_overlap_s" in message
+    assert "max_chunk_s" in message
+    assert str(chunk_overlap_s) in message
+    assert str(max_chunk_s) in message
+
+
+def test_overlap_equal_to_max_chunk_is_rejected(tmp_path: Path) -> None:
+    """The boundary is strict: equal values are refused as well."""
+    with pytest.raises(ModelsConfigError):
+        _config_from_profiles(
+            tmp_path, _giga_profiles({"max_chunk_s": 20.0, "chunk_overlap_s": 20.0})
+        )
+
+
+def test_duplicate_transcription_key_is_a_load_error(tmp_path: Path) -> None:
+    """D1: two ``transcription:`` blocks are refused — never "the last one wins".
+
+    PyYAML's default keeps the last value and drops the earlier one, so a user
+    who uncomments the GigaAM twin and forgets to delete the Whisper block would
+    get a silent backend substitution. The file must be rejected instead, and
+    the message must name the key without echoing any value.
+    """
+    text = (
+        "profiles:\n"
+        "  transcription:\n"
+        "    provider: faster_whisper\n"
+        "    model: small\n"
+        "  transcription:\n"
+        "    provider: gigaam2_ctc_lm\n"
+        f"    model_id: {GIGAAM_MODEL_ID}\n"
+        f"    revision: {GIGAAM_PINNED_REVISION}\n"
+        "  normalization:\n"
+        "    provider: openai_compatible\n"
+        "    base_url: http://127.0.0.1:11434/v1\n"
+        "    model: local-normalizer\n"
+        "    api_key_env: NORMALIZATION_API_KEY\n"
+        "    max_tokens: 100\n"
+    )
+    with pytest.raises(ModelsConfigError) as exc:
+        _config_from_text(tmp_path, text)
+    message = str(exc.value)
+    assert "repeats the key 'transcription'" in message
+    assert "profiles" in message
+    # Privacy: no value from the file may be echoed (model ids, base_url, ...).
+    assert GIGAAM_MODEL_ID not in message
+    assert GIGAAM_PINNED_REVISION not in message
+    assert "waveletdeboshir" not in message
+    assert "small" not in message
+    assert "127.0.0.1" not in message
+
+
+def test_duplicate_key_inside_a_profile_is_a_load_error(tmp_path: Path) -> None:
+    """The guard is not limited to the backend switch: any repeated key fails.
+
+    The message names the path, so a duplicate deep in a profile is as
+    locatable as a second ``transcription:`` block.
+    """
+    text = _yaml_for().replace("    beam_size: 5", "    beam_size: 5\n    beam_size: 9", 1)
+    with pytest.raises(ModelsConfigError) as exc:
+        _config_from_text(tmp_path, text)
+    message = str(exc.value)
+    assert "repeats the key 'beam_size'" in message
+    assert "profiles.transcription" in message
+
+
+def test_strict_parsing_leaves_well_formed_configs_alone(tmp_path: Path) -> None:
+    """D1: the duplicate guard changes nothing for a file with unique keys."""
+    config = _config_from_text(tmp_path, _yaml_for())
+    assert isinstance(config.transcription, FasterWhisperProfile)
+    assert config.normalization.model == "local-normalizer"
+    for name in ("models.example.yaml", "models.cpu.example.yaml"):
+        loaded = load_models_config(PROJECT_ROOT / "configs" / name)
+        assert isinstance(loaded.transcription, FasterWhisperProfile), name
+        assert loaded.phase2_profiles(), name
+
+
+def test_aliases_work_and_an_explicit_key_over_a_merge_is_reported(tmp_path: Path) -> None:
+    """The documented nuance of the strict loader (README, ADR-017).
+
+    A plain alias and a merge that overrides nothing keep working; a field given
+    both through ``<<`` and explicitly is reported as a repeated key, where
+    standard YAML would silently let the explicit key win. Pinned here so the
+    wording in the docs and the loader cannot drift apart.
+    """
+    llm = (
+        "  normalization: &norm\n"
+        "    provider: openai_compatible\n"
+        "    base_url: http://127.0.0.1:11434/v1\n"
+        "    model: local-normalizer\n"
+        "    api_key_env: NORMALIZATION_API_KEY\n"
+        "    max_tokens: 100\n"
+    )
+    text = (
+        "profiles:\n"
+        "  transcription:\n"
+        "    provider: faster_whisper\n"
+        "    model: small\n"
+        + llm
+        + "  summarization:\n    <<: *norm\n"
+        + "  wellbeing_analysis:\n    provider: openai_compatible\n"
+        "    base_url: http://127.0.0.1:11434/v1\n"
+        "    model: local-wellbeing\n"
+        "    api_key_env: WELLBEING_API_KEY\n"
+        "    max_tokens: 100\n"
+    )
+    config = _config_from_text(tmp_path, text)
+    assert config.normalization.model == "local-normalizer"
+    assert config.summarization.model == "local-normalizer"  # merged, no override
+
+    overridden = text.replace("    <<: *norm\n", "    <<: *norm\n    model: overridden\n", 1)
+    with pytest.raises(ModelsConfigError) as exc:
+        _config_from_text(tmp_path, overridden)
+    assert "repeats the key 'model'" in str(exc.value)
+
+
+def test_gigaam_revision_is_required(tmp_path: Path) -> None:
+    """(д) The revision pin is mandatory: the wrapper runs ``trust_remote_code``."""
+    for revision in (None, ""):
+        fields = dict(GIGAAM_FIELDS)
+        if revision is None:
+            fields.pop("revision")
+        else:
+            fields["revision"] = revision
+        profiles = _profiles_dict()
+        profiles["transcription"] = fields
+        with pytest.raises(ModelsConfigError) as exc:
+            _config_from_profiles(tmp_path, profiles)
+        assert "revision" in str(exc.value)
+
+
+def test_gigaam_rejects_unknown_fields(tmp_path: Path) -> None:
+    """``extra="forbid"`` holds for the new profile too (no silent knobs)."""
+    with pytest.raises(ModelsConfigError) as exc:
+        _config_from_profiles(tmp_path, _giga_profiles({"sample_rate": 16000}))
+    assert "sample_rate" in str(exc.value)
+
+
+def test_example_config_still_uses_whisper_and_documents_gigaam() -> None:
+    """(е) DoD 3: both examples load, keep Whisper active and show the twin block."""
+    loaded = load_models_config(EXAMPLE_CONFIG)
+    assert isinstance(loaded.transcription, FasterWhisperProfile)
+    assert loaded.transcription.provider == "faster_whisper"
+
+    blocks: list[list[str]] = []
+    for name in ("models.example.yaml", "models.cpu.example.yaml"):
+        path = PROJECT_ROOT / "configs" / name
+        raw = path.read_text(encoding="utf-8")
+        # Both backends are described, and the GigaAM twin is fully specified.
+        for needle in (
+            "gigaam2_ctc_lm",
+            GIGAAM_MODEL_ID,
+            GIGAAM_PINNED_REVISION,
+            "beam_width",
+            "max_chunk_s",
+            "chunk_overlap_s",
+            "unload_after",
+        ):
+            assert needle in raw, f"{name}: missing {needle}"
+        # The active profile is still Whisper — the file parses as before.
+        active = yaml.safe_load(raw)["profiles"]["transcription"]
+        assert active["provider"] == "faster_whisper", name
+        blocks.append(_commented_gigaam_block(path))
+    # The CPU example claims exactly two differences from the main example; the
+    # commented GigaAM block must not become a third one.
+    assert blocks[0] == blocks[1]
+    assert any("provider: gigaam2_ctc_lm" in line for line in blocks[0])
+
+
+def _commented_gigaam_block(path: Path) -> list[str]:
+    """The contiguous commented GigaAM block of an example config file."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if "Второй STT-бэкенд" in line)
+    block: list[str] = []
+    for line in lines[start:]:
+        if line and not line.lstrip().startswith("#"):
+            break
+        block.append(line)
+    return block
+
+
+def _uncommented_gigaam_profile(path: Path) -> dict[str, object]:
+    """The commented GigaAM twin of an example config, as real YAML fields.
+
+    Only the profile's own lines are uncommented (prose comments are dropped,
+    an inner ``#`` comment stays a comment): the point is to validate the block
+    a user is told to paste, not to re-parse the explanation around it.
+    """
+    lines = _commented_gigaam_block(path)
+    start = next(i for i, line in enumerate(lines) if line.strip() == "# transcription:")
+    body_lines: list[str] = []
+    for line in lines[start + 1 :]:
+        text = line.strip()
+        if not text.startswith("#"):
+            break
+        body = text[1:].strip()
+        if not body:
+            break
+        body_lines.append("  " + body)
+        if body.startswith("unload_after:"):
+            break
+    document = yaml.safe_load("transcription:\n" + "\n".join(body_lines))
+    assert isinstance(document, dict)
+    return document["transcription"]
+
+
+def test_the_commented_gigaam_twin_is_a_loadable_profile() -> None:
+    """The documented second block must be a real, loadable profile.
+
+    A commented example is documentation, and documentation drifts: rename a
+    field in ``models_config`` and the block a user is told to paste would fail
+    to load. Uncommenting it here and validating it against the live schema is
+    what keeps DoD 3 ("switching is the profile's ``provider`` field") true.
+    """
+    for name in ("models.example.yaml", "models.cpu.example.yaml"):
+        path = PROJECT_ROOT / "configs" / name
+        profiles = _profiles_dict()
+        profiles["transcription"] = _uncommented_gigaam_profile(path)
+        config = parse_models_config({"profiles": profiles}, source=name)
+        profile = config.transcription
+        assert isinstance(profile, GigaamCtcLmProfile)
+        assert profile.model_id == GIGAAM_MODEL_ID
+        assert profile.revision == GIGAAM_PINNED_REVISION
+        assert profile.alpha == pytest.approx(0.4612549346468768)
+        assert profile.beta == pytest.approx(0.3271780420615455)
+        assert profile.max_chunk_s == pytest.approx(20.0)
+        assert profile.chunk_overlap_s < profile.max_chunk_s
+
+
+def test_gigaam_profile_status_is_valid_without_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(ж) DoD 2: the local GigaAM backend needs no secret and reports valid."""
+    for name in API_KEY_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    config = _config_from_profiles(tmp_path, _giga_profiles())
+
+    status = status_for(TaskType.transcription, config.transcription)
+    assert status.provider is ProviderType.gigaam2_ctc_lm
+    assert status.model == GIGAAM_MODEL_ID
+    assert status.base_url is None
+    assert status.api_key_configured is True
+    assert status.valid is True
+
+    statuses = {row.task: row for row in profile_statuses(config)}
+    assert statuses[TaskType.transcription].provider is ProviderType.gigaam2_ctc_lm
+    # The LLM profiles keep their own (secret-driven) verdicts: switching the
+    # STT backend changes nothing for them.
+    assert statuses[TaskType.normalization].provider is ProviderType.openai_compatible
+    assert statuses[TaskType.normalization].valid is False
+
+
+def test_validate_all_does_not_trip_over_the_gigaam_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(з) ``validate_all`` must not touch a local STT profile's missing secret.
+
+    Before T43 it skipped only ``FasterWhisperProfile`` and read
+    ``api_key_env`` off every other profile — an ``AttributeError`` on GigaAM.
+    """
+    config = _config_from_profiles(tmp_path, _giga_profiles())
+
+    _set_all_keys(monkeypatch)
+    validate_all(config)
+
+    for name in API_KEY_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(ModelsConfigError) as exc:
+        validate_all(config)
+    message = str(exc.value)
+    assert "NORMALIZATION_API_KEY" in message
+    # The transcription task is never named: local STT has no secret at all.
+    assert "transcription" not in message

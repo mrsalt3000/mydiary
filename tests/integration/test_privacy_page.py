@@ -17,9 +17,12 @@ from fastapi.testclient import TestClient
 import diary.api.routes.pages as pages_module
 from diary.core.models_config import (
     FasterWhisperProfile,
+    GigaamCtcLmProfile,
     ModelsConfig,
     ModelsConfigError,
     OpenAICompatibleProfile,
+    ProviderType,
+    TaskType,
 )
 from diary.core.settings import reload_settings
 from diary.main import app
@@ -223,3 +226,51 @@ def test_privacy_page_is_reachable_without_database() -> None:
     response = TestClient(app).get("/privacy")
     assert response.status_code == 200
     assert "Приватность" in response.text
+
+
+# ---------------------------------------------------------------------------
+# Provider captions (T43: the second STT backend must not render as "—")
+# ---------------------------------------------------------------------------
+
+
+def test_every_provider_type_has_a_human_label() -> None:
+    """Invariant: no ``ProviderType`` member may degrade to the "—" fallback.
+
+    The privacy page renders ``PRIVACY_PROVIDER_LABELS.get(status.provider.value)``
+    and ``privacy.html`` falls back to "—" for a missing entry. Adding
+    ``ProviderType.gigaam2_ctc_lm`` in T43 was exactly such a case, and the
+    failure is silent — hence this test, which fails as soon as a member is
+    added without a caption.
+    """
+    labels = pages_module.PRIVACY_PROVIDER_LABELS
+    missing = {member.value for member in ProviderType} - set(labels)
+    assert missing == set()
+    for member in ProviderType:
+        assert labels[member.value].strip(), member.value
+    # The four MVP tasks have captions too (same class of defect).
+    assert set(pages_module.PRIVACY_TASK_LABELS) == {task.value for task in TaskType}
+
+
+def test_privacy_page_shows_the_gigaam_stt_backend(
+    api_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GigaAM-configured transcription profile renders its own caption and model."""
+    config = _mixed_config()
+    config.transcription = GigaamCtcLmProfile(  # type: ignore[assignment]
+        provider="gigaam2_ctc_lm",
+        model_id="waveletdeboshir/gigaam-ctc-with-lm",
+        revision="07d97cf8a4f178b68679cafae0600c8487877301",
+    )
+    monkeypatch.setattr(pages_module, "_load_models_config", lambda: config)
+    monkeypatch.setenv("NORM_API", "x")
+    monkeypatch.setenv("SUMM_API", "y")
+    monkeypatch.setenv("WB_API", "z")
+
+    html = api_client.get("/privacy").text
+
+    assert "Локальный STT (GigaAM-v2 CTC+LM)" in html
+    assert "waveletdeboshir/gigaam-ctc-with-lm" in html
+    # Local, and ready without any key — the same contract as local Whisper.
+    assert "Не требуется" in html
+    assert "Локальный STT (faster-whisper)" not in html

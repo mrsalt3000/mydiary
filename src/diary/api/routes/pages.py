@@ -58,6 +58,7 @@ from diary.core.models_config import (
     ProviderType,
     TaskType,
     load_models_config,
+    transcription_model_name,
 )
 from diary.core.profile_status import ProfileStatus, profile_statuses
 from diary.core.settings import get_settings
@@ -882,14 +883,18 @@ def _transcription_chip() -> str | None:
     """Chip of the STT step (day block) from the configured transcription profile.
 
     ``None`` when no usable configuration is available: the panel then shows no
-    chip instead of guessing a model or a provider.
+    chip instead of guessing a model or a provider. The model identifier is read
+    through :func:`~diary.core.models_config.transcription_model_name`, because
+    since T43 the profile may be either STT backend (Whisper names it ``model``,
+    GigaAM ``model_id``) — reading ``profile.model`` directly was an
+    ``AttributeError`` waiting for the first GigaAM-configured file.
     """
     try:
         config = _load_models_config()
     except ModelsConfigError:
         return None
     profile = config.transcription
-    return f"{profile.provider.replace('_', '-')} · {profile.model}"
+    return f"{profile.provider.replace('_', '-')} · {transcription_model_name(profile)}"
 
 
 def _panel_step(
@@ -1400,6 +1405,7 @@ PRIVACY_TASK_LABELS: dict[str, str] = {
 #: Human-readable provider captions for the privacy page.
 PRIVACY_PROVIDER_LABELS: dict[str, str] = {
     ProviderType.faster_whisper.value: "Локальный STT (faster-whisper)",
+    ProviderType.gigaam2_ctc_lm.value: "Локальный STT (GigaAM-v2 CTC+LM)",
     ProviderType.openai_compatible.value: "OpenAI-совместимый API",
 }
 
@@ -1410,8 +1416,8 @@ def _privacy_rows() -> tuple[list[dict[str, object]], bool]:
     Uses :func:`profile_statuses` (Task 03), so only the *booleans*
     ``api_key_configured``/``valid`` and the referenced environment-variable
     name ever reach the page — never a key value. ``external`` mirrors the
-    profile's ``external`` flag (faster-whisper is always local). A missing
-    or invalid models configuration renders an explicit "not configured"
+    profile's ``external`` flag (both local STT backends are always local). A
+    missing or invalid models configuration renders an explicit "not configured"
     state instead of failing the page.
     """
     try:

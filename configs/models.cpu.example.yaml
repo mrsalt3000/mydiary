@@ -27,7 +27,9 @@
 # - Секретов в этом файле НЕТ. Поля api_key_env хранят только ИМЯ переменной
 #   окружения; значение резолвится из окружения в рантайме.
 # - Четыре задачи MVP настраиваются независимо; провайдер/модель могут отличаться.
-# - transcription в MVP — только локальный faster_whisper;
+# - transcription — локальный STT: `faster_whisper` (по умолчанию) либо
+#   `gigaam2_ctc_lm` (второй бэкенд, T43). Бэкенд задаёт поле `provider:`
+#   внутри профиля `transcription`; оба варианта показаны ниже.
 #   normalization/summarization/wellbeing_analysis — только openai_compatible.
 # - Четыре профиля слоёв фазы 2 (T02, T13b) — `diary_stt`, `diary_sum`,
 #   `diary_week`, `diary_coach` — ОПЦИОНАЛЬНЫ: отсутствие профиля означает
@@ -44,12 +46,50 @@
 
 profiles:
   transcription:
-    provider: faster_whisper      # локальный STT (MVP)
+    provider: faster_whisper      # локальный STT (по умолчанию); второй бэкенд — ниже
     model: small                  # имя/размер модели
     language: ru                  # язык распознавания
     device: cpu                   # cpu или cuda (опционально, WSL 2)
     compute_type: int8            # int8/int8_float16/int8_float32/float16/float32
     beam_size: 5
+
+  # --- Второй STT-бэкенд (T43): GigaAM-v2 CTC+LM, закомментирован -----------
+  # Бэкенд выбирает ровно одно поле — `provider:` (дискриминатор профиля).
+  # Допустимы два значения: `faster_whisper` (блок выше) и `gigaam2_ctc_lm`
+  # (блок ниже). Третьего быть не может: неизвестный `provider:` — ошибка
+  # загрузки конфига, а не откат на whisper (docs/decisions/ADR-017).
+  # Наборы полей у бэкендов разные (`model` у whisper против `model_id` + пин
+  # ревизии у GigaAM), поэтому ниже приведён второй блок целиком: чтобы
+  # переключиться, замените секцию `transcription` этим блоком, поменяв поле
+  # `provider:` и его поля. Оба блока сразу держать нельзя: повторяющийся ключ
+  # `transcription` загрузчик отвергнет (без этой проверки PyYAML молча взял бы
+  # последний блок, то есть бэкенд подменился бы тихо). `extra="forbid"` ловит
+  # другое — поля «не того» бэкенда внутри одной секции.
+  #
+  # Рантайм GigaAM (torch/CUDA/LM) в venv приложения НЕ ставится: выбран
+  # изолированный venv-сайдкар (решение спайка T42, docs/stt-backends-analysis.md
+  # §10), провижининг — T45, реализация провайдера — T44. Пока адаптера нет,
+  # `create_provider` на `gigaam2_ctc_lm` даёт явную ошибку «провайдер не
+  # зарегистрирован», а не тихий запуск whisper.
+  #
+  # transcription:
+  #   provider: gigaam2_ctc_lm
+  #   model_id: waveletdeboshir/gigaam-ctc-with-lm   # репозиторий HF (unofficial wrapper)
+  #   revision: 07d97cf8a4f178b68679cafae0600c8487877301   # пин обязателен: обёртка идёт через trust_remote_code
+  #   trust_remote_code: true       # обёртка исполняется локально (границы — T45)
+  #   device: cpu                   # cpu или cuda (опционально, WSL 2)
+  #   beam_width: 64                # ширина beam-search декодера CTC+LM
+  #   # alpha/beta можно не задавать: None = взять значения чекпойнта из
+  #   # language_model/attrs.json (замер: alpha 0.4612549346468768, beta 0.3271780420615455)
+  #   alpha: 0.4612549346468768
+  #   beta: 0.3271780420615455
+  #   max_chunk_s: 20               # деление длинного файла; 20 с ≈ +962…981 MiB VRAM (замер T42)
+  #   chunk_overlap_s: 0.5          # перекрытие соседних чанков; обязано быть < max_chunk_s
+  #   unload_after: true            # выгружать бэкенд после прогона (политика сайдкара, T44/T45)
+  #
+  # Чего в профиле СОЗНАТЕЛЬНО нет (не добавляйте «для пользы»): `sample_rate`
+  # (GigaAM жёстко требует 16 кГц моно — свойство провайдера, а не настройка) и
+  # `dtype` (рабочий — родной fp16 чекпойнта; fp32 только дороже по VRAM).
 
   normalization:
     provider: openai_compatible
