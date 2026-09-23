@@ -46,6 +46,7 @@ _SUBDIR_FIELDS: dict[str, str] = {
     "temp_dir": "temp",
     "backups_dir": "backups",
     "nli_model_dir": "models/nli",
+    "gigaam_model_dir": "models/gigaam",
 }
 
 #: Settings that hold machine paths outside the data root (they are not
@@ -184,6 +185,18 @@ class AppSettings(BaseSettings):
     #: repository root, like every other path here. Read from
     #: ``APP_GIGAAM_WORKER_SCRIPT``.
     gigaam_worker_script: Path = PROJECT_ROOT / "scripts" / "gigaam-stt-worker.py"
+    #: Directory holding the pinned GigaAM-v2 CTC+LM weights (T45). It is an
+    #: **isolated Hugging Face cache**: the adapter sets the child's ``HF_HOME``
+    #: to this value, so the sidecar reads ``<dir>/hub`` and neither writes into
+    #: the user's own ``~/.cache/huggingface`` nor reads a copy of the model kept
+    #: elsewhere. The directory is filled by ``scripts/fetch-gigaam-model.sh``
+    #: from the revision pinned in the profile, and no transcription request ever
+    #: downloads into it (the child runs with ``HF_HUB_OFFLINE=1``).
+    #: Its size is measured, not guessed: the snapshot of the pinned revision is
+    #: **2 637 136 001 B** (2.46 GiB), of which 2.14 GB is the KenLM language
+    #: model — measured 2026-09-23, ``docs/stt-backends-analysis.md`` §4.5.
+    #: Read from ``APP_GIGAAM_MODEL_DIR`` (default ``<data root>/models/gigaam``).
+    gigaam_model_dir: Path = DEFAULT_DATA_ROOT / "models" / "gigaam"
     #: How long one sidecar invocation may take before it is killed and the
     #: attempt fails as a transient error (T44). Generous by default. Basis —
     #: measured 2026-09-23 on the 332 s recording at 20 s chunks

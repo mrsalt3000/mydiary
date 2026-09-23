@@ -16,6 +16,7 @@ from diary.domain.transcription.errors import (
     ProviderUnavailableError,
     TranscriptionExecutionError,
     TranscriptionProviderError,
+    TranscriptionResultError,
 )
 from diary.domain.transcription.gigaam import GigaamSidecarProvider
 from diary.domain.transcription.providers import (
@@ -47,6 +48,7 @@ __all__ = [
     "TranscriptionPermanentError",
     "TranscriptionProvider",
     "TranscriptionProviderError",
+    "TranscriptionResultError",
     "TranscriptionServiceError",
     "asr",
     "create_provider",

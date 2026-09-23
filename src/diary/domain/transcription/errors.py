@@ -67,6 +67,24 @@ class ProviderUnavailableError(ProviderConfigurationError):
     """
 
 
+class TranscriptionResultError(TranscriptionProviderError):
+    """The provider finished, but its result cannot be trusted.
+
+    Raised when a run reports success and the payload then fails validation — for
+    the GigaAM sidecar, a chunk plan that does not tile the recording, or a result
+    that does not match the wire contract at all. Such an outcome is a function of
+    the recording and the profile, so the identical request repeats it: retrying
+    would only burn the job's attempt budget, exactly as with a refused backend
+    (T43's finding, DoD 6 of T44; the classification was agreed in T45). Like
+    every deterministic failure in this taxonomy it carries ``retryable = False``
+    — the default of the base class.
+
+    It is deliberately **not** a :class:`ProviderConfigurationError`: a provider
+    run did happen, so the domain service may still record the failed run, unlike
+    the "nothing was started" refusals.
+    """
+
+
 class TranscriptionExecutionError(TranscriptionProviderError):
     """The provider failed at runtime; the message is a sanitised summary.
 
@@ -83,4 +101,5 @@ __all__ = [
     "ProviderUnavailableError",
     "TranscriptionExecutionError",
     "TranscriptionProviderError",
+    "TranscriptionResultError",
 ]

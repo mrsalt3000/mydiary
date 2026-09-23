@@ -71,10 +71,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: Pure product modules this worker shares with the application.
 _TRANSCRIPTION_DIR = REPO_ROOT / "src" / "diary" / "domain" / "transcription"
 
-#: GigaAM and faster-whisper both want 16 kHz mono.
-SAMPLE_RATE = 16000
-#: Analysis frame of the energy detector, matching ``chunking.SILENCE_FRAME_S``.
-SILENCE_FRAME_S = 0.02
+# The sample rate and the analysis frame are **the product planner's** values
+# (``chunking.SAMPLE_RATE`` / ``chunking.SILENCE_FRAME_S``), and this script does
+# not declare copies of them: it decodes and computes RMS with exactly the numbers
+# the planner was measured against, so the two cannot drift apart (T45, closing the
+# finding of the T44 acceptance). The module arrives as :func:`_load_pure_module`'s
+# result and is threaded into the helpers below instead of being read from a
+# module-level global — the worker has no import of the application package (see
+# the module docstring), and a global loaded at import time would turn "the file is
+# missing" into an ImportError before :func:`main` can report it through the
+# protocol.
 
 #: Exit code used when the *protocol module itself* cannot be loaded — the one
 #: situation in which its constant is unavailable.
@@ -159,12 +165,14 @@ def _cache_dir(args: argparse.Namespace) -> str | None:
     return str(Path(hf_home) / "hub") if hf_home else None
 
 
-def decode_audio(path: Path) -> tuple[object, float, float]:
+def decode_audio(path: Path, chunking: ModuleType) -> tuple[object, float, float]:
     """Decode ``path`` to float32 mono 16 kHz; return ``(samples, seconds, source_seconds)``.
 
     PyAV carries its own FFmpeg libraries, so no system ffmpeg is involved
-    (``docs/wsl2-deployment-brief.md``). An unreadable or empty container is an
-    error: a transcript of nothing is worse than no transcript.
+    (``docs/wsl2-deployment-brief.md``). The target rate is the planner's
+    ``chunking.SAMPLE_RATE``, not a number of this script's own. An unreadable or
+    empty container is an error: a transcript of nothing is worse than no
+    transcript.
     """
     import av
     import numpy as np
@@ -180,7 +188,7 @@ def decode_audio(path: Path) -> tuple[object, float, float]:
             source_seconds = float(stream.duration * stream.time_base)
         elif container.duration:
             source_seconds = container.duration / av.time_base
-        resampler = av.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
+        resampler = av.AudioResampler(format="s16", layout="mono", rate=chunking.SAMPLE_RATE)
         parts = []
         for frame in container.decode(stream):
             parts.extend(resampler.resample(frame))
@@ -190,14 +198,14 @@ def decode_audio(path: Path) -> tuple[object, float, float]:
         raise RuntimeError("the container decoded to zero audio frames")
     joined = np.concatenate([np.asarray(part.to_ndarray()).reshape(-1) for part in parts])
     samples = joined.astype(np.float32) / 32768.0
-    return samples, len(samples) / SAMPLE_RATE, source_seconds
+    return samples, len(samples) / chunking.SAMPLE_RATE, source_seconds
 
 
-def frame_rms(samples: object) -> list[float]:
+def frame_rms(samples: object, chunking: ModuleType) -> list[float]:
     """Per-frame RMS of the whole frames in ``samples`` (see ``chunking``)."""
     import numpy as np
 
-    frame = int(SILENCE_FRAME_S * SAMPLE_RATE)
+    frame = int(chunking.SILENCE_FRAME_S * chunking.SAMPLE_RATE)
     n_frames = len(samples) // frame  # type: ignore[arg-type]
     if n_frames < 2:
         return []
@@ -243,6 +251,29 @@ def load_model(args: argparse.Namespace) -> object:
 
     See the module docstring for why the weights are loaded from
     ``model.safetensors`` instead of through ``AutoModel.from_pretrained``.
+
+    ``code_revision`` is the pin again, and that is not decoration: with
+    ``trust_remote_code=True`` transformers fetches the checkpoint's *own* module
+    file (``gigaam_transformers.py``) through the dynamic-module loader, and
+    without an explicit revision that loader asks for the repository's default
+    revision (``main``). A cache provisioned at a pinned commit deliberately has no
+    ``refs/main`` entry — the pin is the sha, and the library writes no ref when the
+    revision *is* the commit — so the load failed with ``LocalEntryNotFoundError``
+    and the application reported "runtime is not provisioned" while every file was
+    in fact present (measured 2026-09-24 on the provisioned cache: all 15 files
+    verified by sha256, ``AutoTokenizer``, ``AutoFeatureExtractor`` and
+    ``AutoProcessor`` loaded fine, only this call raised).
+
+    ``code_revision`` rather than ``revision`` is deliberate, and it is the
+    supported knob for this: ``from_config`` forwards leftover keyword arguments to
+    **both** the module lookup and the model constructor, so ``revision=…`` here
+    would reach ``GigaAMCTCHF.__init__`` and raise ``TypeError`` (measured), while
+    ``code_revision`` is consumed by the loader (transformers pops it for exactly
+    this purpose). The cache directory is not passed for the same reason — the child
+    runs with ``HF_HOME`` pointing at the provisioned cache
+    (``src/diary/domain/transcription/gigaam.py``), which *is* the default
+    ``HF_HUB_CACHE`` — and the revision the code is read from is the same pin whose
+    weights and ``sha256`` are verified at provisioning time.
     """
     import torch
     from huggingface_hub import hf_hub_download
@@ -255,7 +286,7 @@ def load_model(args: argparse.Namespace) -> object:
         trust_remote_code=True,
         cache_dir=_cache_dir(args),
     )
-    model = AutoModel.from_config(config, trust_remote_code=True)
+    model = AutoModel.from_config(config, trust_remote_code=True, code_revision=args.revision)
     weights = hf_hub_download(
         args.model_id,
         "model.safetensors",
@@ -312,7 +343,7 @@ def _greedy_ctc(logits: object, tokenizer: object) -> str:
 
 
 def transcribe_chunks(
-    args: argparse.Namespace, samples: object, chunks: list[object]
+    args: argparse.Namespace, samples: object, chunks: list[object], chunking: ModuleType
 ) -> tuple[list[str], float]:
     """Run the model over ``chunks`` and return ``(per_chunk_texts, inference_seconds)``."""
     import numpy as np
@@ -338,10 +369,14 @@ def transcribe_chunks(
     with torch.inference_mode():
         for chunk in chunks:
             audio = np.asarray(samples)[
-                int(chunk.decode_start_s * SAMPLE_RATE) : int(chunk.decode_end_s * SAMPLE_RATE)
+                int(chunk.decode_start_s * chunking.SAMPLE_RATE) : int(
+                    chunk.decode_end_s * chunking.SAMPLE_RATE
+                )
             ]
             started = time.perf_counter()
-            inputs = feature_extractor(audio, sampling_rate=SAMPLE_RATE, return_tensors="pt")
+            inputs = feature_extractor(
+                audio, sampling_rate=chunking.SAMPLE_RATE, return_tensors="pt"
+            )
             # The feature extractor always emits float32; the model is fp16.
             input_features = inputs["input_features"].to(device=device, dtype=model_dtype)
             input_lengths = inputs["input_lengths"].to(device)
@@ -371,14 +406,14 @@ def run(
         raise UnavailableError("FileNotFoundError")
 
     started = time.perf_counter()
-    samples, duration_s, source_duration_s = decode_audio(audio_path)
+    samples, duration_s, source_duration_s = decode_audio(audio_path, chunking_module)
     decode_s = time.perf_counter() - started
 
-    rms = frame_rms(samples)
+    rms = frame_rms(samples, chunking_module)
     try:
         chunks = chunking_module.plan_chunks(
             rms,
-            frame_s=SILENCE_FRAME_S,
+            frame_s=chunking_module.SILENCE_FRAME_S,
             total_s=duration_s,
             max_chunk_s=args.max_chunk_s,
             overlap_s=args.chunk_overlap_s,
@@ -393,7 +428,7 @@ def run(
     # ``transcribe_chunks`` loads the model through :func:`load_backend`, which
     # reports missing files as :class:`UnavailableError`; a failure after that is
     # a runtime one and stays transient (exit 1).
-    parts, inference_s = transcribe_chunks(args, samples, chunks)
+    parts, inference_s = transcribe_chunks(args, samples, chunks, chunking_module)
     load_and_inference_s = time.perf_counter() - started
 
     text, removed_words = chunking_module.stitch(parts, chunks, args.chunk_overlap_s)

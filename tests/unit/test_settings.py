@@ -29,6 +29,7 @@ _APP_ENV_VARS = (
     "APP_GIGAAM_PYTHON",
     "APP_GIGAAM_WORKER_SCRIPT",
     "APP_GIGAAM_WORKER_TIMEOUT_S",
+    "APP_GIGAAM_MODEL_DIR",
 )
 
 
@@ -218,6 +219,32 @@ def test_an_empty_gigaam_interpreter_means_unset(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("APP_GIGAAM_PYTHON", "   ")
 
     assert AppSettings(_env_file=None).gigaam_python is None
+
+
+def test_gigaam_model_dir_defaults_below_the_data_root() -> None:
+    """T45: the weights live under the data root, like the NLI ones."""
+    settings = _settings()
+
+    assert settings.gigaam_model_dir == PROJECT_ROOT / "data" / "models" / "gigaam"
+    assert _SUBDIR_FIELDS["gigaam_model_dir"] == "models/gigaam"
+
+
+def test_gigaam_model_dir_follows_the_root_and_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _settings(data_root="/srv/diary").gigaam_model_dir == Path("/srv/diary/models/gigaam")
+
+    monkeypatch.setenv("APP_GIGAAM_MODEL_DIR", "/mnt/weights/gigaam")
+
+    assert AppSettings(_env_file=None).gigaam_model_dir == Path("/mnt/weights/gigaam")
+
+
+def test_an_explicit_gigaam_model_dir_equal_to_the_default_is_kept() -> None:
+    """T38 through the T45 field: a source-set path is not replaced by the default."""
+    default_dir = PROJECT_ROOT / "data" / "models" / "gigaam"
+    settings = _settings(data_root="/srv/diary", gigaam_model_dir=default_dir)
+
+    assert settings.gigaam_model_dir == default_dir
 
 
 def test_get_settings_cache_and_reload(monkeypatch: pytest.MonkeyPatch) -> None:

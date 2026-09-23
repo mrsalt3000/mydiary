@@ -291,7 +291,12 @@ _GIGAAM_REVISION = "07d97cf8a4f178b68679cafae0600c8487877301"
 @pytest.fixture(autouse=True)
 def _isolate_gigaam_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the tests independent of a developer's own APP_GIGAAM_* variables."""
-    for name in ("APP_GIGAAM_PYTHON", "APP_GIGAAM_WORKER_SCRIPT", "APP_GIGAAM_WORKER_TIMEOUT_S"):
+    for name in (
+        "APP_GIGAAM_PYTHON",
+        "APP_GIGAAM_WORKER_SCRIPT",
+        "APP_GIGAAM_WORKER_TIMEOUT_S",
+        "APP_GIGAAM_MODEL_DIR",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -316,6 +321,36 @@ class _FakeProcess:
         self.wait_calls.append(timeout)
         assert self.returncode is not None, "wait() on a process that never exited"
         return self.returncode
+
+
+class _RefusingProcess(_FakeProcess):
+    """A process whose ``terminate()`` raises: the pid was not there (T45).
+
+    Modelled on ``ProcessLookupError``, which is exactly what the real
+    ``Popen.terminate()`` raises when the child is already gone or has been
+    reaped — the case in which "the signal was refused" must not be read as
+    "the process is dead".
+    """
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+        raise ProcessLookupError("synthetic: the signal did not land")
+
+
+class _StubbornProcess(_FakeProcess):
+    """A process that survives ``terminate()`` (T45): only ``kill()`` ends it.
+
+    ``wait`` is inherited, so while the process is alive it raises instead of
+    returning — standing in for ``subprocess.TimeoutExpired`` after the grace
+    period.
+    """
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1  # sent, and ignored by the child
+
+    def kill(self) -> None:
+        self.kill_calls += 1
+        self.returncode = -9
 
 
 class _FakeRunner:
@@ -514,23 +549,86 @@ def test_gigaam_unavailable_exit_is_a_permanent_refusal(tmp_path: Path) -> None:
         provider.transcribe(_audio_path(tmp_path), _giga_profile())
 
 
-def test_gigaam_malformed_stdout_is_a_transient_failure(tmp_path: Path) -> None:
+def test_gigaam_malformed_stdout_is_a_permanent_failure(tmp_path: Path) -> None:
+    """A successful exit we cannot read is deterministic, so it is not retried.
+
+    T45 DoD 6c: the worker exited 0, therefore what arrived is a function of the
+    recording and the profile — repeating the request repeats the same payload.
+    Retrying would only burn the job's attempt budget.
+    """
     runner = _FakeRunner(stdout="это не JSON\n")
     provider = _sidecar(_gigaam_settings(tmp_path), runner)
 
-    with pytest.raises(providers.TranscriptionExecutionError) as excinfo:
+    with pytest.raises(providers.TranscriptionResultError) as excinfo:
         provider.transcribe(_audio_path(tmp_path), _giga_profile())
 
     assert "не JSON" not in str(excinfo.value)
+    assert excinfo.value.retryable is False
 
 
-def test_gigaam_nonzero_coverage_is_refused(tmp_path: Path) -> None:
-    """A plan that does not cover the recording is a failed run, never a transcript."""
+def test_gigaam_nonzero_coverage_is_a_permanent_refusal(tmp_path: Path) -> None:
+    """A plan that does not cover the recording is a failed run, never a transcript.
+
+    The plan depends on the file and the profile only, so the same request repeats
+    it: the classification is *permanent* (T45 DoD 6c), which is what stops the
+    worker from spending all three attempts on a deterministic defect.
+    """
     runner = _FakeRunner(stdout=_result_json(gap=1.0))
     provider = _sidecar(_gigaam_settings(tmp_path), runner)
 
-    with pytest.raises(providers.TranscriptionExecutionError, match="does not cover"):
+    with pytest.raises(providers.TranscriptionResultError, match="does not cover") as excinfo:
         provider.transcribe(_audio_path(tmp_path), _giga_profile())
+
+    assert excinfo.value.retryable is False
+
+
+def test_gigaam_unavailable_message_names_the_provisioning_scripts(tmp_path: Path) -> None:
+    """T45 DoD 2: a missing runtime says what to *run*, not just that it is missing."""
+    runner = _FakeRunner(stdout=_result_json())
+    settings = _gigaam_settings(tmp_path, gigaam_python=None)
+    provider = _sidecar(settings, runner)
+
+    with pytest.raises(providers.ProviderUnavailableError) as excinfo:
+        provider.transcribe(_audio_path(tmp_path), _giga_profile())
+
+    message = str(excinfo.value)
+    assert "scripts/setup-gigaam-venv.sh" in message
+    assert "scripts/fetch-gigaam-model.sh" in message
+    assert "APP_GIGAAM_MODEL_DIR" in message
+
+
+def test_gigaam_child_env_is_an_allow_list_with_the_provisioned_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T45 DoD 8: the sidecar gets a minimal environment, not the application's own.
+
+    The child is a different program: a locale (it prints UTF-8 JSON), a home, a
+    ``PATH``, a scratch directory, the GPU selection and a library path — and
+    nothing else. An exported LLM API key, the case the T44 acceptance named, must
+    not reach it at all; and ``HF_HOME`` must be the provisioned cache rather than
+    whatever the user has exported.
+    """
+    monkeypatch.setenv("NORMALIZATION_API_KEY", "синтетический-ключ")
+    monkeypatch.setenv("HF_HOME", "/home/someone-else/.cache/huggingface")
+    monkeypatch.setenv("APP_GIGAAM_MODEL_DIR", str(tmp_path / "weights"))
+    runner = _FakeRunner(stdout=_result_json())
+    settings = _gigaam_settings(tmp_path)
+    provider = _sidecar(settings, runner)
+
+    provider.transcribe(_audio_path(tmp_path), _giga_profile())
+
+    env = runner.calls[0][1]
+    allowed = set(gigaam._ENV_ALLOW_LIST) | {
+        "HF_HOME",
+        "HF_HUB_OFFLINE",
+        "HF_HUB_DISABLE_TELEMETRY",
+    }
+    assert set(env) <= allowed
+    assert "NORMALIZATION_API_KEY" not in env
+    assert env["HF_HUB_OFFLINE"] == "1"
+    assert env["HF_HUB_DISABLE_TELEMETRY"] == "1"
+    assert env["HF_HOME"] == str(settings.gigaam_model_dir)
+    assert env["HF_HOME"] != os.environ["HF_HOME"]
 
 
 def test_gigaam_timeout_is_transient(tmp_path: Path) -> None:
@@ -557,6 +655,40 @@ def test_unload_terminates_a_sidecar_that_outlived_its_result(tmp_path: Path) ->
     provider.unload()  # idempotent: the handle was dropped, no second signal
 
     assert process.terminate_calls == 1
+
+
+def test_unload_escalates_to_kill_when_terminate_raises(tmp_path: Path) -> None:
+    """T45 DoD 6a: a refused signal must not leave the sidecar alive.
+
+    ``terminate()`` raising says only that the pid was not there at that instant,
+    so it is not evidence the process died. The release guarantee ``asr.run``
+    leans on (ADR-010) therefore continues to ``kill()``.
+    """
+    process = _RefusingProcess(returncode=None)
+    provider = _sidecar(_gigaam_settings(tmp_path), _FakeRunner())
+    provider._process = process
+
+    provider.unload()
+
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+    assert process.returncode == -9
+    assert provider._process is None
+
+
+def test_unload_kills_a_sidecar_that_outlives_the_grace_period(tmp_path: Path) -> None:
+    """T45 DoD 6a: a sidecar that ignores the request is killed, and reaped."""
+    process = _StubbornProcess(returncode=None)
+    provider = _sidecar(_gigaam_settings(tmp_path), _FakeRunner())
+    provider._process = process
+
+    provider.unload()
+
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+    assert process.returncode == -9
+    assert process.wait_calls  # the child was reaped, not just signalled
+    assert provider._process is None
 
 
 def test_unload_is_a_noop_for_a_finished_sidecar(tmp_path: Path) -> None:

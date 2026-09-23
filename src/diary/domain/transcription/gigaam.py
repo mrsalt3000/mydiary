@@ -12,15 +12,20 @@ Lifecycle
 =========
 
 * the runtime is resolved from **settings**, not from the model profile
-  (``APP_GIGAAM_PYTHON``, ``APP_GIGAAM_WORKER_SCRIPT``): a profile describes what
-  to decode, never where a machine keeps its interpreters (T38: a path a source
-  set keeps its value);
+  (``APP_GIGAAM_PYTHON``, ``APP_GIGAAM_WORKER_SCRIPT``, ``APP_GIGAAM_MODEL_DIR``):
+  a profile describes what to decode, never where a machine keeps its
+  interpreters and its weights (T38: a path a source set keeps its value). The
+  two provisioning scripts are the way those paths get filled:
+  ``scripts/setup-gigaam-venv.sh`` builds the interpreter,
+  ``scripts/fetch-gigaam-model.sh`` downloads the pinned weights into
+  ``APP_GIGAAM_MODEL_DIR`` and verifies their ``sha256`` (T45);
 * missing interpreter, missing worker script or a worker that reports an
-  unusable runtime (no weights in the local cache) raise
+  unusable runtime (no weights in the provisioned cache) raise
   :class:`~diary.domain.transcription.errors.ProviderUnavailableError`
-  **before** anything is loaded or downloaded — the adapter also runs the child
-  with ``HF_HUB_OFFLINE=1``, so a transcription request can never start a
-  multi-gigabyte download; provisioning is a separate, explicit step (T45);
+  **before** anything is loaded or downloaded — the adapter runs the child with
+  ``HF_HUB_OFFLINE=1`` and points its ``HF_HOME`` at the provisioned cache, so a
+  transcription request can neither start a multi-gigabyte download nor read a
+  copy of the model the user happens to keep elsewhere;
 * ``unload_after: false`` is refused loudly rather than ignored. The phase-2 veto
   forbids keeping STT resident in VRAM next to the LLM, and the sidecar's way of
   releasing a model is to exit; there is no resident mode to switch on, so the
@@ -30,7 +35,9 @@ Lifecycle
   so in the normal path the process is already gone when ``unload`` runs and the
   release is structural; the termination path is the guarantee behind
   ``asr.run``'s "release after every run" (ADR-010) for a worker that outlives
-  its result (a hung interpreter teardown, a timeout that killed nothing).
+  its result (a hung interpreter teardown, a timeout that killed nothing). A
+  ``terminate()`` that raises does not end the attempt: the escalation goes on to
+  ``kill()``, because a signal that never landed is not evidence the process died.
 
 Privacy (AGENTS.md §7–8): no exception here carries diary content, an audio
 path, or the worker's stdout/stderr text — only a static message plus, at most,
@@ -38,15 +45,25 @@ the *class name* the worker put last on stderr. The worker's stdout is never
 logged; the recognised text travels from it into the ``transcriptions`` table
 and nowhere else. This module imports nothing heavy: the sidecar's own venv
 carries the runtime and the child process isolates ``trust_remote_code``.
+
+The child's environment is an **allow-list**, not this process' environment minus
+secrets (T45, ``docs/privacy-and-safety.md`` §8): the sidecar is a different
+program that needs a locale (it prints UTF-8 JSON), a home, a ``PATH``, a scratch
+directory and the GPU selection — and nothing else. The names of the LLM API keys
+the user may have exported are therefore not inherited at all, which is a
+narrower rule than a deny-list of "variables that look secret": the child cannot
+read a key that was never passed, and a diary secret named something we did not
+think of cannot slip through.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -60,6 +77,7 @@ from diary.domain.transcription.errors import (
     ProviderUnavailableError,
     TranscriptionExecutionError,
     TranscriptionProviderError,
+    TranscriptionResultError,
 )
 
 #: How long a terminated sidecar is given to exit before it is killed.
@@ -70,15 +88,48 @@ _TERMINATE_GRACE_S = 5.0
 #: and an offline cache miss fails fast instead of fetching gigabytes.
 _OFFLINE_ENV = "HF_HUB_OFFLINE"
 
+#: Set together with the offline pin: an offline child should not even try to
+#: report anything to a remote service (defence in depth — with
+#: ``HF_HUB_OFFLINE=1`` the library does not open a connection at all).
+_TELEMETRY_ENV = "HF_HUB_DISABLE_TELEMETRY"
+
+#: Environment variables the sidecar child inherits — the whole of it (T45). The
+#: sidecar is a different program: it needs a locale (it prints a UTF-8 JSON with
+#: the recognised text), a home (library defaults land under it), a ``PATH``, a
+#: scratch directory, the GPU selection and a library path. Everything else is
+#: deliberately **not** passed, so the LLM API keys the user exported cannot
+#: reach it (``docs/privacy-and-safety.md`` §8). ``HF_HOME``/``HF_HUB_OFFLINE``
+#: are not listed because the adapter sets them itself, to the provisioned cache.
+#: ``LD_LIBRARY_PATH`` *is* listed: on this machine it carries the cuBLAS shim
+#: that ctranslate2 needs (a property of the application's environment, not a
+#: secret), and dropping it would make the child depend on where its CUDA
+#: libraries happen to live.
+_ENV_ALLOW_LIST: tuple[str, ...] = (
+    "PATH",
+    "HOME",
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "CUDA_VISIBLE_DEVICES",
+    "LD_LIBRARY_PATH",
+)
+
 #: Last stderr line of a failed worker is the error class name — a plain
 #: identifier (optionally dotted), never a message.
 _CLASS_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 _MAX_CLASS_NAME = 128
 
-#: Static installation hint shown when the sidecar runtime cannot be used.
+#: Static installation hint shown when the sidecar runtime cannot be used. It
+#: names the two provisioning scripts (T45 DoD 2): a missing runtime is a
+#: user-fixable condition, and the message should say what to run rather than
+#: leave the user inside somebody else's library traceback.
 _PROVISION_HINT = (
-    "Provision the GigaAM sidecar runtime (interpreter and model weights) before "
-    "using the gigaam2_ctc_lm backend."
+    "Provision the GigaAM sidecar runtime before using the gigaam2_ctc_lm backend: "
+    "scripts/setup-gigaam-venv.sh builds its interpreter and "
+    "scripts/fetch-gigaam-model.sh downloads the pinned weights; then point "
+    "APP_GIGAAM_PYTHON (and, if the weights went elsewhere, APP_GIGAAM_MODEL_DIR) at them."
 )
 
 
@@ -159,6 +210,22 @@ class SubprocessRunner:
         return SidecarRun(process=process, stdout=stdout or "", stderr=stderr or "")
 
 
+def _send_signal(send: Callable[[], None]) -> bool:
+    """Send one signal to the sidecar; ``False`` when the call itself failed.
+
+    Signal delivery is a request, not a fact: ``terminate()`` raises when the pid
+    is not there (or is not ours), and that says nothing about whether the process
+    is still running. So a caller that must guarantee the release cannot treat a
+    failed signal as a finished job — it has to escalate (see ``unload``), and
+    this helper is what makes that readable.
+    """
+    try:
+        send()
+    except Exception:
+        return False
+    return True
+
+
 def _reported_class(stderr: str) -> str | None:
     """The worker's error *class name*, from the last non-empty stderr line.
 
@@ -181,28 +248,34 @@ def _parse_result(stdout: str) -> dict[str, object]:
 
     A malformed result is a failed run, never a partially trusted one: raising
     here means no transcript is stored (AGENTS.md §15 applies the same rule to
-    structured LLM output).
+    structured LLM output). Every failure in this function is
+    :class:`~diary.domain.transcription.errors.TranscriptionResultError`, that
+    is *permanent*: the worker has already exited successfully, so what we are
+    looking at is a function of the recording and the profile — the identical
+    request produces the identical unusable payload, and retrying only burns the
+    job's attempts. A runtime failure (a killed or crashed worker) never reaches
+    this function: it arrives as a non-zero exit code earlier.
     """
     lines = [line.strip() for line in stdout.splitlines() if line.strip()]
     if not lines:
-        raise TranscriptionExecutionError("The GigaAM sidecar produced no result.")
+        raise TranscriptionResultError("The GigaAM sidecar produced no result.")
     try:
         payload = json.loads(lines[-1])
     except ValueError as exc:
-        raise TranscriptionExecutionError("The GigaAM sidecar result is not valid JSON.") from exc
+        raise TranscriptionResultError("The GigaAM sidecar result is not valid JSON.") from exc
     if not isinstance(payload, dict):
-        raise TranscriptionExecutionError("The GigaAM sidecar result is not a JSON object.")
+        raise TranscriptionResultError("The GigaAM sidecar result is not a JSON object.")
     if not isinstance(payload.get(sidecar_protocol.RESULT_KEY_TEXT), str):
-        raise TranscriptionExecutionError("The GigaAM sidecar result carries no recognised text.")
+        raise TranscriptionResultError("The GigaAM sidecar result carries no recognised text.")
     coverage = payload.get(sidecar_protocol.RESULT_KEY_COVERAGE)
     if not isinstance(coverage, dict):
-        raise TranscriptionExecutionError("The GigaAM sidecar result carries no chunk coverage.")
+        raise TranscriptionResultError("The GigaAM sidecar result carries no chunk coverage.")
     gap = coverage.get(sidecar_protocol.COVERAGE_KEY_GAP_S)
     double = coverage.get(sidecar_protocol.COVERAGE_KEY_DOUBLE_S)
     if not isinstance(gap, (int, float)) or not isinstance(double, (int, float)):
-        raise TranscriptionExecutionError("The GigaAM sidecar coverage report is malformed.")
+        raise TranscriptionResultError("The GigaAM sidecar coverage report is malformed.")
     if abs(float(gap)) > COVERAGE_TOLERANCE_S or abs(float(double)) > COVERAGE_TOLERANCE_S:
-        raise TranscriptionExecutionError(
+        raise TranscriptionResultError(
             "The GigaAM sidecar reported a chunk plan that does not cover the "
             f"recording ({float(gap):.6f}s uncovered, {float(double):.6f}s duplicated)."
         )
@@ -250,8 +323,11 @@ class GigaamSidecarProvider:
         Raises :class:`ProviderUnavailableError` when the sidecar runtime or its
         weights are not usable here (nothing is started in that case),
         :class:`ProviderConfigurationError` for an unsupported profile switch,
-        and :class:`TranscriptionExecutionError` for a runtime failure or
-        timeout. No message carries diary content or a path.
+        :class:`TranscriptionExecutionError` for a runtime failure or timeout, and
+        :class:`~diary.domain.transcription.errors.TranscriptionResultError` when
+        the worker exits successfully but its payload fails validation (a
+        deterministic refusal, see :func:`_parse_result`). No message carries
+        diary content or a path.
         """
         if not isinstance(profile, GigaamCtcLmProfile):
             raise TranscriptionProviderError(
@@ -296,9 +372,7 @@ class GigaamSidecarProvider:
         payload = _parse_result(run.stdout)
         text = payload[sidecar_protocol.RESULT_KEY_TEXT]
         if not isinstance(text, str):  # pragma: no cover - guarded by _parse_result
-            raise TranscriptionExecutionError(
-                "The GigaAM sidecar result carries no recognised text."
-            )
+            raise TranscriptionResultError("The GigaAM sidecar result carries no recognised text.")
         return text
 
     def unload(self) -> None:
@@ -311,19 +385,30 @@ class GigaamSidecarProvider:
         comes back only when the process ends). The termination path exists so
         ``asr.run``'s contract ("whatever was loaded is released before the slot
         is free", ADR-010) holds even when the worker outlives its result.
+
+        The escalation is written out rather than nested: a ``terminate()`` that
+        raises is **not** evidence the process is gone (``ProcessLookupError``
+        only says the pid was not there at that instant), so it goes on to
+        ``kill()`` — a single refused signal must not silently leave a sidecar
+        holding the RAM of the contour (measured peak ``VmHWM`` **4553.2 MiB**,
+        ``docs/stt-backends-analysis.md`` §9). Every step is wrapped, so the
+        method stays total.
         """
         process, self._process = self._process, None
         if process is None or process.returncode is not None:
             return
-        try:
-            process.terminate()
+        if not _send_signal(process.terminate):
+            _send_signal(process.kill)
+        else:
             try:
                 process.wait(timeout=_TERMINATE_GRACE_S)
+                return
             except Exception:
-                process.kill()
-                process.wait(timeout=_TERMINATE_GRACE_S)
-        except Exception:
-            return
+                # Still alive after the grace period: kill and reap, both
+                # best-effort — ``unload`` never raises.
+                _send_signal(process.kill)
+        with contextlib.suppress(Exception):
+            process.wait(timeout=_TERMINATE_GRACE_S)
 
     def _effective_settings(self) -> AppSettings:
         """The settings to resolve the runtime from (injected or current)."""
@@ -361,16 +446,29 @@ class GigaamSidecarProvider:
         return argv
 
     def _child_env(self) -> dict[str, str]:
-        """The child's environment: this process' own, plus the offline pin.
+        """The child's environment: an allow-list plus the pins the adapter owns.
 
-        ``HF_HUB_OFFLINE=1`` is set unconditionally: the application never
-        downloads model weights inside a transcription request. A cache miss
-        then fails immediately and is reported as an unavailable runtime, which
-        is the honest answer — provisioning is T45's explicit step, not a side
-        effect of pressing «Расшифровать».
+        Three groups, and nothing else (``_ENV_ALLOW_LIST`` carries the reasons):
+
+        * the allow-listed variables this process actually has — a locale, a home,
+          a ``PATH``, a scratch directory, the GPU selection, a library path;
+        * ``HF_HOME``, set to :attr:`~diary.core.settings.AppSettings.gigaam_model_dir`
+          — the provisioned cache. It is set **here** rather than inherited, so the
+          weights a transcription reads are the ones ``scripts/fetch-gigaam-model.sh``
+          placed there; the worker derives its ``--cache-dir`` (``$HF_HOME/hub``)
+          from the same value, so there is one source of truth on both sides;
+        * ``HF_HUB_OFFLINE=1``, unconditionally: the application never downloads
+          model weights inside a transcription request. A cache miss then fails
+          immediately and is reported as an unavailable runtime, which is the
+          honest answer — provisioning is an explicit step
+          (``scripts/fetch-gigaam-model.sh``), not a side effect of pressing
+          «Расшифровать».
         """
-        env = dict(os.environ)
+        settings = self._effective_settings()
+        env = {name: os.environ[name] for name in _ENV_ALLOW_LIST if name in os.environ}
         env[_OFFLINE_ENV] = "1"
+        env[_TELEMETRY_ENV] = "1"
+        env["HF_HOME"] = str(settings.gigaam_model_dir)
         return env
 
     def _resolve_runtime(self) -> tuple[Path, Path]:

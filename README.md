@@ -79,7 +79,7 @@ ln -sf /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so.13 \
 ## Конфигурация
 
 - **Окружение** — `.env` (git-ignored), переменные с префиксом `APP_*`. Все параметры описаны в `.env.example`: таймзона, лимиты сообщений/аудио, политика очереди (retry/backoff/stale), размеры чанков нормализации и саммаризации, `APP_WELLBEING_ENABLED`, пути каталогов данных, `APP_TEMP_RETENTION_S`.
-- **Модели** — `configs/models.yaml` (git-ignored; пример `configs/models.example.yaml`, путь переопределяется `MODELS_CONFIG`). Четыре **обязательных** профиля MVP: `transcription` (`faster_whisper`) и `normalization`/`summarization`/`wellbeing_analysis` (`openai_compatible` с `base_url`, `model`, `timeout_s`, `temperature`, `max_tokens`, `external`). Четыре **опциональных** профиля фазы 2 (T02, T13b): `diary_stt`, `diary_sum`, `diary_week`, `diary_coach` — локальный Ollama (теги `diary-stt`/`diary-sum`/`diary-coach`, у недельного слоя — CPU-близнец `diary-sum-cpu`); отсутствие профиля означает «слой отключён», а не ошибку загрузки (`docs/tasklist-phase2.md` §9.8; подробности — `configs/README.md`).
+- **Модели** — `configs/models.yaml` (git-ignored; пример `configs/models.example.yaml`, путь переопределяется `MODELS_CONFIG`). Четыре **обязательных** профиля MVP: `transcription` (локальный STT — `faster_whisper` либо `gigaam2_ctc_lm`; бэкенд выбирает поле `provider:` внутри профиля, см. ниже и `configs/README.md`) и `normalization`/`summarization`/`wellbeing_analysis` (`openai_compatible` с `base_url`, `model`, `timeout_s`, `temperature`, `max_tokens`, `external`). Четыре **опциональных** профиля фазы 2 (T02, T13b): `diary_stt`, `diary_sum`, `diary_week`, `diary_coach` — локальный Ollama (теги `diary-stt`/`diary-sum`/`diary-coach`, у недельного слоя — CPU-близнец `diary-sum-cpu`); отсутствие профиля означает «слой отключён», а не ошибку загрузки (`docs/tasklist-phase2.md` §9.8; подробности — `configs/README.md`).
 - **Секреты** — только переменные окружения, на которые профиль ссылается по имени (`api_key_env`). Значения ключей не хранятся и не логируются; внешние эндпоинты получают содержимое только при `external: true` и явном согласии в UI (страница `/privacy` показывает локальность каждой задачи).
 - Смена настроек требует перезапуска процессов (settings кэшируются при старте).
 
@@ -104,6 +104,39 @@ ln -sf /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so.13 \
 ```
 
 В `configs/models.yaml` профиль `transcription` по умолчанию: `device: cpu`, `compute_type: int8`, `language: ru` (см. `configs/models.example.yaml`). Кнопка «Расшифровать» у аудио-сообщения ставит задачу воркеру; модель скачивается в локальный кэш при первом использовании. Если extra не установлен — понятная ошибка, аудио не теряется. GPU/CUDA — опционально (`docs/wsl2-deployment-brief.md`): в GPU-режиме действует правило серийности STT и LLM. Точка входа для него — `asr.run()` (`src/diary/domain/transcription/asr.py`): она перед распознаванием выгружает LLM и после — Whisper. **Кнопка «Расшифровать» идёт через неё же (T11, ADR-010):** джоба `transcribe_audio` выполняется как `asr.run(..., unload_llm=…)`, а `unload_llm` — инъекция из `diary/domain/llm/unload.py` (для локального Ollama это `keep_alive: 0`, то есть `ollama stop <tag>`, по всем локальным профилям конфигурации). Поэтому `OLLAMA_KEEP_ALIVE=0` перестал быть условием veto; замеры и рекомендация по рантайму — в `docs/decisions/ADR-010-manual-stt-through-the-shared-gpu-slot.md`.
+
+## Второй STT-бэкенд: GigaAM-v2 CTC+LM (опционально)
+
+Распознавать можно не только `faster-whisper`: второй бэкенд — **GigaAM-v2 CTC+LM** — выбирается полем
+`provider` внутри того же профиля `transcription` (`faster_whisper` либо `gigaam2_ctc_lm`; форма профиля и
+оба блока целиком — `configs/README.md`, решение — `ADR-017`). Рантайм второго бэкенда в venv приложения
+**не ставится**: он живёт в отдельном venv вне репозитория и запускается как сайдкар-процесс
+(`scripts/gigaam-stt-worker.py`, адаптер — `src/diary/domain/transcription/gigaam.py`). Так решено по
+замерам: `unload()` возвращает VRAM, но не RAM, а обёртка чекпойнта исполняется локально через
+`trust_remote_code` — процесс изолирует и то, и другое (`docs/stt-backends-analysis.md` §10).
+
+Провижининг — две явные команды, **в этом порядке**: скрипт весов запускает загрузку интерпретатором сайдкара
+(тот самый `snapshot_download` библиотеки `huggingface_hub`, которой сайдкар и читает кэш), поэтому venv
+должен уже существовать. Ни приложение, ни задача расшифровки ничего не скачивают и не устанавливают:
+
+```bash
+scripts/setup-gigaam-venv.sh        # venv сайдкара вне репозитория: пины версий, ~6.5 GB на диске
+scripts/fetch-gigaam-model.sh       # веса закреплённой ревизии в data/models/gigaam (2.64 GB) + sha256
+```
+
+Оба скрипта идемпотентны и имеют режим `--check` (без сети, только сверка пинов). После сборки приложению
+указывается интерпретатор — `APP_GIGAAM_PYTHON=~/.local/share/mydiary/gigaam/venv/bin/python` (каталог весов
+переопределяется `APP_GIGAAM_MODEL_DIR`; обе переменные описаны в `.env.example`).
+
+Что важно знать (подробности — `docs/wsl2-deployment-brief.md`, `docs/known-limitations.md`,
+`docs/privacy-and-safety.md`): сборка `kenlm` требует системного тулчейна `cmake`/`g++`/`make`; веса лежат вне
+репозитория, сайдкар стартует с `HF_HUB_OFFLINE=1` и читает **только** каталог `APP_GIGAAM_MODEL_DIR`, а не
+`~/.cache/huggingface`; при отсутствии рантайма или весов задача падает понятной ошибкой с подсказкой про оба
+скрипта, а не подменой бэкенда на Whisper (автофолбэка нет). Веса и аудио в Git не попадают; распознавание
+идёт локально и в сеть не ходит. Числа обоих бэкендов (VRAM, латентность, RAM) здесь не перепечатываются —
+их источник `docs/stt-backends-analysis.md` (§1, §6.5, §9, §10). Переключение живого `configs/models.yaml` и
+сквозной смоук обоих бэкендов — задача T46; выше описан провижининг и выбор бэкенда, а не проверенное живьём
+переключение.
 
 ## NLI-валидация сводок (опциональный инструмент)
 
